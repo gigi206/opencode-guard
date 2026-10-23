@@ -1,0 +1,19 @@
+{
+  "name": "opencode-guard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenCode V2 plugin: blocks or asks for confirmation before dangerous agent actions (local rules + a System One decision model) and redacts secrets sent to the LLM",
+  "type": "module",
+  "author": "Ghislain LE MEUR",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "test:bun": "BUN_BE_BUN=1 opencode test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode/plugin": "2.0.29",
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

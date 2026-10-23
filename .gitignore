@@ -1,0 +1,9 @@
+# Local development material (bench, backups, plans, tools): never versioned.
+dev/
+node_modules/
+
+# Test benches and local models (several GB): never versioned.
+.vela-test/
+
+# Local tool settings, specific to the machine.
+.claude/settings.local.json
