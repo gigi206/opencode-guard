@@ -1949,10 +1949,10 @@ const OPENCODE_GLOBAL_FLAGS = flagTable(OPENCODE_GLOBAL)
 const OPENCODE_ROOT_FLAGS = flagTable(`${OPENCODE_GLOBAL} standalone server= auto yolo dangerously-skip-permissions continue c session= s= prompt=`)
 const OPENCODE_API_FLAGS = flagTable(`${OPENCODE_GLOBAL} standalone server= data= d= header= H= param=`)
 
-/** Root subcommands, with the words of those that have several levels. */
+/** Root subcommands, with the words of those that have several levels (`debug heap-dump`: OpenCode 2.1.4). */
 const OPENCODE_COMMANDS = new Map<string, readonly string[]>([
   ..."upgrade update uninstall acp api models stats mini run reload pair serve".split(" ").map((name) => [name, []] as const),
-  ["debug", ["agents", "config", "paths"]],
+  ["debug", ["agents", "config", "heap-dump", "paths"]],
   ["auth", ["list", "login", "logout", "export", "import", "switch"]],
   ["mcp", ["list", "add", "auth", "logout"]],
   ["plugin", ["list", "add", "check", "update", "remove"]],
@@ -1961,12 +1961,13 @@ const OPENCODE_COMMANDS = new Map<string, readonly string[]>([
 ])
 
 /** Findings of a call (`printed`: output that prints a secret); `OPENCODE_KINDS`: without examining arguments. */
-type OpencodeKind = "nested" | "service-change" | "service-secret" | "credentials" | "printed" | "api" | "config" | "unchecked" | "long"
+type OpencodeKind = "nested" | "service-change" | "service-secret" | "credentials" | "printed" | "heap-dump" | "api" | "config" | "unchecked" | "long"
 const OPENCODE_KINDS = new Map<string, readonly OpencodeKind[]>([
   ...["run", "serve", "acp"].map((name) => [name, ["nested"]] as const),
   ...["uninstall", "service set", "service unset", "service stop", "service restart"].map((name) => [name, ["service-change"]] as const),
   ["pair", ["service-secret"]],
   ["auth export", ["credentials", "printed"]],
+  ["debug heap-dump", ["heap-dump"]],
   ...["plugin add", "plugin remove", "mcp add"].map((name) => [name, ["config"]] as const),
 ])
 
@@ -2108,8 +2109,10 @@ function tailWords(tail: string): string[] {
 
 /**
  * Subcommand path (`service get`) and the words that follow it. Unknown option or word that is not ordinary, before or
- * between the words of a subcommand: `unchecked`. Literal word that is not a subcommand, or double dash at those
- * places (`effect/cli` cuts argv at the first one and no longer chooses a subcommand after it): no words.
+ * between the words of a subcommand, or literal word unknown where a group expects one of its subcommands (newer
+ * OpenCode version): `unchecked`. First literal word that is not a subcommand (the root's directory operand), or
+ * double dash at those places (`effect/cli` cuts argv at the first one and no longer chooses a subcommand after it): no
+ * words.
  */
 function readOpencodeCall(tokens: readonly string[]): { words: string[]; rest: readonly string[]; unchecked: boolean } {
   const words: string[] = []
@@ -2126,7 +2129,8 @@ function readOpencodeCall(tokens: readonly string[]): { words: string[]; rest: r
       continue
     }
     const children = words.length ? OPENCODE_COMMANDS.get(words[0]!)! : undefined
-    if (children ? !children.includes(text) : !OPENCODE_COMMANDS.has(text)) return { words: [], rest: [], unchecked: false }
+    if (children && !children.includes(text)) return { words, rest: [], unchecked: true }
+    if (!children && !OPENCODE_COMMANDS.has(text)) return { words: [], rest: [], unchecked: false }
     words.push(text)
     if (children || OPENCODE_COMMANDS.get(text)!.length === 0) return { words, rest: tokens.slice(i + 1), unchecked: false }
   }
@@ -2267,6 +2271,7 @@ const OPENCODE_ASK_RULES: readonly RegexRule[] = (
     ["opencode-service", "service-change", "change to the OpenCode service (environment, restart) or uninstall: can disable the guard"],
     ["opencode-service", "service-secret", `display of the OpenCode service password, environment or settings, or pairing (access to the server): ${CONFIRMED_OUTPUT_REDACTION}`],
     ["opencode-server-api", "credentials", `export of the OpenCode credentials (auth export, or the credential list of the server API): ${CONFIRMED_OUTPUT_REDACTION}`],
+    ["opencode-server-api", "heap-dump", "copy of the OpenCode server memory written to a file (debug heap-dump): it can contain the OpenCode credentials, the service password and other secrets"],
     ["opencode-server-api", "api", "call to the OpenCode server API other than a known read (write, sensitive read, unknown operation): it can bypass the guard"],
     ["nested-opencode", "nested", "launches another OpenCode agent or server, or changes its configuration: it may run without the guard or approve its confirmations (--auto)"],
     ["nested-opencode", "long", "OpenCode command line longer than the plugin checks (1024 characters after the program name): it cannot be checked"],
@@ -2346,6 +2351,14 @@ const ASK_RULES: readonly RegexRule[] = [
     verdict: "ask",
     reason: "forced process kill",
     test: (command) => /(?:^|[\s;&|(`])kill\s+(?:-9|-KILL|-SIGKILL)\b/.test(command) || word("pkill|killall").test(command),
+  },
+  {
+    // Signal that makes an OpenCode server write a heap snapshot (`cli/src/heap.ts`, 2.1.3 and later), by name or number
+    // (Linux), in any case like bash; `pkill` and `killall` already ask. Options before it skipped, except `--`.
+    id: "kill",
+    verdict: "ask",
+    reason: "signal USR1 sent to a process: an OpenCode server then writes a copy of its memory to a file, which can contain the OpenCode credentials, the service password and other secrets",
+    test: re(/(?:^|[\s;&|(`/])kill\s+(?:-(?!-\s)\S+\s+)*?-(?:-signal[\s=]+|[sn]\s*)?(?:sig)?(?:usr1|10)(?![\w-])/i),
   },
   {
     id: "power",

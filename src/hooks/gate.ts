@@ -3,7 +3,7 @@ import { afterLeadingCd, changesDirectory, heredocFiles, scriptRuns, shellFindin
 import { createCredentialContent } from "../credential-content.ts"
 import { createRealPath } from "../real-path.ts"
 import { placeholderFinding } from "../rules/tools.ts"
-import { hiddenHeaders, patchTargets, readPatch } from "../patch.ts"
+import { hiddenHeaders, patchTargets, readPatch, type PatchSection } from "../patch.ts"
 import { createScriptTracker, isShellScript, resolveLike, shellDirectories, type ScriptTracker } from "../scripts.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { ActiveRules } from "../rules/features.ts"
@@ -221,8 +221,15 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
   }
 
   /**
-   * Tracked files the call will modify (edit, patch Update File) → their `judged` (false if they changed since or can no
-   * longer be read: the modification registers them again, tracked or unverifiable).
+   * Patch section that moves its file to another resolved path. `*** Move to:` the same resolved path is a modification:
+   * OpenCode 2.2.0 updates the file in place, 2.1.4 writes then deletes it (the modification then finds it missing).
+   */
+  const movesAway = (section: PatchSection) =>
+    section.type === "update" && section.moveTo !== undefined && resolveLike(directory, section.moveTo, deps.home) !== resolveLike(directory, section.path, deps.home)
+
+  /**
+   * Tracked files the call will modify (edit, patch Update File, moved to itself included) → their `judged` (false if
+   * they changed since or can no longer be read: the modification registers them again, tracked or unverifiable).
    */
   function trackedBefore(sessionID: string, tool: string, input: unknown): Map<string, boolean> {
     const previous = new Map<string, boolean>()
@@ -233,7 +240,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       tool === "edit" && typeof path === "string"
         ? [path]
         : reading?.accepted
-          ? reading.sections.flatMap((section) => (section.type === "update" && !section.moveTo ? [section.path] : []))
+          ? reading.sections.flatMap((section) => (section.type === "update" && !movesAway(section) ? [section.path] : []))
           : []
     for (const raw of paths) {
       const absolute = resolveLike(directory, raw, deps.home)
@@ -246,8 +253,9 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
   /**
    * Files created in full or modified by the completed call, rebuilt from the input (never rewritten by
    * redaction). Modification of a file that was not tracked (neither readable nor unverifiable), deletion or move:
-   * tracking stopped. Patch: sections from the exact read; text it rejects although OpenCode applied it (another
-   * version): files from the broad read that exist are marked unverifiable.
+   * tracking stopped. Patch: sections from the exact read, in order; a file added by an earlier section is tracked for
+   * the following ones; text it rejects although OpenCode applied it (another version): files from the broad read that
+   * exist are marked unverifiable.
    */
   function recordAfter(sessionID: string, tool: string, input: unknown, call: PendingCall) {
     const { path, content, newString, patchText } = args(input)
@@ -255,9 +263,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     const record = (absolute: string | undefined, check: Parameters<ScriptTracker["record"]>[2]) => {
       if (absolute && scripts.record(sessionID, absolute, check)) log.debug(`${tool}: file tracked (${absolute}${check.judged ? "" : ", local rules only"})`)
     }
-    const modified = (absolute: string | undefined, contains: readonly string[]) => {
+    /** `added`: files added by an earlier section of the same patch, modified without `judged` (see below). */
+    const modified = (absolute: string | undefined, contains: readonly string[], added?: ReadonlySet<string>) => {
       if (absolute === undefined) return
-      const before = call.previous.get(absolute)
+      const before = call.previous.get(absolute) ?? (added?.has(absolute) ? false : undefined)
       if (before === undefined) scripts.forget(sessionID, absolute)
       else record(absolute, { judged: before && call.judged, contains })
     }
@@ -271,16 +280,26 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
           const absolute = at(raw)
           if (absolute && scripts.distrust(sessionID, absolute)) log.debug(`patch: file unverifiable, patch text not read (${absolute})`)
         }
-      else
+      else {
+        // A later Update File applies to the added content in OpenCode 2.2.0, but to the content on disk in 2.1.4 (a file
+        // that existed, never shown to the model): tracked, `judged` not kept, until a deletion or move of either end.
+        // Tracking before the call takes precedence.
+        const added = new Set<string>()
         for (const section of reading.sections) {
           const absolute = at(section.path)
-          if (section.type === "add") record(absolute, { judged: call.judged, equals: section.content })
-          else if (section.type === "delete" || section.moveTo) {
-            if (absolute) scripts.forget(sessionID, absolute)
+          if (section.type === "add") {
+            record(absolute, { judged: call.judged, equals: section.content })
+            if (absolute) added.add(absolute)
+          } else if (section.type === "delete" || movesAway(section)) {
             const target = section.type === "update" && section.moveTo ? at(section.moveTo) : undefined
-            if (target) scripts.forget(sessionID, target)
-          } else modified(absolute, section.added.filter(Boolean))
+            for (const path of [absolute, target])
+              if (path) {
+                scripts.forget(sessionID, path)
+                added.delete(path)
+              }
+          } else modified(absolute, section.added.filter(Boolean), added)
         }
+      }
     }
     const shell = tool === "shell" ? shellCommand(input) : undefined
     if (shell)

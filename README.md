@@ -2,7 +2,7 @@
 
 OpenCode agents can run shell commands, edit files and send data over the network. A single bad command is enough to erase uncommitted work, rewrite your shell configuration, or leak an API key.
 
-**opencode-guard** is an **OpenCode V2** plugin (tested with `opencode v2.1.3`) that sits in front of those actions. It blocks or asks for confirmation before dangerous tool calls, and redacts secrets before they reach the model provider or the session history.
+**opencode-guard** is an **OpenCode V2** plugin (tested with `opencode v2.2.0`) that sits in front of those actions. It blocks or asks for confirmation before dangerous tool calls, and redacts secrets before they reach the model provider or the session history.
 
 > **This is not a sandbox.** It is a heuristic guardrail and can be bypassed (obfuscation, writing a script and running it later…). Use a container for real isolation.
 

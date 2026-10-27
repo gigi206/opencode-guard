@@ -17,9 +17,10 @@ const SECRET_BASENAMES = new Set([
 ])
 
 // `.p8`: PKCS#8 keys (Apple, signing) — also PICO-8 cartridges (read → ask); `.ppk`: PuTTY; `.pk8`:
-// Android signing; `.keytab`: Kerberos; `.kdbx`/`.kdb`: KeePass databases. Not `.asc`/`.crt`/`.cer`/`.gpg` (mostly
-// public or encrypted; a private PGP key block is redacted by its content).
-const SECRET_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".p8", ".ppk", ".pk8", ".keytab", ".kdbx", ".kdb"]
+// Android signing; `.keytab`: Kerberos; `.kdbx`/`.kdb`: KeePass databases; `.heapsnapshot`: V8 heap snapshots (OpenCode
+// `debug heap-dump`, Node), a copy of the process memory with the secrets it holds. Not `.asc`/`.crt`/`.cer`/`.gpg`
+// (mostly public or encrypted; a private PGP key block is redacted by its content).
+const SECRET_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".p8", ".ppk", ".pk8", ".keytab", ".kdbx", ".kdb", ".heapsnapshot"]
 
 // Files without a trailing `/` (their `….bak` copies remain targeted), directories with one (a neighboring directory with an extended
 // name, `oauth-backup/`, is not). Default locations, whatever the HOME.

@@ -51,10 +51,10 @@ echo "OPENAI_API_KEY=sk-proj-$(head -c 40 /dev/urandom | base64 | tr -dc A-Za-z0
 
 - **Not redacted:**
   - GitHub Copilot's internal "utility" title request, which bypasses the hooks;
-  - `Generate.text`, which has no hook;
+  - OpenCode's direct generation (`Generate.text`, and in OpenCode 2.2 the text, image and decision generation of the server API), which has no hook and sends only what its caller provides;
   - images and PDFs;
   - encrypted contents and signed reasoning blocks;
-  - voice calls: what a client sends to start a voice call or to change its instructions is relayed by the OpenCode server to the voice provider, outside the hooks;
+  - voice calls: what a client sends to start a voice call or, in OpenCode 2.1, to change its instructions is relayed by the OpenCode server to the voice provider, outside the hooks;
   - raw files under OpenCode's `tool-output` data directory (full outputs of truncated tool results, shell command output files, binary contents returned by MCP tools), which are not sent unless read again.
 - **Model-generated tool arguments** are redacted on the wire but stored as-is in the local history.
 - **False positives:**
