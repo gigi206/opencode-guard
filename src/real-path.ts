@@ -4,6 +4,7 @@
 // its target). The rules stay pure: they receive the predicate built here, per tool call.
 import { lstatSync, readlinkSync } from "node:fs"
 import { posix } from "node:path"
+import { LIMIT_REACHED } from "./rules/types.ts"
 
 /** Lookups (`lstat`) per tool call. */
 export const MAX_LOOKUPS = 512
@@ -71,18 +72,19 @@ function processCwd(): string | undefined {
 /**
  * Predicate for a tool call: possible real paths of a non-normalized absolute path (several if `/proc/self/cwd`
  * points to the call directories and the server one). Missing or unreadable component: the rest, to be created, is resolved lexically.
- * `undefined`: unknown (limits, link loop, open descriptor of a process); the caller then keeps only the
+ * `LIMIT_REACHED`: limit reached (lookups, followed links, including a loop, or path length); the caller asks.
+ * `undefined`: unknown (unreadable link, open descriptor of a process, relative path); the caller then keeps only the
  * lexical comparison. Results memoized.
  */
-export function createRealPath(options: RealPathOptions = {}): (absolute: string) => readonly string[] | undefined {
+export function createRealPath(options: RealPathOptions = {}): (absolute: string) => readonly string[] | undefined | typeof LIMIT_REACHED {
   const io = options.io ?? nodeIo
   const own = options.processDirectory ?? processCwd()
   const candidates = [...(options.directories ?? []), ...(own ? [own] : [])]
-  const seen = new Map<string, readonly string[] | undefined>()
+  const seen = new Map<string, readonly string[] | undefined | typeof LIMIT_REACHED>()
   let lookups = 0
 
   /** Walk of `parts` (reverse order) from `current`, real path without links (`""`: root). */
-  function walk(current: string, parts: string[], links: number): string[] | undefined {
+  function walk(current: string, parts: string[], links: number): string[] | undefined | typeof LIMIT_REACHED {
     while (parts.length > 0) {
       const part = parts.pop()!
       if (part === "" || part === ".") continue
@@ -103,13 +105,13 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
         const results: string[] = []
         for (const directory of candidates) {
           const branch = walk("", [...parts, ...reversed(directory)], links)
-          if (!branch) return undefined
+          if (!Array.isArray(branch)) return branch
           results.push(...branch)
         }
         return results
       }
       const next = `${current}/${part}`
-      if (lookups >= MAX_LOOKUPS) return undefined
+      if (lookups >= MAX_LOOKUPS) return LIMIT_REACHED
       lookups++
       let link: boolean
       try {
@@ -122,7 +124,7 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
         current = next
         continue
       }
-      if (++links > MAX_LINKS) return undefined
+      if (++links > MAX_LINKS) return LIMIT_REACHED
       let target: string
       try {
         target = io.readlink(next)
@@ -137,7 +139,7 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
 
   return (absolute) => {
     if (seen.has(absolute)) return seen.get(absolute)
-    const found = absolute.startsWith("/") && absolute.length <= PATH_MAX ? walk("", reversed(absolute), 0) : undefined
+    const found = !absolute.startsWith("/") ? undefined : absolute.length > PATH_MAX ? LIMIT_REACHED : walk("", reversed(absolute), 0)
     seen.set(absolute, found)
     return found
   }

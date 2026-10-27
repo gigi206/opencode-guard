@@ -26,6 +26,12 @@ export interface CustomRule {
 /** Rule for findings born from an internal error: outside the built-in rule registry, never disabled by options. */
 export const INTERNAL_ERROR_RULE = "internal-error"
 
+/**
+ * Answer of a budgeted predicate (`real-path.ts`, `credential-content.ts`) whose check reached a limit: distinct from
+ * "unknown" and "not recognized", it gives an ask, never a deny (nothing was checked to the end).
+ */
+export const LIMIT_REACHED: unique symbol = Symbol("limit reached")
+
 export function mostSevere(findings: ReadonlyArray<Finding | undefined>): Finding | undefined {
   let best: Finding | undefined
   for (const finding of findings) {

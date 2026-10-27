@@ -8,6 +8,7 @@ import { parseConfig } from "../src/config.ts"
 import { createCredentialContent, hasPrivateKeyHeader, MAX_LOOKUPS, MAX_OPENED, type ContentIo } from "../src/credential-content.ts"
 import { createDecider } from "../src/decide.ts"
 import { isCredentialFile } from "../src/rules/sensitive-paths.ts"
+import { LIMIT_REACHED } from "../src/rules/types.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -82,8 +83,10 @@ describe("batch 23: private keys recognized by their content", () => {
   it("tokens ignored without lookup: variables, globs, URL, /dev, /proc, /sys", () => {
     const { io, calls } = spyIo({})
     const content = createCredentialContent({ directories: ["/w"], home: "/home/u", io })
-    for (const token of ["$KEY", "k*", "k?", "{a,b}", "https://exemple.invalid/k", "~other/k", "/dev/sda", "/proc/self/environ", "/sys/x", "x".repeat(1025)])
+    for (const token of ["$KEY", "k*", "k?", "{a,b}", "https://exemple.invalid/k", "~other/k", "/dev/sda", "/proc/self/environ", "/sys/x"])
       assert.equal(content(token), false, token)
+    // Literal token too long to be checked: limit (ask), still without lookup.
+    assert.equal(content("x".repeat(1025)), LIMIT_REACHED)
     assert.equal(calls.stat, 0)
   })
 

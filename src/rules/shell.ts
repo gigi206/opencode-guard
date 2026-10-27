@@ -2,8 +2,8 @@ import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes, NETWORK_FUNCTION } from "./code-network.ts"
 import { ruleEnabled, type ActiveRules } from "./features.ts"
-import { isCredentialFile, pathTokens, protectedWriteKind, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
-import { mostSevere, type CustomRule, type Finding } from "./types.ts"
+import { credentialFile, isCredentialFile, pathTokens, protectedWriteKind, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WriteKind, type WritePathContext } from "./sensitive-paths.ts"
+import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
 
 export interface ShellRuleContext extends WritePathContext, CredentialContext {
   readonly redactor: Redactor
@@ -11,6 +11,8 @@ export interface ShellRuleContext extends WritePathContext, CredentialContext {
   readonly custom?: readonly CustomRule[]
   /** `dangerousCommands` / `sensitiveFiles` switches: a disabled rule is not evaluated; absent = all. */
   readonly active?: ActiveRules
+  /** Content of an executed script (`scriptFinding`): the placeholder rule (write) does not apply to an execution. */
+  readonly executedScript?: boolean
 }
 
 /**
@@ -53,13 +55,14 @@ const COMMAND_PATH = "(?:[^\\s;&|()`{}]*/)?"
  * `sh -c "…"` or `find -exec`; possibly behind a wrapper (sudo, timeout, xargs…) and at most
  * 8 arguments (bound: otherwise quadratic cost on a booby-trapped command; beyond it, a plain ask), with a
  * path (`/usr/bin/curl`), a bypassed alias (`\curl`) or zsh's `=curl` (command path); never
- * after an identifier (`PAGER=less` is not run). `after`: tail required after the name. `lineBlanks`: the blanks
- * after the opener do not absorb the newline, which is itself an opener (same result; without it, each newline in a
- * long tail rescans it, quadratic cost).
+ * after an identifier (`PAGER=less` is not run). `after`: tail required after the name. The blanks after the
+ * opener do not absorb the newline, which is itself an opener (same result; otherwise each newline in a long tail
+ * rescans it, quadratic cost); those of `find -exec`, a single repetition (two in a row try every split of a long
+ * run of spaces, quadratic cost; same result).
  */
-const commandRegex = (names: string, after = "(?=\\s|$|[;&|)])", lineBlanks = false) =>
+const commandRegex = (names: string, after = "(?=\\s|$|[;&|)])") =>
   new RegExp(
-    `(?:^|[;&|(\`\\n{]|-[a-zA-Z]*c\\s+["']|-(?:exec|execdir|ok|okdir)\\s+)${lineBlanks ? "[^\\S\\n]*" : "\\s*"}` +
+    `(?:(?:^|[;&|(\`\\n{]|-[a-zA-Z]*c\\s+["'])[^\\S\\n]*|-(?:exec|execdir|ok|okdir)\\s+)` +
       `(?:[\\\\=]?${COMMAND_PATH}(?:${WRAPPERS})(?:\\s+[^\\s;&|]+){0,8}?\\s+)?` +
       `[\\\\=]?${COMMAND_PATH}(?:${names})${after}`,
   )
@@ -85,9 +88,13 @@ const PLACEHOLDER_REASON =
 const PLACEHOLDER_ENCODED_REASON =
   "the command contains a redacted secret encoded in base64 (a [[GUARD_REDACTED:…]] placeholder once decoded): writing it would destroy the real secret. Make a targeted edit that does not include it"
 
+/** Shell separators; `SHELL_SEPARATORS`: not inside a redirection operator (`2>&1`, `&>`, `<&`, `>|`), like the shell. */
+const SEPARATORS = /\|\||&&|;|\||&|\n/
+const SHELL_SEPARATORS = /\|\||&&|;|(?<!>)\||(?<![<>])&(?!>)|\n/
+
 /** Simple segments: shell separators + contents of `$(…)` and backticks. */
-export function segments(command: string): string[] {
-  const parts = command.split(/\|\||&&|;|\||&|\n/)
+export function segments(command: string, separators = SEPARATORS): string[] {
+  const parts = command.split(separators)
   for (const match of command.matchAll(/[$<>]\(([^()]*)\)|`([^`]*)`/g)) parts.push(match[1] ?? match[2] ?? "")
   return parts.map((part) => part.trim()).filter(Boolean)
 }
@@ -291,7 +298,7 @@ const commandName = (token: string) => commandToken(token).split("/").pop() ?? "
  * wrappers with their options (`sudo -E -u bob cmd`, `timeout -s KILL 5 cmd`). `path`: the command as
  * launched (`./build.sh`, `/usr/bin/python3`).
  */
-export function commandOf(segment: string): { name: string; args: string[]; path: string } {
+function commandOf(segment: string): { name: string; args: string[]; path: string } {
   const tokens = segment.split(/\s+/).filter(Boolean).map(unquote)
   let i = 0
   let wrapper: string | undefined
@@ -413,7 +420,7 @@ function isSecretName(name: string): boolean {
 }
 
 /** `$NAME` / `${NAME}` references to a variable with a secret name (not `$PWD` or `$SSH_AUTH_SOCK`). */
-export function secretVariables(command: string): string[] {
+function secretVariables(command: string): string[] {
   const names: string[] = []
   for (const match of command.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)/g)) {
     const name = match[1] ?? ""
@@ -433,6 +440,49 @@ function identityFiles(command: string): string[] {
   for (const match of command.matchAll(/\bIdentityFile\s*[=\s]\s*["']?([^\s"';&|]+)/gi)) keys.push(match[1] ?? "")
   return keys
 }
+
+/**
+ * Credential file among the command's words (`credentialFile`): true at the first recognized one (walk stopped there,
+ * as before: same content lookups), `LIMIT_REACHED` if a word could not be checked, false otherwise.
+ */
+function credentialTokens(command: string, ctx: CredentialContext): boolean | typeof LIMIT_REACHED {
+  let unchecked = false
+  for (const token of pathTokens(command)) {
+    const found = credentialFile(token, ctx)
+    if (found === true) return true
+    if (found === LIMIT_REACHED) unchecked = true
+  }
+  return unchecked ? LIMIT_REACHED : false
+}
+
+/**
+ * Reading shared by two `ASK_RULES` rules evaluated in this order during the same evaluation: the first does it and
+ * notes it (`note`), the second rereads it once for the same command and the same context, otherwise redoes it
+ * (`reread`). The ask for a check interrupted by a limit thus costs neither an extra call of the budgeted predicates
+ * nor a second walk of the command.
+ */
+function sharedReading<T>(read: (command: string, ctx: ShellRuleContext) => T) {
+  let last: { readonly command: string; readonly ctx: ShellRuleContext; readonly value: T } | undefined
+  return {
+    note(command: string, ctx: ShellRuleContext): T {
+      const value = read(command, ctx)
+      last = { command, ctx, value }
+      return value
+    },
+    reread(command: string, ctx: ShellRuleContext): T {
+      const noted = last
+      last = undefined
+      return noted?.command === command && noted.ctx === ctx ? noted.value : read(command, ctx)
+    },
+  }
+}
+
+/** Credential files: noted by `secret-file-read`, reread by the ask for content not checked that follows it. */
+const CREDENTIAL_TOKENS = sharedReading(credentialTokens)
+/** Kinds of the targets: noted by `self-protection`, reread by the ask for an unchecked real path. */
+const PROTECTED_TARGETS = sharedReading(protectedTargets)
+/** awk programs: noted by `awk-dynamic-exec`, reread by the ask for a quoted string not read that follows it. */
+const AWK_PROGRAMS = sharedReading(awkDynamicExec)
 
 /** Credential files sent by a command (excluding ssh authentication keys). */
 function sentSecretFiles(command: string, ctx: CredentialContext): string[] {
@@ -504,16 +554,47 @@ const EXECUTORS: ReadonlyArray<{
 
 const STDIN_PATH = /^\/(?:dev\/stdin|dev\/fd\/0|proc\/self\/fd\/0)$/
 
+/**
+ * Words taken as values by an option of `executor`: one for its value options (`value`); read like the shell
+ * (`grouped`), one per `o` or `O` of a group of a shell's short options (`-eo pipefail`, `-oo a b`: bash and dash).
+ */
+function optionValues(executor: (typeof EXECUTORS)[number], arg: string, grouped: boolean): number {
+  if (grouped && executor === EXECUTORS[0] && /^[-+][a-zA-Z]+$/.test(arg)) return arg.replace(/[^oO]/g, "").length
+  return executor.value?.test(arg) ? 1 : 0
+}
+
+/** A shell's group of short options that takes a value (`-eo pipefail`): its options are also read like the shell. */
+const groupedValue = (executor: (typeof EXECUTORS)[number], args: readonly string[]) =>
+  executor === EXECUTORS[0] && args.some((arg) => arg.length > 2 && /^[-+][a-zA-Z]*[oO][a-zA-Z]*$/.test(arg))
+
 /** Code passed as an argument that evaluates standard input (explicit evaluation + reading stdin). */
 const EVALUATES = /\b(?:exec|eval|compile)\s*\(|\$\(\s*cat\b/
 const READS_STDIN = /stdin|readFileSync\(\s*0\b|\$\(\s*cat\b|\/dev\/fd\/0/
 const evaluatesStdin = (stage: string) => EVALUATES.test(stage) && READS_STDIN.test(stage)
 
-/** Pipeline stage that executes what it receives: shell without `-c` (or with `-s`/`-`), interpreter without code or script. */
+/**
+ * Pipeline stage that executes what it receives: shell without `-c` (or with `-s`/`-`), interpreter without code or script.
+ * Read by `commandOf`, then with the redirections set aside (`launchedCommand`, if `readsLaunched`): either reading
+ * counts (strict side).
+ */
 function executesStdin(stage: string, codeRunsStdin: () => boolean): boolean {
-  const { name, args } = commandOf(stage)
+  const previous = commandOf(stage)
+  return (
+    executesInput(previous, codeRunsStdin) ||
+    (readsLaunched(stage, previous, readsOperands(previous.name)) && executesInput(launchedCommand(stage), codeRunsStdin))
+  )
+}
+
+/**
+ * `executesStdin` for one reading of the stage. A shell's options are also read like the shell (`groupedValue`,
+ * `grouped`): either reading counts (strict side). `grouped` given: that reading only, as written (false) or like the
+ * shell (true).
+ */
+function executesInput({ name, args }: { name: string; args: readonly string[] }, codeRunsStdin: () => boolean, grouped?: boolean): boolean {
   const executor = EXECUTORS.find((candidate) => candidate.name.test(name))
   if (!executor) return false
+  if (grouped === undefined)
+    return executesInput({ name, args }, codeRunsStdin, false) || (groupedValue(executor, args) && executesInput({ name, args }, codeRunsStdin, true))
   let stdin = false
   const bare = executor.bare ?? true
   const start = executor.subcommand && args[0] !== undefined && executor.subcommand.test(args[0]) ? 1 : 0
@@ -532,7 +613,7 @@ function executesStdin(stage: string, codeRunsStdin: () => boolean): boolean {
       // (searched in the whole command: pipeline splitting cuts the code at its `;`).
       if (executor.code.test(arg)) return codeRunsStdin()
       if (executor.stdin?.test(arg)) stdin = true
-      if (executor.value?.test(arg)) i++
+      i += optionValues(executor, arg, grouped)
       continue
     }
     // Script file (or arguments of `bash -s`).
@@ -541,25 +622,56 @@ function executesStdin(stage: string, codeRunsStdin: () => boolean): boolean {
   return stdin || bare
 }
 
-/** Stage that downloads: downloader launched, or `curl`/`wget` cited in the stage (`$(curl …`, `bash -c "curl …`). */
-const downloads = (stage: string) => DOWNLOADERS.has(commandOf(stage).name) || /(?<![\w.-])(?:curl|wget)(?![\w.-])/.test(stage)
+/**
+ * Stage that downloads: downloader launched (read by `commandOf`, or with the redirections set aside if `readsLaunched`),
+ * or `curl`/`wget` cited in the stage (`$(curl …`, `bash -c "curl …`).
+ */
+function downloads(stage: string): boolean {
+  const previous = commandOf(stage)
+  return (
+    DOWNLOADERS.has(previous.name) ||
+    (readsLaunched(stage, previous, false) && DOWNLOADERS.has(launchedCommand(stage).name)) ||
+    /(?<![\w.-])(?:curl|wget)(?![\w.-])/.test(stage)
+  )
+}
 
 /**
- * Executed download: in the same pipeline (separators `;`, `&&`, `||`, `&`, newline), a stage that
- * downloads followed by a stage that executes its input (`curl … | tee f | sudo -E sh`). `curl … | python3 -m json.tool`
- * or `| node -e "…"` only read data.
+ * Pipe (not `>|`) followed by blanks, a newline and the empty lines that follow: the shell continues the pipeline on
+ * the next line (the stage before was only blanks). Each blank is examined only once (linear cost).
+ */
+const PIPE_LINE_BREAK = /(?<!>)(\|&?)[^\S\n]*\n\s*/g
+/**
+ * Second reading: the same, a comment after the pipe and the comment lines that follow skipped too (quotes not
+ * followed: added to the first reading, never in its place). Matches at each pipe, the replacement keeps it without a
+ * newline: each character is examined only once (linear cost).
+ */
+const PIPE_COMMENT_BREAK = /(?<!>)(\|&?)[^\S\n]*(?:#[^\n]*)?(?:\n[^\S\n]*(?:#[^\n]*)?)*/g
+const pipeCommentBreak = (match: string, pipe: string) => (match.includes("\n") ? `${pipe} ` : match)
+
+/**
+ * Executed download: in the same pipeline (separators `;`, `&&`, `||`, `&`, newline except after a pipe), a stage
+ * that downloads followed by a stage that executes its input (`curl … | tee f | sudo -E sh`).
+ * `curl … | python3 -m json.tool` or `| node -e "…"` only read data. Pipelines read with `PIPE_LINE_BREAK`, then, with
+ * a `#`, with `PIPE_COMMENT_BREAK` (the same text without a comment): either reading counts.
  */
 function pipesDownloadToShell(command: string): boolean {
   // Computed once per command (linear cost even with thousands of `sh -c` stages).
   let memo: boolean | undefined
   const codeRunsStdin = () => (memo ??= evaluatesStdin(command))
-  for (const pipeline of command.split(/\|\||&&|;|\n|(?<![|>&])&(?![>&])/)) {
-    const stages = pipeline.split(/(?<!>)\|&?/)
-    if (stages.length < 2) continue
-    const first = stages.findIndex(downloads)
-    if (first >= 0 && stages.slice(first + 1).some((stage) => executesStdin(stage, codeRunsStdin))) return true
+  const executed = (text: string) => {
+    for (const pipeline of text.split(/\|\||&&|;|\n|(?<![|>&])&(?![>&])/)) {
+      const stages = pipeline.split(/(?<!>)\|&?/)
+      if (stages.length < 2) continue
+      const first = stages.findIndex(downloads)
+      if (first >= 0 && stages.slice(first + 1).some((stage) => executesStdin(stage, codeRunsStdin))) return true
+    }
+    return false
   }
-  return false
+  const joined = command.replace(PIPE_LINE_BREAK, "$1 ")
+  if (executed(joined)) return true
+  // Without a `#`, the second reading is the first one.
+  const skipped = command.includes("#") ? command.replace(PIPE_COMMENT_BREAK, pipeCommentBreak) : joined
+  return skipped !== joined && executed(skipped)
 }
 
 const PROCESS_SUBSTITUTION_EXEC = new RegExp(
@@ -569,7 +681,7 @@ const COMMAND_SUBSTITUTION_EXEC = new RegExp(`(?:sh|bash|zsh|dash|ksh)\\s+-[a-zA
 
 /** Signature formatting and wiping launched by common recognition (same names as the `mkfs` rule). */
 const FORMAT_TOOLS = "mkfs(?:\\.[a-z0-9]+)?|wipefs"
-const FORMAT_COMMAND = commandRegex(FORMAT_TOOLS, undefined, true)
+const FORMAT_COMMAND = commandRegex(FORMAT_TOOLS)
 
 /**
  * `dd` launched by common recognition, call tail up to the separator included. `of=` to a device
@@ -578,22 +690,25 @@ const FORMAT_COMMAND = commandRegex(FORMAT_TOOLS, undefined, true)
  * substitution has no match of its own. An `of=` to a device among those skipped words therefore also counts
  * (a rare extra deny). Each character is examined only once (linear cost).
  */
-const DD_CALL = new RegExp(commandRegex("dd", "\\s[^;&|]*", true).source, "g")
+const DD_CALL = new RegExp(commandRegex("dd", "\\s[^;&|]*").source, "g")
 const DD_DEVICE_OUTPUT = new RegExp(`\\bof=["']?${DEVICE}`)
 const ddCommandToDevice = (command: string) => [...command.matchAll(DD_CALL)].some((match) => DD_DEVICE_OUTPUT.test(match[0]))
-
-/** Added recognition alone, without a switch or fallback to data (cost tests). */
-export const addedRecognition = (command: string) => FORMAT_COMMAND.test(command) || ddCommandToDevice(command)
 
 /**
  * Recognition added to the `mkfs` and `dd-device` rules (path `/usr/sbin/mkfs.ext4`, `/bin/dd`, `\mkfs`, wrappers,
  * `sh -c "…"` text, `find -exec`), evaluated after all rules (`addedShellFinding`): an existing finding at
- * least as strong keeps its identifier.
+ * least as strong keeps its identifier. Tests without context.
  */
-const ADDED_DENY_RULES: readonly RegexRule[] = [
+const ADDED_DENY_RULES: ReadonlyArray<Omit<RegexRule, "test"> & { readonly test: (command: string) => boolean }> = [
   { id: "mkfs", verdict: "deny", reason: "disk formatting", test: (command) => FORMAT_COMMAND.test(command) },
   { id: "dd-device", verdict: "deny", reason: "raw write to a device", test: ddCommandToDevice },
 ]
+
+/**
+ * First rule of the added recognition, active according to the switches (all without them), that recognizes the text,
+ * without fallback to data: read by `addedShellFinding` and by the device layer, alone in cost tests.
+ */
+export const addedRecognition = (text: string, active?: ActiveRules) => ADDED_DENY_RULES.find((rule) => ruleEnabled(rule.id, active) && rule.test(text))
 
 const DENY_RULES: readonly RegexRule[] = [
   { id: "placeholder", verdict: "deny", reason: PLACEHOLDER_REASON, test: re(PLACEHOLDER_RE) },
@@ -1002,7 +1117,7 @@ function xargsInfo(args: readonly string[]): { start: number; replacement: strin
       continue
     }
     if (token.startsWith("-i") && token.length > 2) {
-      replacement = token.slice(2) || "{}"
+      replacement = token.slice(2)
       i += 1
       continue
     }
@@ -1345,11 +1460,13 @@ function parallelDynamic(command: string): boolean {
 /**
  * Parsing of an interpreter through the `EXECUTORS` table: code option (`-c`, `-e`…) and its text, script
  * operand, reading the program from the input (`-`, stdin path, `-s`), and help/version (options of the program
- * itself, before its operand). Redirections and value options skipped. One pass.
+ * itself, before its operand). Redirections and value options skipped (`optionValues`; `grouped`: a shell's options
+ * read like the shell, the code after the values of its group). One pass.
  */
 function parseExecutor(
   executor: (typeof EXECUTORS)[number],
   args: readonly string[],
+  grouped = false,
 ): { code: string | undefined; script: string | undefined; readsStdin: boolean; help: boolean } {
   const isShell = executor === EXECUTORS[0]
   const start = executor.subcommand && args[0] !== undefined && executor.subcommand.test(args[0]) ? 1 : 0
@@ -1364,9 +1481,10 @@ function parseExecutor(
     if (arg === "--") return { code: undefined, script: args[i + 1], readsStdin: false, help: false }
     if (arg.startsWith("-") || (executor.stdin && arg.startsWith("+"))) {
       if (arg === "--help" || arg === "--version" || (!isShell && arg === "-h")) return { code: undefined, script: undefined, readsStdin: false, help: true }
-      if (executor.code.test(arg)) return { code: args[i + 1], script: undefined, readsStdin: false, help: false }
+      const values = optionValues(executor, arg, grouped)
+      if (executor.code.test(arg)) return { code: args[i + 1 + values], script: undefined, readsStdin: false, help: false }
       if (executor.stdin?.test(arg)) return { code: undefined, script: undefined, readsStdin: true, help: false }
-      if (executor.value?.test(arg)) i++
+      i += values
       continue
     }
     return { code: undefined, script: arg, readsStdin: false, help: false }
@@ -1374,55 +1492,78 @@ function parseExecutor(
   return { code: undefined, script: undefined, readsStdin: false, help: false }
 }
 
-/** Operand of an input redirection from a file (`< f`, `0<f`) or a here-string (`<<< v`); not a heredoc (`<<`). */
-function stdinRedirectOperand(args: readonly string[]): string | undefined {
+/**
+ * Operands of input redirections from a file (`< f`, `0<f`; `readWrite`: also `<> f`, `0<>f`, input opened for reading
+ * and writing) or a here-string (`<<< v`, `string` true), in order; not a heredoc (`<<`). A single pass.
+ */
+function stdinRedirects(args: readonly string[], readWrite = false): Array<{ operand: string; string: boolean }> {
+  const found: Array<{ operand: string; string: boolean }> = []
+  const attached = readWrite ? /^(0?<<<|0?<>?)(?![<>])(.+)$/ : /^(0?<<<|0?<)(?!<)(.+)$/
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
-    if (arg === "<" || arg === "0<" || arg === "<<<") {
+    if (arg === "<" || arg === "0<" || arg === "<<<" || (readWrite && (arg === "<>" || arg === "0<>"))) {
       const operand = args[i + 1]
-      if (operand !== undefined) return unquote(operand)
+      if (operand !== undefined) found.push({ operand: unquote(operand), string: arg === "<<<" })
+      i++
       continue
     }
-    const match = /^(?:0?<<<|0?<)(?!<)(.+)$/.exec(arg)
-    if (match) return unquote(match[1]!)
+    const match = attached.exec(arg)
+    if (match) found.push({ operand: unquote(match[2]!), string: match[1]!.endsWith("<<<") })
   }
-  return undefined
+  return found
 }
 
 /**
  * Shell or interpreter launched on a file or text designated by a variable (content not visible at
  * decision time). The program's help/version options invalidate the ask only if they
- * precede its operand. One pass per segment.
+ * precede its operand. Each segment read by `commandOf` (first input redirection), then with the redirections set
+ * aside (`launchedCommand`, if `readsLaunched`; input read like the shell: the last redirection, read-write included):
+ * either reading counts (strict side). One pass per segment.
  */
 function variableShellSource(command: string): boolean {
-  for (const segment of segments(command)) {
-    const { name, args } = commandOf(segment)
-    const rawHead = bareHead(name)
-    // Inclusion (`source f`, `. f`): operand looked up in PATH without `/`, content not visible if it is a variable/glob.
-    if (rawHead === "source" || name === ".") {
-      const op = args[0]
-      if (op !== undefined && op !== "--help" && op !== "--version" && literalPath(op) === undefined && (startsWithVariable(op) || isNonLiteralSource(op))) return true
-      continue
-    }
-    const executor = EXECUTORS.find((candidate) => candidate.name.test(name))
-    if (!executor) continue
-    const parsed = parseExecutor(executor, args)
-    if (parsed.help) continue
-    if (parsed.code !== undefined && startsWithVariable(parsed.code)) return true
-    if (parsed.script !== undefined && literalPath(parsed.script) === undefined) {
-      if (startsWithVariable(parsed.script)) return true
-      // Node test runner mode (`node --test <glob>`): operand globs designate test
-      // files, not a variable source; a variable always triggers (handled just above).
-      const nodeTest = (rawHead === "node" || rawHead === "nodejs") && args.some((arg) => arg === "--test" || arg.startsWith("--test-"))
-      if (!nodeTest && isNonLiteralSource(parsed.script)) return true
-    }
-    // Program read from input redirected from a file/string designated by a variable (without code or script).
-    if (parsed.code === undefined && parsed.script === undefined) {
-      const redir = stdinRedirectOperand(args)
-      if (redir !== undefined && literalPath(redir) === undefined && startsWithVariable(redir)) return true
-    }
+  return segments(command).some((segment) => {
+    const previous = commandOf(segment)
+    const found = variableSource(previous, () => stdinRedirects(previous.args)[0]?.operand)
+    if (found) return true
+    if (!readsLaunched(segment, previous, found === false)) return false
+    const launched = launchedCommand(segment)
+    return variableSource(launched, () => stdinRedirects(launched.redirects, true).at(-1)?.operand) === true
+  })
+}
+
+/**
+ * `variableShellSource` for one reading of a segment; `input`: operand of the input redirection read by the program
+ * (looked up only without code or script). Undefined: neither an inclusion nor a program of `EXECUTORS` (nothing read).
+ * A shell's options are also read like the shell (`groupedValue`, `grouped`): either reading counts (strict side).
+ */
+function variableSource(
+  { name, args }: { name: string; args: readonly string[] },
+  input: () => string | undefined,
+  grouped = false,
+): boolean | undefined {
+  const rawHead = bareHead(name)
+  // Inclusion (`source f`, `. f`): operand looked up in PATH without `/`, content not visible if it is a variable/glob.
+  if (rawHead === "source" || name === ".") {
+    const op = args[0]
+    return op !== undefined && op !== "--help" && op !== "--version" && literalPath(op) === undefined && (startsWithVariable(op) || isNonLiteralSource(op))
   }
-  return false
+  const executor = EXECUTORS.find((candidate) => candidate.name.test(name))
+  if (!executor) return undefined
+  if (!grouped && groupedValue(executor, args) && variableSource({ name, args }, input, true)) return true
+  const parsed = parseExecutor(executor, args, grouped)
+  if (parsed.help) return false
+  if (parsed.code !== undefined && startsWithVariable(parsed.code)) return true
+  if (parsed.script !== undefined && literalPath(parsed.script) === undefined) {
+    if (startsWithVariable(parsed.script)) return true
+    // Node test runner mode (`node --test <glob>`): operand globs designate test
+    // files, not a variable source; a variable always triggers (handled just above).
+    const nodeTest = (rawHead === "node" || rawHead === "nodejs") && args.some((arg) => arg === "--test" || arg.startsWith("--test-"))
+    if (!nodeTest && isNonLiteralSource(parsed.script)) return true
+  }
+  // Program read from input redirected from a file/string designated by a variable (without code or script).
+  if (parsed.code !== undefined || parsed.script !== undefined) return false
+  const redirected = input()
+  return redirected !== undefined && literalPath(redirected) === undefined && startsWithVariable(redirected)
 }
 
 /**
@@ -1457,43 +1598,92 @@ function envAssignments(segment: string): { assigns: Map<string, string>; name: 
 }
 
 /**
+ * Interactivity and POSIX mode as the shell reads them among its options, up to its operand, `--` or a lone dash: `-` and
+ * `+` options, alone or grouped (the last one wins), value options with their value (`-o`, `-O`, grouped included,
+ * `--rcfile`, `--init-file`), `-o posix`, `--posix`. One pass.
+ */
+function shellModes(args: readonly string[]): { interactive: boolean; posix: boolean } {
+  let [interactive, posix] = [false, false]
+  for (let k = 0; k < args.length; k++) {
+    const arg = args[k]!
+    if (arg === "--" || !/^[-+]./.test(arg)) break
+    if (arg.startsWith("--")) {
+      if (arg === "--posix") posix = true
+      else if (arg === "--rcfile" || arg === "--init-file") k++
+      continue
+    }
+    for (const letter of arg.slice(1)) {
+      if (letter === "i") interactive = arg[0] === "-"
+      else if (letter === "o" || letter === "O") {
+        const value = args[++k]
+        if (letter === "o" && value === "posix") posix = arg[0] === "-"
+      }
+    }
+  }
+  return { interactive, posix }
+}
+
+/**
+ * Previous reading of interactivity, kept (strict side): `-i` among the shell's options before its operand, `+i`
+ * excluded. `+` option: skipped for sh, dash and ksh (the read continues); for bash, the read stops.
+ */
+function previousInteractive({ name, args }: { name: string; args: readonly string[] }): boolean {
+  const bash = baseHead(bareHead(name)) === "bash"
+  let interactive = false
+  for (const arg of args) {
+    if (arg === "--") break
+    if (arg.startsWith("+")) {
+      if (bash) break
+      continue
+    }
+    if (!arg.startsWith("-")) break
+    if (/^-[a-zA-Z]*i/.test(arg)) interactive = true
+  }
+  return interactive
+}
+
+/** Shells whose startup file `startupFileAsk` knows. */
+const STARTUP_SHELLS = new Set(["bash", "sh", "dash", "ksh", "zsh"])
+
+/**
+ * Startup file of one reading of a segment (launched shell, assignments, options), interactivity and POSIX mode given:
+ * bash reads `BASH_ENV` when not interactive outside POSIX mode, `ENV` when interactive in POSIX mode, and its option
+ * file (`--rcfile`, `--init-file`: missing or non-literal value); sh, dash and ksh read `ENV` when interactive; zsh
+ * `ZDOTDIR`.
+ */
+function startupFileAsk({ assigns, name, args }: ReturnType<typeof envAssignments>, interactive: boolean, posix: boolean): boolean {
+  const head = baseHead(bareHead(name))
+  const set = (variable: string) => (assigns.get(variable) ?? "") !== ""
+  if (head === "bash") {
+    for (let k = 0; k < args.length && args[k] !== "--"; k++) {
+      if (args[k] !== "--rcfile" && args[k] !== "--init-file") continue
+      const value = args[k + 1]
+      if (value === undefined || value === "--" || isNonLiteralSource(value)) return true
+    }
+    return interactive ? posix && set("ENV") : !posix && set("BASH_ENV")
+  }
+  if (head === "sh" || head === "dash" || head === "ksh") return interactive && set("ENV")
+  return head === "zsh" && set("ZDOTDIR")
+}
+
+/**
  * Startup file designated by the environment (`BASH_ENV`, `ENV`, `ZDOTDIR`, wrappers included) or by
  * an option (`--rcfile`, `--init-file`: missing or non-literal value). Interactivity is read only
- * among the shell's options, before its operand. One pass per segment.
+ * among the shell's options, before its operand. Two readings whose asks add up: the previous one, kept (strict side,
+ * outside POSIX mode), and the shell's, redirections set aside (`tailWords`, if `readsLaunched`), options read by
+ * `shellModes`, POSIX mode also given by the environment (`POSIXLY_CORRECT`, `SHELLOPTS`). Read only for a shell whose
+ * startup file is known. One pass per segment.
  */
 function shellStartupFile(command: string): boolean {
   for (const segment of segments(command)) {
-    const { assigns, name, args } = envAssignments(segment)
-    const rawHead = bareHead(name)
-    const head = baseHead(rawHead)
-    const isBash = head === "bash"
-    const isShLike = head === "sh" || head === "dash" || head === "ksh"
-    const isZsh = head === "zsh"
-    if (isBash || isShLike || isZsh) {
-      // Interactivity: shell options, before its operand (`-i`, not `+i`, not a script option).
-      let interactive = false
-      for (const arg of args) {
-        if (arg === "--") break
-        if (!arg.startsWith("-")) break
-        if (arg.startsWith("+")) continue
-        if (/^-[a-zA-Z]*i/.test(arg)) interactive = true
-      }
-      if (isBash) {
-        for (let k = 0; k < args.length; k++) {
-          const arg = args[k]!
-          if (arg === "--") break
-          if (arg === "--rcfile" || arg === "--init-file") {
-            const value = args[k + 1]
-            if (value === undefined || value === "--" || isNonLiteralSource(value)) return true
-          }
-        }
-      }
-      const bashEnv = assigns.get("BASH_ENV")
-      const shEnv = assigns.get("ENV")
-      const zdotdir = assigns.get("ZDOTDIR")
-      if (isBash && !interactive && bashEnv !== undefined && bashEnv !== "") return true
-      if (isShLike && interactive && shEnv !== undefined && shEnv !== "") return true
-      if (isZsh && zdotdir !== undefined && zdotdir !== "") return true
+    const previous = envAssignments(segment)
+    const rawHead = bareHead(previous.name)
+    const startup = STARTUP_SHELLS.has(baseHead(rawHead))
+    const shell = readsLaunched(segment, previous, startup) ? envAssignments(tailWords(segment).join(" ")) : previous
+    if (startup || (shell !== previous && STARTUP_SHELLS.has(baseHead(bareHead(shell.name))))) {
+      const modes = shellModes(shell.args)
+      const posix = modes.posix || shell.assigns.has("POSIXLY_CORRECT") || /(?:^|:)posix(?::|$)/.test(shell.assigns.get("SHELLOPTS") ?? "")
+      if (startupFileAsk(previous, previousInteractive(previous), false) || startupFileAsk(shell, modes.interactive, posix)) return true
     }
     // Isolated export/declare/typeset: designates the startup of subsequent shells.
     if (rawHead === "export" || rawHead === "declare" || rawHead === "typeset") {
@@ -1506,9 +1696,9 @@ function shellStartupFile(command: string): boolean {
 /**
  * Text-processing program with execution of non-literal text (`system`, output pipe, pipe
  * to `getline`). Linear analysis with string and comment tracking. Programs with spaces or
- * pipes are quoted: split outside quotes.
+ * pipes are quoted: split outside quotes. `LIMIT_REACHED`: quoted string too long to read (`quotedStrings`).
  */
-function awkDynamicExec(command: string): boolean {
+function awkDynamicExec(command: string): boolean | typeof LIMIT_REACHED {
   for (const segment of awkSegments(command)) {
     const { name, args } = commandOf(segment)
     const head = bareHead(name)
@@ -1517,7 +1707,9 @@ function awkDynamicExec(command: string): boolean {
       // system call visible in the raw segment.
       if (bareHead(name) !== "xargs" && bareHead(name) !== "parallel") continue
       if (!/\b(?:awk|gawk|nawk|mawk)\b/.test(segment)) continue
-      for (const quoted of quotedStrings(segment)) {
+      const strings = quotedStrings(segment)
+      if (strings === undefined) return LIMIT_REACHED
+      for (const quoted of strings) {
         if (/\bsystem\s*\(/.test(quoted) && /[$`{}]/.test(quoted) && awkProgramIsDynamic(quoted)) return true
       }
       continue
@@ -1551,6 +1743,7 @@ function awkDynamicExec(command: string): boolean {
     }
     // Quoted sources in the raw segment (programs with spaces).
     const quoted = quotedStrings(segment)
+    if (quoted === undefined) return LIMIT_REACHED
     if (quoted.length > 0) {
       for (const program of quoted) {
         // Ignores data option values (`-F`, `-v`): only the program counts.
@@ -1580,8 +1773,14 @@ function awkDynamicExec(command: string): boolean {
   return false
 }
 
-/** Quoted strings of a segment (single and double quotes, with escapes). */
-function quotedStrings(segment: string): string[] {
+/** Longest quoted string read in an awk segment (`quotedStrings`). */
+const AWK_STRING_LIMIT = 65536
+
+/**
+ * Quoted strings of a segment (single and double quotes, with escapes). String longer than 64 KiB
+ * (`AWK_STRING_LIMIT`): `undefined`, incomplete read that the caller asks for (`LIMIT_REACHED`).
+ */
+function quotedStrings(segment: string): string[] | undefined {
   const out: string[] = []
   let i = 0
   while (i < segment.length) {
@@ -1603,7 +1802,7 @@ function quotedStrings(segment: string): string[] {
       if (inner === quote) break
       value += inner
       j += 1
-      if (value.length > 65536) break
+      if (value.length > AWK_STRING_LIMIT) return undefined
     }
     if (j < segment.length) out.push(value)
     i = j + 1
@@ -1870,6 +2069,9 @@ function gitProgramConfig(command: string): boolean {
 const INTERPRETER_DANGEROUS_CODE =
   /(\b(?:python[0-9.]*|node|nodejs|bun|ruby[\d.]*|perl(?:5[\w.-]*)?|php[\d.]*)(?:\s+-[^\s;&|'"]+){0,6}?\s+(?:-c|-e|-p|-E|-r|--eval|--print)\s+|\bdeno\s+eval\s+)("(?:[^"\\]|\\.)*"|'[^']*')/g
 
+/** Length beyond which inline code is not examined: an ask replaces it (64 KiB). */
+const INLINE_CODE_LIMIT = 65536
+
 /** Recursive/forced deletion in a text (an option token starting with `-` contains `r`, `R` or `f`). */
 function codeHasRecursiveRm(code: string): boolean {
   for (const match of code.matchAll(/(?:^|[\s;&|(`'"])rm\b/gi)) {
@@ -1893,7 +2095,7 @@ function interpreterDangerousCode(command: string): boolean {
   for (const match of command.matchAll(INTERPRETER_DANGEROUS_CODE)) {
     const quoted = match[2] ?? ""
     const code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
-    if (code.length === 0 || code.length > 65536) continue
+    if (code.length === 0 || code.length > INLINE_CODE_LIMIT) continue
     const lower = code.toLowerCase()
     // Execution sink (system call, evaluation, process creation); prefixes (`exec*`, `spawn*`) included.
     const hasSink =
@@ -1911,18 +2113,25 @@ function interpreterDangerousCode(command: string): boolean {
   return false
 }
 
+/** Code passed to an interpreter too long for `interpreterDangerousCode` (not examined); no cost on a shorter command. */
+function interpreterCodeTooLong(command: string): boolean {
+  if (command.length <= INLINE_CODE_LIMIT) return false
+  for (const match of command.matchAll(INTERPRETER_DANGEROUS_CODE)) if ((match[2] ?? "").length - 2 > INLINE_CODE_LIMIT) return true
+  return false
+}
+
 /**
  * OpenCode 2.1.1 CLI (`packages/cli/src/commands/commands.ts`), read like the `effect/cli` 4.0.1 parser: `opencode`
  * launched by common recognition, or behind assignments, then the call tail (`callTail`). Global options
  * (and, before the first word, those of the root) skipped before and between the subcommand words, with their
  * value; a boolean swallows the literal that follows it.
  */
-const OPENCODE_CALL = new RegExp(commandRegex("opencode", undefined, true).source, "g")
+const OPENCODE_CALL = new RegExp(commandRegex("opencode").source, "g")
 /**
  * Binary attached to a quote, searched separately (a discarded match does not hide any `OPENCODE_CALL` call):
  * counted only if that quote closes the `-c` wrapper containing it.
  */
-const OPENCODE_QUOTED_CALL = new RegExp(commandRegex("opencode", "(?=[\"'])", true).source, "g")
+const OPENCODE_QUOTED_CALL = new RegExp(commandRegex("opencode", "(?=[\"'])").source, "g")
 /** Opening quote of a `-c` wrapper, as in common recognition. */
 const LAUNCHER_OPENING = /-[a-zA-Z]*c\s+(["'])/g
 /**
@@ -1933,7 +2142,7 @@ const LAUNCHER_OPENING = /-[a-zA-Z]*c\s+(["'])/g
  */
 const ASSIGNMENTS_START = /(?:^|[;&|(`\n]|-[a-zA-Z]*c\s+["'])[^\S\n]*(?=[A-Za-z_]\w*=)/g
 const ASSIGNMENT = /([A-Za-z_]\w*)=('[^'\n]*'|"[^"\n]*"|\$\([^()\n]*\)|[^\s;&|()`'"]*)[^\S\n]+/y
-const OPENCODE_HEAD = new RegExp(`^(?:${commandRegex("opencode", undefined, true).source})`)
+const OPENCODE_HEAD = new RegExp(`^(?:${commandRegex("opencode").source})`)
 const OPENCODE_QUOTED_HEAD = new RegExp(`^(?:${OPENCODE_QUOTED_CALL.source})`)
 /** The operator alone (`2>`, `>`, `<<-`) has its target in the next word. */
 const BARE_REDIRECTION = /^(?:\d+|&)?[<>][<>&|-]*$/
@@ -2095,17 +2304,49 @@ function redirectionAt(token: string): number {
   return -1
 }
 
-/** Words of a call tail: redirections removed (with their detached target), final comment discarded. */
-function tailWords(tail: string): string[] {
+/**
+ * Words of a call tail: redirections removed (with their detached target; both collected in order in `redirects` if
+ * given), final comment discarded.
+ */
+function tailWords(tail: string, redirects?: string[]): string[] {
   const words: string[] = []
   const tokens = tail.split(/\s+/).filter(Boolean)
   for (let i = 0; i < tokens.length && !tokens[i]!.startsWith("#"); i++) {
     const at = redirectionAt(tokens[i]!)
     if (at !== 0) words.push(at < 0 ? tokens[i]! : tokens[i]!.slice(0, at))
-    if (at >= 0 && BARE_REDIRECTION.test(tokens[i]!.slice(at))) i++
+    if (at >= 0) redirects?.push(tokens[i]!.slice(at))
+    if (at >= 0 && BARE_REDIRECTION.test(tokens[i]!.slice(at)) && ++i < tokens.length) redirects?.push(tokens[i]!)
   }
   return words
 }
+
+/**
+ * Command of a segment as the shell launches it: redirections set aside first, wherever they are (before the name,
+ * among the options, after `--`, attached to a word), with their target (`tailWords`); `redirects`: those set aside, in
+ * order. Added to the reading of `commandOf` by the readers of the launched program and its operand (input executed,
+ * scripts examined, variable source, startup file).
+ */
+function launchedCommand(segment: string): { name: string; args: string[]; path: string; redirects: string[] } {
+  const redirects: string[] = []
+  return { ...commandOf(tailWords(segment, redirects).join(" ")), redirects }
+}
+
+/** Redirection or comment word: `tailWords` sets it aside (and the words after a comment). */
+const SETS_ASIDE = /[<>]|(?:^|\s)#/
+
+/**
+ * Whether a reader also reads `launchedCommand(segment)`, besides `previous` (`commandOf` or `envAssignments` of the same
+ * segment): a redirection or a comment word (`SETS_ASIDE`), and either the reader reads the arguments of the program
+ * named by `previous` (`concerned`), or such a word comes at or before that name (another program may be launched).
+ * Otherwise both readings launch the same program after the same words: the second one adds nothing.
+ */
+function readsLaunched(segment: string, previous: { args: readonly string[] }, concerned: boolean): boolean {
+  const at = segment.search(SETS_ASIDE)
+  return at >= 0 && (concerned || (segment.slice(at).match(/\S+/g)?.length ?? 0) > previous.args.length)
+}
+
+/** Inclusion (`source`, `.`) or program of `EXECUTORS`: its operands are read (`executesStdin`, `scriptRuns`). */
+const readsOperands = (name: string) => name === "source" || name === "." || EXECUTORS.some((candidate) => candidate.name.test(name))
 
 /**
  * Subcommand path (`service get`) and the words that follow it. Unknown option or word that is not ordinary, before or
@@ -2436,9 +2677,10 @@ const ASK_RULES: readonly RegexRule[] = [
     // command in the user's name, answer to permission requests). Complement: a constructed URL escapes it.
     id: "opencode-server-api",
     verdict: "ask",
-    reason: "call to the OpenCode server API that switches the agent, sends a prompt or a command, or answers a permission request: it can bypass the guard",
-    // Documentation template (`/api/session/{sessionID}/prompt`) excluded: a real identifier has no brace.
-    test: re(/\/api\/session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)\b/),
+    reason: "call to the OpenCode server API that switches the agent, sends a prompt or a command, replaces the instructions of a voice call, or answers a permission request: it can bypass the guard",
+    // Documentation template (`/api/session/{sessionID}/prompt`) excluded: a real identifier has no brace. OpenCode
+    // 2.1.3 voice route: replaces the instructions of a voice call of the session.
+    test: re(/\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/),
   },
   {
     id: "nested-opencode",
@@ -2510,7 +2752,14 @@ const ASK_RULES: readonly RegexRule[] = [
     id: "awk-dynamic-exec",
     verdict: "ask",
     reason: "awk program executing non-literal text as a command",
-    test: awkDynamicExec,
+    test: (command, ctx) => AWK_PROGRAMS.note(command, ctx) === true,
+  },
+  // Quoted string not read (limit): same rule, exact reason.
+  {
+    id: "awk-dynamic-exec",
+    verdict: "ask",
+    reason: `awk program with a quoted string longer than the plugin checks (${AWK_STRING_LIMIT} characters): it cannot be checked for execution of non-literal text`,
+    test: (command, ctx) => AWK_PROGRAMS.reread(command, ctx) === LIMIT_REACHED,
   },
   {
     id: "git-exec-config",
@@ -2525,16 +2774,29 @@ const ASK_RULES: readonly RegexRule[] = [
     test: interpreterDangerousCode,
   },
   {
+    id: "interpreter-dangerous-code",
+    verdict: "ask",
+    reason: `interpreter code longer than the plugin checks (${INLINE_CODE_LIMIT} characters): it cannot be checked for a dangerous command`,
+    test: interpreterCodeTooLong,
+  },
+  {
     id: "secret-file-read",
     verdict: "ask",
     reason: "access to a credential file",
-    test: (command, ctx) => pathTokens(command).some((t) => isCredentialFile(t, ctx)),
+    test: (command, ctx) => CREDENTIAL_TOKENS.note(command, ctx) === true,
+  },
+  // Content not checked (limit): ask, never the network send deny (`sentSecretFiles` does not count it).
+  {
+    id: "secret-file-read",
+    verdict: "ask",
+    reason: uncheckedCredentialReason(),
+    test: (command, ctx) => CREDENTIAL_TOKENS.reread(command, ctx) === LIMIT_REACHED,
   },
   {
     id: "self-protection",
     verdict: "ask",
     reason: "write to OpenCode's configuration or to the guard plugin (self-protection)",
-    test: (command, ctx) => protectedTargets(command, ctx).includes("opencode"),
+    test: (command, ctx) => PROTECTED_TARGETS.note(command, ctx).includes("opencode"),
   },
   {
     id: "protected-write",
@@ -2542,11 +2804,18 @@ const ASK_RULES: readonly RegexRule[] = [
     reason: "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
     test: (command, ctx) => protectedTargets(command, ctx).includes("system"),
   },
+  // Unchecked real path (limit): it could lead to self-protection, always active.
+  {
+    id: "self-protection",
+    verdict: "ask",
+    reason: uncheckedWriteReason("write to a location"),
+    test: (command, ctx) => PROTECTED_TARGETS.reread(command, ctx).includes("unchecked"),
+  },
   ...OPENCODE_ASK_RULES,
 ]
 
 /** Kinds of protected locations targeted by the command's writes (`protectedWriteKind`). */
-function protectedTargets(command: string, ctx: ShellRuleContext): Array<"opencode" | "system" | undefined> {
+function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteKind | undefined> {
   // Without shell re-entry, an interpreter's code (`node -e "x => …"`) is not a redirection.
   const data = withoutData(command)
   return writeTargets(reentersShell(data) ? command : data).map((target) => protectedWriteKind(target, ctx.home, ctx))
@@ -2555,12 +2824,13 @@ function protectedTargets(command: string, ctx: ShellRuleContext): Array<"openco
 /**
  * Shell re-entry: a heredoc or interpreter code can end up executed as shell (`bash -c`, `| sh`,
  * `eval`, `ssh host "…"`, `watch "…"`, script launched by its path or made executable). The analysis then remains complete.
+ * Blanks after the path opener read as in `commandRegex` (without newline: linear cost).
  */
 const SHELL_REENTRY = commandRegex("sh|bash|zsh|dash|ksh|fish|eval|source|\\.|ssh|su|watch|parallel|script|flock|tmux|screen|expect")
-const PATH_EXECUTION = /(?:^|[;&|(`\n{])\s*(?:sudo\s+)?(?:\.{1,2}\/|~\/|\/)[^\s;&|()]/
+const PATH_EXECUTION = /(?:^|[;&|(`\n{])[^\S\n]*(?:sudo\s+)?(?:\.{1,2}\/|~\/|\/)[^\s;&|()]/
 const MAKE_EXECUTABLE = /\bchmod\s[^;&|\n]*\+[rw]*x/
 
-export function reentersShell(command: string): boolean {
+function reentersShell(command: string): boolean {
   return SHELL_REENTRY.test(command) || PATH_EXECUTION.test(command) || MAKE_EXECUTABLE.test(command)
 }
 
@@ -2598,6 +2868,38 @@ function withoutHeredocBodies(command: string, withTerminators = false, blank = 
     } else if (withTerminators) return undefined
     if (!end) break
     start.lastIndex = end.index + end[0].length
+  }
+  return out + command.slice(kept)
+}
+
+/**
+ * Command as the shell reads it, lines it continues joined: backslash-newline removed outside single quotes, `$'…'`,
+ * comments and heredoc bodies (`withoutHeredocBodies`), after an odd number of backslashes. The command itself
+ * without a backslash before a newline (zero cost). One pass.
+ */
+function joinedLines(command: string): string {
+  if (!command.includes("\\\n")) return command
+  const text = withoutHeredocBodies(command, false, true)
+  let [out, kept, quote, previous] = ["", 0, "", " "]
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]!
+    if (quote === "'" || quote === "$") {
+      if (char === "'") quote = ""
+      else if (char === "\\" && quote === "$") i++
+    } else if (char === "\\") {
+      if (text[i + 1] === "\n") [out, kept] = [out + command.slice(kept, i), i + 2]
+      else previous = char
+      i++
+      continue
+    } else if (quote === '"') {
+      if (char === '"') quote = ""
+    } else if (char === "'" || char === '"') quote = char
+    else if (char === "$" && text[i + 1] === "'") [quote, i] = ["$", i + 1]
+    else if (char === "#" && /[\s;&|()<>]/.test(previous)) {
+      const end = text.indexOf("\n", i)
+      i = (end < 0 ? text.length : end) - 1
+    }
+    previous = char
   }
   return out + command.slice(kept)
 }
@@ -2691,8 +2993,11 @@ function literalPath(token: string | undefined): string | undefined {
   return path
 }
 
-/** Script file of an interpreter: first argument not an option; nothing if the code is an argument or read from stdin. */
-function scriptArgument(executor: (typeof EXECUTORS)[number], args: readonly string[]): string | undefined {
+/**
+ * Script file of an interpreter: first argument not an option; nothing if the code is an argument or read from stdin.
+ * `grouped`: a shell's options read like the shell (`optionValues`).
+ */
+function scriptArgument(executor: (typeof EXECUTORS)[number], args: readonly string[], grouped = false): string | undefined {
   const start = executor.subcommand && args[0] !== undefined && executor.subcommand.test(args[0]) ? 1 : 0
   for (let i = start; i < args.length; i++) {
     const arg = args[i]!
@@ -2704,7 +3009,7 @@ function scriptArgument(executor: (typeof EXECUTORS)[number], args: readonly str
     if (arg === "-" || STDIN_PATH.test(arg)) return undefined
     if (arg.startsWith("-") || (executor.stdin && arg.startsWith("+"))) {
       if (executor.code.test(arg) || executor.stdin?.test(arg)) return undefined
-      if (executor.value?.test(arg)) i++
+      i += optionValues(executor, arg, grouped)
       continue
     }
     return arg
@@ -2721,32 +3026,67 @@ export interface ScriptRun {
 
 /**
  * Files executed by a command (excluding data: heredoc bodies, interpreter code): `bash f.sh`,
- * `source ./f`, `. ./f`, `python3 f.py`, `node f.js`, `bun run f.ts`…, or a command launched by its path (`./f.sh`,
- * `bin/x`). A segment that quotes `~` or `$` between quotes (not expanded by the shell) is ignored. Internal error of the
- * view without leading assignments: scripts tracked as without it (the result carries no ask).
+ * `source ./f`, `. ./f`, `python3 f.py`, `node f.js`, `bun run f.ts`…, a file redirected to the input of a shell or
+ * interpreter that executes it (`bash < f.sh`), or a command launched by its path (`./f.sh`, `bin/x`). At most `max`
+ * files. A segment that quotes `~` or `$` between quotes (not expanded by the shell) is ignored. Internal error of the
+ * view without leading assignments: scripts tracked as without it (the result carries no ask). Segments read by
+ * `commandOf`, then, files added after, with the redirections set aside (`SHELL_SEPARATORS`, `launchedCommand`, input
+ * opened for reading and writing included; only the segments where `readsLaunched`), then both on the command with its
+ * continued lines joined (`joinedLines`): none takes the place of a file of a previous reading, and the files of the
+ * first reading (operands, then redirected input read as written) come before any other.
  */
 export function scriptRuns(command: string, max = 4): ScriptRun[] {
   const runs: ScriptRun[] = []
-  let bare = command
-  try {
-    bare = withoutAssignments(command)
-  } catch {}
-  for (const segment of segments(withoutData(bare))) {
-    if (runs.length >= max) break
-    if (/["'][~$]/.test(segment)) continue
-    const { name, args, path } = commandOf(segment)
-    const executor = EXECUTORS.find((candidate) => candidate.name.test(name))
-    // `source f`/`. f` without `/`: looked up in PATH before the directory (bash, zsh's `.`) → ignored.
-    const run: ScriptRun | undefined =
-      name === "source" || name === "."
-        ? { path: args[0]?.includes("/") ? args[0] : "", kind: "shell" }
-        : executor
-          ? { path: scriptArgument(executor, args) ?? "", kind: executor === EXECUTORS[0] ? "shell" : "interpreter" }
-          : path.includes("/")
-            ? { path, kind: "direct" }
-            : undefined
+  const add = (run: ScriptRun | undefined) => {
     const literal = literalPath(run?.path)
-    if (run && literal && !runs.some((item) => item.path === literal)) runs.push({ path: literal, kind: run.kind })
+    if (run && literal && runs.length < max && !runs.some((item) => item.path === literal)) runs.push({ path: literal, kind: run.kind })
+  }
+  const joined = joinedLines(command)
+  for (const view of joined === command ? [command] : [command, joined]) {
+    let bare = view
+    try {
+      bare = withoutAssignments(view).view
+    } catch {}
+    const text = withoutData(bare)
+    // Without `<`, `>` or `#`, the shell separators are the simple ones and no segment sets anything aside.
+    for (const launched of /[<>#]/.test(text) ? [false, true] : [false]) {
+      // Files added after the others (read from the redirected input, or by a shell's options read like the shell): none
+      // takes the place of a script operand. First reading (the command, read by `commandOf`): files of its redirected
+      // input read as written (`stdin`) before those of the other readings (`later`), none of which takes their place.
+      const firstReading = view === command && !launched
+      const [stdin, later]: Array<Array<ScriptRun | undefined>> = [[], []]
+      for (const segment of launched ? segments(text, SHELL_SEPARATORS) : segments(text)) {
+        if (runs.length >= max) break
+        if (/["'][~$]/.test(segment) || (launched && !SETS_ASIDE.test(segment))) continue
+        const first = launched ? commandOf(segment) : undefined
+        if (first && !readsLaunched(segment, first, readsOperands(first.name))) continue
+        const read: { name: string; args: string[]; path: string; redirects?: string[] } = launched ? launchedCommand(segment) : commandOf(segment)
+        const { name, args, path, redirects = args } = read
+        const executor = EXECUTORS.find((candidate) => candidate.name.test(name))
+        // A shell's options read as written, then also like the shell (`groupedValue`): files of that reading added after.
+        for (const grouped of executor && groupedValue(executor, args) ? [false, true] : [false]) {
+          // `source f`/`. f` without `/`: looked up in PATH before the directory (bash, zsh's `.`) → ignored.
+          const run: ScriptRun | undefined =
+            name === "source" || name === "."
+              ? { path: args[0]?.includes("/") ? args[0] : "", kind: "shell" }
+              : executor
+                ? { path: scriptArgument(executor, args, grouped) ?? "", kind: executor === EXECUTORS[0] ? "shell" : "interpreter" }
+                : path.includes("/")
+                  ? { path, kind: "direct" }
+                  : undefined
+          if (grouped) later.push(run)
+          else add(run)
+          // Without a script operand, a program that executes its input (`bash < f.sh`, `python3 - < f.py`; read of the
+          // `pipe-to-shell` rule, code as an argument excluded): each file redirected to its input (the shell reads the last one).
+          if (executor && run?.path === "") {
+            const written = !grouped && executesInput({ name, args }, () => false, false)
+            if (written || (groupedValue(executor, args) && executesInput({ name, args }, () => false, true)))
+              for (const redirect of stdinRedirects(redirects, launched)) if (!redirect.string) (written && firstReading ? stdin : later).push({ path: redirect.operand, kind: run.kind })
+          }
+        }
+      }
+      for (const run of [...stdin, ...later]) add(run)
+    }
   }
   return runs
 }
@@ -2902,13 +3242,15 @@ const hasExecutionSink = (code: string) =>
  * Code delimited by `INTERPRETER_CODE` that reaches the network, according to two existing detectors: the network function of the
  * CodeMode rule in JavaScript engine code, escapes decoded; an execution sink with a cited
  * downloader (`downloads`), like the predicates of `interpreterDangerousCode`. Same bound as it (empty code or more than
- * 64 KiB ignored). One pass over code blocks, patterns without nested repetition.
+ * 64 KiB ignored; the latter, not examined, noted in `skipped`). One pass over code blocks, patterns without nested
+ * repetition.
  */
-function codeReachesNetwork(text: string): boolean {
+function codeReachesNetwork(text: string, skipped?: { long: boolean }): boolean {
   for (const match of text.matchAll(new RegExp(INTERPRETER_CODE.source, "g"))) {
     const quoted = match[2] ?? ""
     const code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
-    if (code.length === 0 || code.length > 65536) continue
+    if (code.length > INLINE_CODE_LIMIT && skipped) skipped.long = true
+    if (code.length === 0 || code.length > INLINE_CODE_LIMIT) continue
     const head = /^\S+/.exec(match[1] ?? "")?.[0] ?? ""
     if (JAVASCRIPT_ENGINES.test(head) && (NETWORK_FUNCTION.test(code) || NETWORK_FUNCTION.test(decodeUnicodeEscapes(code)))) return true
     if (hasExecutionSink(code) && downloads(code)) return true
@@ -2921,8 +3263,7 @@ function codeReachesNetwork(text: string): boolean {
  * the caller) under the guards of `onlyInHeredocData`: no substitution outside the removed bodies, all commands
  * outside the bodies are data commands, heredoc starts are real (neither quoted nor in a comment)
  * and no shell is launched outside the data (same condition as `existingShellFinding`). Checks done only if
- * a body was removed, cheapest first: the re-entry test is quadratic on a long run of newlines
- * (existing state of `SHELL_REENTRY`, already computed by `protectedTargets`).
+ * a body was removed, the re-entry test last (already computed by `protectedTargets`).
  */
 function networkCodeView(command: string, bodies: string): string {
   if (bodies === command) return command
@@ -2942,10 +3283,16 @@ function networkCodeView(command: string, bodies: string): string {
 const hasInterpreterCode = (command: string, bodies: string) =>
   HAS_INTERPRETER_CODE.test(command) || (bodies !== command && HAS_INTERPRETER_CODE.test(bodies))
 
-/** Detection only, view included, without switch (cost tests). Without delimited code, the view is not computed. */
-export function inlineCodeNetwork(command: string): boolean {
+/**
+ * Detection, view included, without switch: called by the rule (`networkCodeFinding`) and by cost tests. Without
+ * delimited code, the view is not computed. `seen` receives the examined view and the note of a block too long, not examined.
+ */
+export function inlineCodeNetwork(command: string, seen?: { view: string; long: boolean }): boolean {
   const bodies = withoutHeredocBodies(command)
-  return hasInterpreterCode(command, bodies) && codeReachesNetwork(networkCodeView(command, bodies))
+  if (!hasInterpreterCode(command, bodies)) return false
+  const view = networkCodeView(command, bodies)
+  if (seen) seen.view = view
+  return codeReachesNetwork(view, seen)
 }
 
 /**
@@ -2976,12 +3323,17 @@ const NETWORK_CODE_RULES: readonly RegexRule[] = [
   { id: "interpreter-network", verdict: "ask", reason: "inline interpreter code making network requests", test: () => true },
 ]
 
+/** Code too long for the network examination, without other code that reaches the network: ask, never deny (nothing was examined). */
+const LONG_NETWORK_CODE: Finding = {
+  verdict: "ask",
+  rule: "interpreter-network",
+  reason: `inline interpreter code longer than the plugin checks (${INLINE_CODE_LIMIT} characters): its network requests cannot be checked`,
+}
+
 function networkCodeFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
-  const bodies = withoutHeredocBodies(command)
-  if (!hasInterpreterCode(command, bodies)) return undefined
-  const view = networkCodeView(command, bodies)
-  if (!codeReachesNetwork(view)) return undefined
-  const rule = NETWORK_CODE_RULES.find((candidate) => ruleEnabled(candidate.id, ctx.active) && candidate.test(view, ctx))
+  const seen = { view: command, long: false }
+  if (!inlineCodeNetwork(command, seen)) return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? LONG_NETWORK_CODE : undefined
+  const rule = NETWORK_CODE_RULES.find((candidate) => ruleEnabled(candidate.id, ctx.active) && candidate.test(seen.view, ctx))
   return rule && { verdict: rule.verdict, rule: rule.id, reason: rule.reason }
 }
 
@@ -3005,13 +3357,12 @@ function shellRulesFinding(command: string, ctx: ShellRuleContext): Finding | un
  * in interpreter code or a heredoc. The deny remains if the view without data contains a deny, added included.
  */
 function addedShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
-  const added = (text: string) => ADDED_DENY_RULES.find((rule) => ruleEnabled(rule.id, ctx.active) && rule.test(text, ctx))
-  const rule = added(command)
+  const rule = addedRecognition(command, ctx.active)
   if (!rule) return undefined
   const finding: Finding = { verdict: "deny", rule: rule.id, reason: rule.reason }
   if (ctx.custom?.some((custom) => custom.id === rule.id)) return finding
   const data = withoutData(command)
-  if (data === command || reentersShell(data) || evaluate(data, ctx)?.verdict === "deny" || added(data)) return finding
+  if (data === command || reentersShell(data) || evaluate(data, ctx)?.verdict === "deny" || addedRecognition(data, ctx.active)) return finding
   return { verdict: "ask", rule: rule.id, reason: `${rule.reason}, only inside code passed to an interpreter or a heredoc: confirmation required` }
 }
 
@@ -3103,6 +3454,9 @@ function evaluate(command: string, ctx: ShellRuleContext): Finding | undefined {
   const on = (finding: Finding | undefined) => (finding && ruleEnabled(finding.rule, ctx.active) ? finding : undefined)
   const findings: Array<Finding | undefined> = []
   for (const rule of DENY_RULES) {
+    // Executed script: the placeholder rule is discarded here, before any combination, in every view (otherwise its deny
+    // would take the place of another rule's finding, then be dropped as not applicable).
+    if (ctx.executedScript && rule.id === "placeholder") continue
     if (ruleEnabled(rule.id, ctx.active) && rule.test(command, ctx)) return { verdict: rule.verdict, rule: rule.id, reason: rule.reason }
   }
   for (const segment of segments(command)) {
@@ -3122,16 +3476,49 @@ function evaluate(command: string, ctx: ShellRuleContext): Finding | undefined {
 
 /**
  * Segment-leading assignments (`A=1 curl`), which common recognition does not skip: its heads (without `find -exec`
- * or `${`), then name (`+=` and bash index included) and value read like the shell (`shellEnd`).
+ * or `${`), then name (`+=` and bash index included) and value read like the shell (`shellEnd`). Candidate heads, kept
+ * only if `assignedName` reads a name.
  */
-const ASSIGNED_HEAD = /(?:^|[;&|(`\n]|(?<!\$)\{|-[a-zA-Z]*c\s+["'])[^\S\n]*(?=[A-Za-z_]\w*(?:\[[^\]\s;&|]*\])?\+?=)/g
-const ASSIGNED_NAME = /[A-Za-z_]\w*(?:\[[^\]\s;&|]*\])?\+?=/y
+const ASSIGNED_HEAD = /(?:^|[;&|(`\n]|(?<!\$)\{|-[a-zA-Z]*c\s+["'])[^\S\n]*(?=[A-Za-z_]\w*(?:\[|\+?=))/g
+const ASSIGNED_WORD = /[A-Za-z_]\w*/y
+/** End of a bracketed index: first `]`, blank or separator. */
+const INDEX_STOP = /[\]\s;&|]/g
 /** Fallback for a value that the read does not close (first blank or separator, like `commandOf`); blanks between two words. */
 const BLANK_WORD = /[^\s;&|]*/y
 const WORD_GAP = /(?:[^\S\n]|\\\n)*/y
 const BETWEEN_WORDS = /[\s;&|()<>]*/y
 const stickyEnd = (regex: RegExp, text: string, at: number) => ((regex.lastIndex = at), regex.exec(text), regex.lastIndex)
 const DOLLAR_OPENERS = new Map([["(", "("], ["{", "}"], ["'", "$"], ['"', '"']])
+
+/** End of the index of each `[` of the text (the following `INDEX_STOP`, or the end): a single scan for all brackets. */
+function indexEnds(text: string): Map<number, number> {
+  const ends = new Map<number, number>()
+  let stop = -1
+  for (const { index } of text.matchAll(/\[/g)) {
+    if (stop < index) {
+      INDEX_STOP.lastIndex = index + 1
+      stop = INDEX_STOP.exec(text)?.index ?? text.length
+    }
+    ends.set(index, stop)
+  }
+  return ends
+}
+
+/**
+ * Length of the assigned name that starts at `at` (`A=`, `A+=`, `A[i]=`), 0 otherwise. Index ends computed at the first
+ * bracket and shared (`ends`): each head does not reread the rest of the text (linear cost).
+ */
+function assignedName(text: string, at: number, ends: { map?: Map<number, number> }): number {
+  ASSIGNED_WORD.lastIndex = at
+  if (!ASSIGNED_WORD.test(text)) return 0
+  let i = ASSIGNED_WORD.lastIndex
+  if (text[i] === "[") {
+    i = (ends.map ??= indexEnds(text)).get(i)!
+    if (text[i++] !== "]") return 0
+  }
+  if (text[i] === "+") i++
+  return text[i] === "=" ? i + 1 - at : 0
+}
 
 /**
  * End of the shell word that starts at `i` (`group`: by the `(` of a bash array), read with a stack of closers:
@@ -3155,7 +3542,10 @@ function shellEnd(text: string, i: number, stop: number, budget: { left: number 
       const quote = char === "`" || (mode !== '"' && (char === "'" || char === '"')) ? char : char === "(" && /[()]/.test(mode) ? ")" : undefined
       const inner = dollar && (mode !== '"' || dollar === "(" || dollar === "}") ? dollar : quote
       if ((inner === "(" || inner === "`") && depth++ === 0) open = inner === "(" ? i + 2 : i + 1
-      if (inner && modes.push(inner) && inner === dollar) i++
+      if (inner) {
+        modes.push(inner)
+        if (inner === dollar) i++
+      }
     }
   }
   return modes.length === 1 && i === stop ? i : -1
@@ -3166,10 +3556,11 @@ function shellEnd(text: string, i: number, stop: number, budget: { left: number 
  * shell re-entry; inside a word of the command (`shellEnd`, comments skipped), head read only in a substitution
  * or the wrapper string that opens that word. Copied at the end of the view: the bodies of erased substitutions, never the
  * values. Kept: assignment alone, `BUN_BE_BUN=1` before `opencode`. Unclosed value: fallback; head in a value
- * or after a failure: shared budget (four times the length). Linear cost.
+ * or after a failure: shared budget (four times the length), whose exhaustion (partial view) gives `flag`, reason
+ * for an ask (undetermined program, like `commandWordView`). Linear cost.
  */
-function withoutAssignments(command: string): string {
-  if (!command.includes("=")) return command
+function withoutAssignments(command: string): { view: string; flag?: string } {
+  if (!command.includes("=")) return { view: command }
   const data = withoutData(command)
   const text = data !== command && !reentersShell(data) ? data : command
   const spans = launcherSpans(text)
@@ -3177,9 +3568,11 @@ function withoutAssignments(command: string): string {
   const budget = { left: 4 * text.length + 1024 }
   const ranges: Array<readonly [number, number, ReadonlyArray<readonly [number, number]>]> = []
   const subs: Array<readonly [number, number]> = []
+  const ends: { map?: Map<number, number> } = {}
   let [frontier, from, word, sub] = [0, 0, 0, 0]
   for (const match of text.matchAll(ASSIGNED_HEAD)) {
     const start = match.index + match[0].length
+    if (!assignedName(text, start, ends)) continue
     while (word <= start) {
       for (from = word; (from = stickyEnd(BETWEEN_WORDS, text, from)) < text.length && text[from] === "#"; ) from = Math.min(text.indexOf("\n", from) >>> 0, text.length)
       sub = subs.length = 0
@@ -3195,10 +3588,10 @@ function withoutAssignments(command: string): string {
     let end = start
     let bun = false
     while (end < stop) {
-      ASSIGNED_NAME.lastIndex = end
-      const name = ASSIGNED_NAME.exec(text)?.[0]
-      if (!name) break
-      const value = end + name.length
+      const length = assignedName(text, end, ends)
+      if (!length) break
+      const value = end + length
+      const name = text.slice(end, value)
       const read = shellEnd(text, value, stop, pool, text[value] === "(", bodies)
       if (read < 0 && pool !== budget) [frontier, pool] = [Math.max(frontier, stop), budget]
       const after = read < 0 ? Math.min(stickyEnd(BLANK_WORD, text, value), stop) : read
@@ -3224,14 +3617,20 @@ function withoutAssignments(command: string): string {
     }
     return out + text.slice(at, to)
   }
-  return ranges.length ? render(0, text.length) + lines.map((line) => `\n${line}`).join("") : command
+  // Negative budget: a cut-off read or a skipped head (an unclosed value falls under the fallback, without draining it).
+  const flag = budget.left < 0 ? UNDETERMINED_WORD_REASON : undefined
+  return { view: ranges.length ? render(0, text.length) + lines.map((line) => `\n${line}`).join("") : command, flag }
 }
 
-/** Most severe finding (verdict alone) between `found` and that of the view without leading assignments; at equal verdict, `found` (mark included). */
+/**
+ * Most severe finding (verdict alone) between `found`, that of the view without leading assignments and the ask of its
+ * exhausted budget; at equal verdict, `found` (mark included).
+ */
 function assignedFinding(command: string, ctx: ShellRuleContext, found: Finding | undefined): Finding | undefined {
   try {
-    const bare = found?.verdict === "deny" ? command : withoutAssignments(command)
-    return bare === command ? found : mostSevere([found, layeredShellFinding(bare, ctx).finding])
+    const { view: bare, flag } = found?.verdict === "deny" ? { view: command } : withoutAssignments(command)
+    const undetermined: Finding | undefined = flag ? { verdict: "ask", rule: "nested-opencode", reason: flag } : undefined
+    return mostSevere([found, bare === command ? undefined : layeredShellFinding(bare, ctx).finding, undetermined])
   } catch {
     return mostSevere([found, ANALYSIS_FAILED])
   }
@@ -3246,6 +3645,12 @@ const RUNTIME_WORD_REASON = "the launched program is known only at run time (a c
 const UNDETERMINED_WORD_REASON = "the launched program could not be determined (command word too long or too complex for the plugin, with quotes, a substitution or an escape): it cannot be checked"
 /** Prudent ask of an extra layer that throws (internal error): original finding kept, ask always active. */
 const ANALYSIS_FAILED: Finding = { verdict: "ask", rule: "nested-opencode", reason: "the analysis of the command failed (internal error): it cannot be checked" }
+/** Ask of a joined view that a new joining would still change (`shellFinding`), always active. */
+const UNSTABLE_JOIN: Finding = {
+  verdict: "ask",
+  rule: "nested-opencode",
+  reason: "the command could not be read with the lines the shell continues joined (command too complex for the plugin): it cannot be checked",
+}
 
 /** Text of a `$'…'` form decoded like bash (letters, octal, hexadecimal, code points up to 0x10FFFF; without the control `\c`, noted as a limit). */
 function decodeAnsiC(body: string): string {
@@ -3351,18 +3756,45 @@ function commandWordView(command: string): { view: string; flag?: string } {
  * allows it (`layerGuard`), layer of indirectly designated devices (`deviceLayer`). The strongest wins
  * (`strength`); at equal strength, the existing finding is returned as is. Then the same examination of the view without leading
  * assignments (`assignedFinding`), and of the view of the word in command position reduced to its literal value (`commandWordView`,
- * judged additionally; at equal verdict, the original finding is kept with its mark). Internal error of either of these two
- * layers: original finding kept, prudent ask added (`ANALYSIS_FAILED`).
+ * judged additionally; at equal verdict, the original finding is kept with its mark), then the same examination, once
+ * and without a new joining, of the command with the lines the shell continues joined (`joinedLines`), judged
+ * additionally (linear cost). A joined view that a new joining would still change (reading not stable): ask
+ * (`UNSTABLE_JOIN`). Internal error of these layers: findings already obtained kept, prudent ask added
+ * (`ANALYSIS_FAILED`), in its own place for the joined view. The findings of the joined view, of its unstable reading
+ * and of its error come after those of the original view, by `strength` (deny, ask without a mark, ask that the model
+ * can decide): at equal strength, the finding of the original view is kept.
  */
 export function shellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
-  const base = assignedFinding(command, ctx, layeredShellFinding(command, ctx).finding)
+  const [base, normalized, flag] = viewFindings(command, ctx)
   if (base?.verdict === "deny") return base
+  let [continued, unstable, failed]: Array<Finding | undefined> = []
+  try {
+    const joined = joinedLines(command)
+    if (joined !== command) {
+      continued = mostSevere(viewFindings(joined, ctx))
+      if (joinedLines(joined) !== joined) unstable = UNSTABLE_JOIN
+    }
+  } catch {
+    failed = ANALYSIS_FAILED
+  }
+  // Findings of the original view first, in their order; an added finding takes the place only if it is stronger.
+  return [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag]))
+}
+
+/**
+ * Findings of a view, in order: finding of the rules and of the view without leading assignments (`assignedFinding`);
+ * without a deny, that of the view of the word in command position (`commandWordView`) and the ask of its flag. Internal
+ * error of the latter: prudent ask in its place (`ANALYSIS_FAILED`).
+ */
+function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | undefined> {
+  const base = assignedFinding(command, ctx, layeredShellFinding(command, ctx).finding)
+  if (base?.verdict === "deny") return [base]
   try {
     const { view, flag } = commandWordView(command)
     const normalized = view !== command ? assignedFinding(view, ctx, layeredShellFinding(view, ctx).finding) : undefined
-    return mostSevere([base, normalized, flag ? { verdict: "ask", rule: "nested-opencode", reason: flag } : undefined])
+    return [base, normalized, flag ? { verdict: "ask", rule: "nested-opencode", reason: flag } : undefined]
   } catch {
-    return mostSevere([base, ANALYSIS_FAILED])
+    return [base, ANALYSIS_FAILED]
   }
 }
 
@@ -3382,8 +3814,8 @@ const DEVICE_RULES: ReadonlyArray<{ readonly group: DeviceGroup; readonly rule: 
 /** Common definition anchored at the start of an absolute path, as in `writesDevice`. */
 const DEVICE_AT_START = new RegExp(`^${DEVICE}`)
 
-/** Absolute path that designates a device according to the common definition (exported for the measurement tool). */
-export const isDevicePath = (path: string) => DEVICE_AT_START.test(path)
+/** Absolute path that designates a device according to the common definition. */
+const isDevicePath = (path: string) => DEVICE_AT_START.test(path)
 
 /** `dd` call according to the original rule: `dd-device` pattern copied without its target, tail up to the separator. */
 const DD_RULE_CALL = /(?:^|[\s;&|(`{]|(?<![\w])=)dd\s[^;&|]*/g
@@ -3521,13 +3953,19 @@ interface DeviceHit {
  * several only through that link). Groups in the order of the deny table; targets read once per group.
  */
 function deviceHit(text: string, ctx: ShellRuleContext): DeviceHit | undefined {
+  // Replayed limit (`LIMIT_REACHED`): no real path; the same target already gave the `self-protection` ask (the
+  // replay only returns answers obtained through `protectedWriteKind`).
+  const reals = (form: string) => {
+    const found = ctx.realPaths?.(form)
+    return found === LIMIT_REACHED ? undefined : found
+  }
   const active = DEVICE_RULES.filter(({ rule }) => ruleEnabled(rule.id, ctx.active))
   const known = active.flatMap(({ group, rule }) =>
     deviceTargets(group, text)
       .filter((target) => !unknownTarget(target))
       .map((target) => {
         const forms = deviceForms(target, ctx)
-        const process = !forms.relative && (throughProcessDirectory(forms.expanded) || forms.asked.some((form) => (ctx.realPaths?.(form)?.length ?? 0) > 1))
+        const process = !forms.relative && (throughProcessDirectory(forms.expanded) || forms.asked.some((form) => (reals(form)?.length ?? 0) > 1))
         return { group, rule, ...forms, process, launched: forms.relative || process }
       }),
   )
@@ -3535,7 +3973,7 @@ function deviceHit(text: string, ctx: ShellRuleContext): DeviceHit | undefined {
     const level = known.filter((target) => target.launched === relative)
     const reshaped = level.find(({ lexical }) => lexical.some(isDevicePath))
     if (reshaped) return { group: reshaped.group, rule: reshaped.rule, axis: "A", relative, process: reshaped.process }
-    const linked = level.find(({ asked }) => asked.some((form) => (ctx.realPaths?.(form) ?? []).some(isDevicePath)))
+    const linked = level.find(({ asked }) => asked.some((form) => (reals(form) ?? []).some(isDevicePath)))
     if (linked) return { group: linked.group, rule: linked.rule, axis: "B", relative, process: linked.process }
   }
   return undefined
@@ -3603,7 +4041,7 @@ function deviceLayer(command: string, replay: ShellRuleContext, guard: LayerGuar
       if (replay.custom?.some((custom) => custom.id === rule.id)) return true
       const data = withoutData(command)
       if (data === command || reentersShell(data) || evaluate(data, replay)?.verdict === "deny") return true
-      return ADDED_DENY_RULES.some((added) => ruleEnabled(added.id, replay.active) && added.test(data, replay)) || deviceHit(data, replay)?.relative === false
+      return addedRecognition(data, replay.active) !== undefined || deviceHit(data, replay)?.relative === false
     }
     const finding: Finding = kept()
       ? { verdict: "deny", rule: rule.id, reason: rule.reason }
@@ -3781,8 +4219,8 @@ function layerGuard(command: string, ctx: ShellRuleContext, linked: boolean): La
 
 /**
  * Context budget predicates (`realPaths`, `credentialContent`), recorded during the existing finding (`record`)
- * and only replayed by the layer (`replay`): answer already obtained for the same question, otherwise unknown (real paths
- * `undefined`: lexical comparison only; content: not recognized). The replay never queries the instance: its
+ * and only replayed by the layer (`replay`): answer already obtained for the same question (limit included), otherwise
+ * unknown (real paths `undefined`: lexical comparison only; content: not recognized). The replay never queries the instance: its
  * consultation ceiling remains whole for existing consumers, in this call as in the following ones that
  * share the instance (subcommands during permission examination, scripts of a call without directory). `linked`: a
  * recorded real-path answer designates a device (the only possible trace of a neutrally named link). Without
@@ -3791,8 +4229,8 @@ function layerGuard(command: string, ctx: ShellRuleContext, linked: boolean): La
 function budgetedPredicates(ctx: ShellRuleContext): { record: ShellRuleContext; replay: ShellRuleContext; linked: () => boolean } {
   const { realPaths, credentialContent } = ctx
   if (!realPaths && !credentialContent) return { record: ctx, replay: ctx, linked: () => false }
-  const paths = new Map<string, readonly string[] | undefined>()
-  const contents = new Map<string, boolean>()
+  const paths = new Map<string, readonly string[] | undefined | typeof LIMIT_REACHED>()
+  const contents = new Map<string, boolean | typeof LIMIT_REACHED>()
   const recordPaths = realPaths
     ? (absolute: string) => {
         const found = realPaths(absolute)
@@ -3812,9 +4250,9 @@ function budgetedPredicates(ctx: ShellRuleContext): { record: ShellRuleContext; 
     replay: {
       ...ctx,
       ...(realPaths ? { realPaths: (absolute: string) => paths.get(absolute) } : {}),
-      ...(credentialContent ? { credentialContent: (path: string) => contents.get(path) === true } : {}),
+      ...(credentialContent ? { credentialContent: (path: string) => contents.get(path) ?? false } : {}),
     },
-    linked: () => [...paths.values()].some((found) => found?.some(isDevicePath) === true),
+    linked: () => [...paths.values()].some((found) => found !== LIMIT_REACHED && found?.some(isDevicePath) === true),
   }
 }
 
@@ -3832,27 +4270,5 @@ function layeredShellFinding(
   return { finding: strength(layer.finding) > strength(existing) ? layer.finding : existing, layer, guard, replay }
 }
 
-/**
- * Detail for the measurement tool only, outside the returned finding: `assignedFinding` finding (without `commandWordView`); layer (axis,
- * group, relative target and finding); guard conditions (absent after an existing deny); groups that write
- * to a target, in the protected write view; groups
- * of the unknown value whose launched target has an unknown value; known-value targets whose replayed real paths
- * designate a device; requested forms, target by target, of the `dd` and `shred` targets that reshaping
- * does not recognize (existing consumers never ask for them).
- */
-export function deviceLayerDetail(command: string, ctx: ShellRuleContext) {
-  const { finding, layer, guard, replay } = layeredShellFinding(command, ctx)
-  const data = withoutData(command)
-  const view = reentersShell(data) ? command : data
-  const writes = DEVICE_RULES.filter(({ group }) => deviceTargets(group, view).length > 0).map(({ group }) => group)
-  const unknown = unknownGroups(command, replay)
-  let resolved = 0
-  const unasked: string[][] = []
-  for (const { group } of DEVICE_RULES)
-    for (const target of deviceTargets(group, command).filter((candidate) => !unknownTarget(candidate))) {
-      const { lexical, asked } = deviceForms(target, replay)
-      if (asked.some((form) => (replay.realPaths?.(form) ?? []).some(isDevicePath))) resolved++
-      if ((group === "dd" || group === "shred") && !lexical.some(isDevicePath)) unasked.push(asked)
-    }
-  return { finding: assignedFinding(command, ctx, finding), layer, guard, writes, unknown, resolved, unasked }
-}
+/** Layer finding as `shellFinding` computes it, guard conditions included (guard tests). */
+export const deviceLayerDetail = layeredShellFinding

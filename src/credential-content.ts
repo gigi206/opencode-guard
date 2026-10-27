@@ -2,14 +2,15 @@
 // `isSecretFile`. Local rules stay pure: they receive the predicate built here, per tool call.
 // Bounded read (first 4 KiB of a regular file), never kept, logged, or sent.
 import { closeSync, constants, fstatSync, openSync, readSync, statSync } from "node:fs"
+import { LIMIT_REACHED } from "./rules/types.ts"
 import { resolveLike } from "./scripts.ts"
 
 /** Bytes read at the start of the file: a key header is on the first line (after any attributes). */
 const HEAD_BYTES = 4096
 /** Lookups (`stat`) per tool call: a missing file costs only a few microseconds. */
-export const MAX_LOOKUPS = 512
+export const MAX_LOOKUPS = 2048
 /** Regular files actually opened per tool call. */
-export const MAX_OPENED = 32
+export const MAX_OPENED = 128
 
 /** PEM private key header (RSA, EC, DSA, OpenSSH, encrypted or unencrypted PKCS#8, SSH2), private PGP block, or PuTTY. */
 const PRIVATE_KEY_LINE = /^\s*(?:-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|PuTTY-User-Key-File-\d)/
@@ -89,23 +90,28 @@ export interface CredentialContentOptions {
 
 /**
  * Predicate for a tool call: true if the token denotes a regular file starting with a private key. Literal tokens
- * only (no variable, wildcard, substitution, URL, or `~user`, at most 1,024 characters);
- * `/dev`, `/proc`, and `/sys` ignored; beyond the limits, only known names count. Results memoized.
+ * only (no variable, wildcard, substitution, URL, or `~user`); `/dev`, `/proc`, and `/sys` ignored.
+ * `LIMIT_REACHED`: literal token of more than 1,024 characters, or check interrupted by a limit before finding;
+ * the caller asks. Results memoized.
  */
-export function createCredentialContent(options: CredentialContentOptions): (token: string) => boolean {
+export function createCredentialContent(options: CredentialContentOptions): (token: string) => boolean | typeof LIMIT_REACHED {
   const io = options.io ?? nodeIo
-  const seen = new Map<string, boolean>()
+  const seen = new Map<string, boolean | typeof LIMIT_REACHED>()
   let lookups = 0
   let opened = 0
   return (token) => {
     const known = seen.get(token)
     if (known !== undefined) return known
-    let found = false
-    if (token.length <= 1024 && !/[$`*?[\]{}\\]|:\/\//.test(token) && !/^~[^/]/.test(token)) {
+    const literal = !/[$`*?[\]{}\\]|:\/\//.test(token) && !/^~[^/]/.test(token)
+    let found: boolean | typeof LIMIT_REACHED = literal && token.length > 1024 ? LIMIT_REACHED : false
+    if (literal && token.length <= 1024) {
       for (const directory of token.startsWith("/") ? ["/"] : options.directories) {
         const path = resolveLike(directory, token, options.home)
         if (!path || /^\/(?:dev|proc|sys)(?:\/|$)/.test(path)) continue
-        if (lookups >= MAX_LOOKUPS || opened >= MAX_OPENED) break
+        if (lookups >= MAX_LOOKUPS || opened >= MAX_OPENED) {
+          found = LIMIT_REACHED
+          break
+        }
         lookups++
         let regular = false
         try {

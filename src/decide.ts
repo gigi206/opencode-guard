@@ -105,8 +105,9 @@ const modelSkipped = (tool: string): boolean => READ_ONLY_TOOLS.has(tool) || TAS
 
 /**
  * Finding from the shell rules in an executed script: at most one ask (a file contains branches that are not
- * executed), never "data only"; the placeholder rule (write) does not apply to an execution. Unverifiable script
- * (created by the agent, unreadable since; or named by an unreadable patch): `script-unverifiable` ask.
+ * executed), never "data only"; the placeholder rule (write) does not apply to an execution: discarded by the shell
+ * rules before the findings are combined (`executedScript`), it never takes the place of another rule's finding.
+ * Unverifiable script (created by the agent, unreadable since; or named by an unreadable patch): `script-unverifiable` ask.
  */
 export function scriptFinding(script: ExecutedScript, ctx: ShellRuleContext): Finding | undefined {
   // Unknown content: whether read by a shell or not, it could not be checked. Cause `patch`: file not necessarily created by
@@ -123,8 +124,8 @@ export function scriptFinding(script: ExecutedScript, ctx: ShellRuleContext): Fi
         }
       : undefined
   if (!script.shell) return undefined
-  const found = shellFinding(script.content, ctx)
-  if (!found || found.rule === "placeholder") return undefined
+  const found = shellFinding(script.content, { ...ctx, executedScript: true })
+  if (!found) return undefined
   return { verdict: "ask", rule: found.rule, reason: `${found.reason}, in the script ${script.path} run by this command` }
 }
 

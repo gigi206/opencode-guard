@@ -8,7 +8,8 @@
  */
 export function decodeUnicodeEscapes(code: string): string {
   return code.replace(/\\u\{([0-9a-fA-F]+)\}|\\u([0-9a-fA-F]{4})/g, (match, braced: string | undefined, plain: string | undefined) => {
-    const point = Number.parseInt(braced ?? plain ?? "", 16)
+    // The pattern guarantees one of the two groups.
+    const point = Number.parseInt(braced ?? plain!, 16)
     return point <= 0x10ffff ? String.fromCodePoint(point) : match
   })
 }

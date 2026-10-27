@@ -57,7 +57,6 @@ describe("lot 10: executed scripts — detection in the command", () => {
       "python3 -m http.server",
       "node -e 'console.log(1)' x.js",
       "curl -s x | bash",
-      "bash -s < f.sh",
       "bash $DIR/f.sh",
       "bash f*.sh",
       'bash "~/f.sh"',
@@ -67,6 +66,8 @@ describe("lot 10: executed scripts — detection in the command", () => {
       "git status",
     ])
       assert.deepEqual(runs(command), [], command)
+    // Lot 47: file redirected to the input of a shell that executes it: script launched, examined as with an operand.
+    assert.deepEqual(runs("bash -s < f.sh"), ["shell:f.sh"])
   })
   it("heredoc body ignored; duplicates removed; at most 4 scripts", () => {
     assert.deepEqual(runs("cat > notes.md <<'EOF'\nbash f.sh\nEOF"), [])

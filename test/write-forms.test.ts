@@ -8,6 +8,7 @@ import { registerGate } from "../src/hooks/gate.ts"
 import { createRealPath, MAX_LOOKUPS, type LinkIo } from "../src/real-path.ts"
 import { protectedWriteKind } from "../src/rules/sensitive-paths.ts"
 import { shellFinding } from "../src/rules/shell.ts"
+import { LIMIT_REACHED } from "../src/rules/types.ts"
 import { argumentPaths, toolFinding } from "../src/rules/tools.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { fakeContext } from "./fake-ctx.ts"
@@ -196,12 +197,12 @@ describe("batch 35: resolved form kept when real paths are unknown", () => {
   it("lookup cap exhausted", () => {
     const deep = `${HOME}/.config//opencode/${"d/".repeat(MAX_LOOKUPS + 10)}f`
     const realPaths = createRealPath({ io: plainIo, directories: [PROJECT] })
-    assert.equal(realPaths(posix.resolve(deep)), undefined)
+    assert.equal(realPaths(posix.resolve(deep)), LIMIT_REACHED)
     assert.equal(protectedWriteKind(deep, HOME, { ...context(PROJECT), realPaths }), "opencode")
   })
   it("link loop", () => {
     const realPaths = createRealPath({ io: loopIo, directories: [PROJECT] })
-    assert.equal(realPaths(posix.resolve(missed)), undefined)
+    assert.equal(realPaths(posix.resolve(missed)), LIMIT_REACHED)
     assert.equal(protectedWriteKind(missed, HOME, { ...context(PROJECT), realPaths }), "opencode")
     assert.equal(shellFinding(`echo x > ${missed}`, { ...context(PROJECT), realPaths: createRealPath({ io: loopIo, directories: [PROJECT] }) })?.rule, "self-protection")
   })
@@ -261,10 +262,11 @@ describe("batch 35: cost on long paths and many possible directories", () => {
     )
     assert.equal(kind, undefined)
     assert.ok(single.calls.lstat > 400, `${single.calls.lstat} lookups`)
+    // Written form, resolved form, and exact form (trailing blank): the limit is reached, ask.
     const write = countingIo()
     assert.equal(
-      timed("write, link-free real paths", () => toolFinding("write", { path: `${long} `, content: "x" }, { ...context(PROJECT), realPaths: createRealPath({ io: write.io }) })),
-      undefined,
+      timed("write, link-free real paths", () => toolFinding("write", { path: `${long} `, content: "x" }, { ...context(PROJECT), realPaths: createRealPath({ io: write.io }) })?.rule),
+      "self-protection",
     )
     assert.ok(write.calls.lstat > 400, `${write.calls.lstat} lookups`)
     const cwds = Array.from({ length: 300 }, (_, index) => `${HOME}/${"dir/".repeat(40)}${index}`)
@@ -273,7 +275,7 @@ describe("batch 35: cost on long paths and many possible directories", () => {
       timed("classification, 300 directories, link-free real paths", () =>
         protectedWriteKind(long, HOME, { ...context(PROJECT), cwds, realPaths: createRealPath({ io: many.io, directories: cwds }) }),
       ),
-      undefined,
+      "unchecked",
     )
     assert.equal(many.calls.lstat, MAX_LOOKUPS)
   })
@@ -285,11 +287,11 @@ describe("batch 35: cost on long paths and many possible directories", () => {
     const io = countingIo()
     assert.equal(
       timed("shell, 120 × 120, link-free real paths", () =>
-        shellFinding(command, { ...context(PROJECT), cwds, realPaths: createRealPath({ io: io.io, directories: cwds }) }),
+        shellFinding(command, { ...context(PROJECT), cwds, realPaths: createRealPath({ io: io.io, directories: cwds }) })?.rule,
       ),
-      undefined,
+      "self-protection",
     )
-    // Link resolution traversed up to the cap, which the predicate shares across all targets.
+    // Link resolution traversed up to the cap, which the predicate shares across all targets: ask.
     assert.equal(io.calls.lstat, MAX_LOOKUPS)
   })
 })

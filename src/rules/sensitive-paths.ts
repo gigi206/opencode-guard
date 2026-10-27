@@ -1,6 +1,7 @@
 // Files typically containing credentials (read → confirmation request)
 // and sensitive write locations (persistence, hooks, system, OpenCode config, plugin).
 import { isAbsolute, resolve } from "node:path"
+import { LIMIT_REACHED } from "./types.ts"
 
 const ENV_SAFE_SUFFIXES = new Set(["example", "sample", "template", "dist", "defaults"])
 
@@ -125,9 +126,10 @@ export interface WritePathContext {
   readonly protectedDirs?: readonly string[]
   /**
    * Real paths of an absolute path (`real-path.ts`, built per tool call): protected location reached
-   * through a symbolic link. Absent: lexical comparison only; `undefined` (unknown): same for that path.
+   * through a symbolic link. Absent: lexical comparison only; `undefined` (unknown): same for that path;
+   * `LIMIT_REACHED` (limit): `unchecked` kind, unless self-protection is already recognized.
    */
-  readonly realPaths?: (absolute: string) => readonly string[] | undefined
+  readonly realPaths?: (absolute: string) => readonly string[] | undefined | typeof LIMIT_REACHED
 }
 
 const QUOTES = "\"'`"
@@ -203,9 +205,9 @@ export interface CredentialContext {
   readonly home?: string
   /**
    * Private key recognized by its content (`credential-content.ts`, built per tool call with its directories);
-   * absent: known names and extensions only.
+   * absent: known names and extensions only; `LIMIT_REACHED`: content not checked (limit).
    */
-  readonly credentialContent?: (path: string) => boolean
+  readonly credentialContent?: (path: string) => boolean | typeof LIMIT_REACHED
   /**
    * Directories of the OpenCode service files resolved from the server environment (`OPENCODE_CONFIG_DIR`,
    * `XDG_CONFIG_HOME`, `XDG_STATE_HOME`): `service.json` recognized under them, not only under the default directories.
@@ -224,20 +226,39 @@ function isServiceFile(raw: string, ctx: CredentialContext): boolean {
 
 /**
  * Credential file: known name or extension (`isSecretFile`), `service.json` under a service directory, or private
- * key recognized by its content.
+ * key recognized by its content; `LIMIT_REACHED`: neither a known name nor a service file, content not checked (limit of
+ * the predicate). The content is consulted only if the name is not enough.
  */
-export const isCredentialFile = (raw: string, ctx: CredentialContext) =>
-  isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx) || ctx.credentialContent?.(raw) === true
+export const credentialFile = (raw: string, ctx: CredentialContext): boolean | typeof LIMIT_REACHED =>
+  isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx) || (ctx.credentialContent?.(raw) ?? false)
+
+/** Recognized credential file (`credentialFile`); content not checked does not make one. */
+export const isCredentialFile = (raw: string, ctx: CredentialContext) => credentialFile(raw, ctx) === true
+
+/** Reason of the ask for content not checked (`credentialFile` returns `LIMIT_REACHED`), path quoted or not. */
+export const uncheckedCredentialReason = (path?: string) =>
+  `access to a file that could not be checked for a private key${path === undefined ? "" : ` (${path})`}: the plugin's limit on file checks was reached, or the name is too long to check: confirmation required`
 
 export function isProtectedWritePath(raw: string, home?: string, context: WritePathContext = {}): boolean {
   return protectedWriteKind(raw, home, context) !== undefined
 }
 
-export type WriteKind = "opencode" | "system"
+/**
+ * `unchecked`: real path of a form not known, limit reached (`LIMIT_REACHED`); it could lead to self-protection
+ * (always active): ranked between it and the plain protected location.
+ */
+export type WriteKind = "opencode" | "unchecked" | "system"
 
-const KIND_RANK: Record<WriteKind, number> = { opencode: 2, system: 1 }
+const KIND_RANK: Record<WriteKind, number> = { opencode: 3, unchecked: 2, system: 1 }
 
-/** Strictest kind: self-protection, then protected location, then nothing (explicit maximum, not the first found). */
+/** Reason of the ask for the `unchecked` kind (`self-protection` rule): `subject` designates the write, path quoted or not. */
+export const uncheckedWriteReason = (subject: string, path?: string) =>
+  `${subject} whose real path could not be fully resolved${path === undefined ? "" : ` (${path})`}: the plugin's limit on link checks was reached, or the path is too long to check, so it could not be compared with OpenCode's configuration, the guard plugin and protected locations: confirmation required`
+
+/**
+ * Strictest kind: self-protection, then unchecked real path, then protected location, then nothing (explicit maximum,
+ * not the first found).
+ */
 export function strictestKind(...kinds: ReadonlyArray<WriteKind | undefined>): WriteKind | undefined {
   let strictest: WriteKind | undefined
   for (const kind of kinds) if (kind !== undefined && (strictest === undefined || KIND_RANK[kind] > KIND_RANK[strictest])) strictest = kind
@@ -263,7 +284,8 @@ function kindOf(p: string, absolutes: readonly string[], protectedDirs: readonly
  * Kind of a protected write location: `opencode` (OpenCode configuration, plugin directory: self-protection,
  * always active) or `system` (startup files, `~/.ssh/`, git hooks, `/etc`…: `dangerousCommands` switch).
  * Forms classified: the written form, the form resolved lexically from each base directory and, with `realPaths`,
- * the real paths that differ from it. The strictest wins (`strictestKind`).
+ * the real paths that differ from it. The strictest wins (`strictestKind`); a form whose real paths reached a limit
+ * counts as `unchecked`.
  */
 export function protectedWriteKind(raw: string, home?: string, context: WritePathContext = {}): WriteKind | undefined {
   const expanded = strip(raw).replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, home ?? "~")
@@ -281,7 +303,12 @@ export function protectedWriteKind(raw: string, home?: string, context: WritePat
   // normalize before writing).
   for (const [index, base] of bases.entries()) {
     for (const form of [`${base}/${expanded}`, lexical[index]!]) {
-      for (const real of context.realPaths(form) ?? []) {
+      const reals = context.realPaths(form)
+      if (reals === LIMIT_REACHED) {
+        kind = strictestKind(kind, "unchecked")
+        continue
+      }
+      for (const real of reals ?? []) {
         // Identical to the resolved form: already classified.
         if (real === lexical[index]) continue
         kind = strictestKind(kind, kindOf(real, [real], context.protectedDirs))
@@ -300,7 +327,9 @@ export function protectedWriteKind(raw: string, home?: string, context: WritePat
 export function exactWriteKind(absolute: string, context: WritePathContext = {}): WriteKind | undefined {
   let kind = kindOf(absolute, [absolute], context.protectedDirs)
   if (kind === "opencode" || !context.realPaths) return kind
-  for (const real of context.realPaths(absolute) ?? []) {
+  const reals = context.realPaths(absolute)
+  if (reals === LIMIT_REACHED) return "unchecked"
+  for (const real of reals ?? []) {
     if (real === absolute) continue
     kind = strictestKind(kind, kindOf(real, [real], context.protectedDirs))
     if (kind === "opencode") return kind

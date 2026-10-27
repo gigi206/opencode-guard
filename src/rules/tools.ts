@@ -5,9 +5,9 @@ import { resolveLike } from "../scripts.ts"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes } from "./code-network.ts"
 import { ruleEnabled, type ActiveRules } from "./features.ts"
-import { exactWriteKind, isCredentialFile, protectedWriteKind, strictestKind, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
+import { credentialFile, exactWriteKind, protectedWriteKind, strictestKind, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
 import { shellFinding } from "./shell.ts"
-import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule, type Finding } from "./types.ts"
+import { INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
 
 export interface ToolRuleContext extends WritePathContext, CredentialContext {
   readonly redactor: Redactor
@@ -72,10 +72,13 @@ function record(input: unknown): Record<string, unknown> {
   return input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}
 }
 
-const secretRead = (path: string, ctx: ToolRuleContext): Finding | undefined =>
-  path && ruleEnabled("secret-file-read", ctx.active) && isCredentialFile(path, ctx)
-    ? { verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }
-    : undefined
+/** Credential file; content not checked (limit): ask from the same rule, with its own reason. */
+function secretRead(path: string, ctx: ToolRuleContext): Finding | undefined {
+  if (!path || !ruleEnabled("secret-file-read", ctx.active)) return undefined
+  const found = credentialFile(path, ctx)
+  if (found === true) return { verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }
+  return found === LIMIT_REACHED ? { verdict: "ask", rule: "secret-file-read", reason: uncheckedCredentialReason(path) } : undefined
+}
 
 /**
  * Path as written by OpenCode 2.0.31's `edit`, `write`, and `patch` tools (`resolvePath` from
@@ -89,9 +92,9 @@ function openCodeWritePath(path: string, ctx: ToolRuleContext): string | undefin
 }
 
 /**
- * OpenCode configuration and plugin directory: self-protection (always active); other protected locations.
- * `edit`, `write`, and `patch` tools: written form (`protectedWriteKind`) and OpenCode exact form, which keeps whitespace
- * and leading/trailing quotes (`exactWriteKind`); the strictest wins.
+ * OpenCode configuration and plugin directory: self-protection (always active), like an unchecked real path (limit);
+ * other protected locations. `edit`, `write`, and `patch` tools: written form (`protectedWriteKind`) and OpenCode exact
+ * form, which keeps whitespace and leading/trailing quotes (`exactWriteKind`); the strictest wins.
  */
 function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined {
   if (!path) return undefined
@@ -99,6 +102,7 @@ function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined
   const kind = strictestKind(protectedWriteKind(path, ctx.home, ctx), exact === undefined ? undefined : exactWriteKind(exact, ctx))
   if (kind === "opencode")
     return { verdict: "ask", rule: "self-protection", reason: `write to OpenCode's configuration or to the guard plugin (${path})` }
+  if (kind === "unchecked") return { verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("write to a location", path) }
   if (kind === "system" && ruleEnabled("protected-write", ctx.active))
     return { verdict: "ask", rule: "protected-write", reason: `write to a protected location (${path})` }
   return undefined
@@ -112,6 +116,7 @@ function protectedArgument(path: string, ctx: ToolRuleContext): Finding | undefi
   const kind = protectedWriteKind(path, ctx.home, ctx)
   if (kind === "opencode")
     return { verdict: "ask", rule: "self-protection", reason: `a tool argument designates OpenCode's configuration or the guard plugin (${path})` }
+  if (kind === "unchecked") return { verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("a tool argument designates a location", path) }
   if (kind === "system" && ruleEnabled("protected-write", ctx.active))
     return { verdict: "ask", rule: "protected-write", reason: `a tool argument designates a protected location (${path})` }
   return undefined

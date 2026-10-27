@@ -9,6 +9,7 @@ import { createDecider } from "../src/decide.ts"
 import { registerGate } from "../src/hooks/gate.ts"
 import { createRealPath, MAX_LOOKUPS, type LinkIo } from "../src/real-path.ts"
 import { protectedWriteKind } from "../src/rules/sensitive-paths.ts"
+import { LIMIT_REACHED } from "../src/rules/types.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { fakeContext } from "./fake-ctx.ts"
 
@@ -60,12 +61,12 @@ describe("batch 24: link resolution, component by component", () => {
     assert.deepEqual(real("/"), ["/"])
   })
 
-  it("unknown: link loop, relative or too-long path", () => {
+  it("limit: link loop, too-long path; unknown: relative path", () => {
     const { work } = workspace()
     const real = createRealPath()
-    assert.equal(real(join(work, "loop/f")), undefined)
+    assert.equal(real(join(work, "loop/f")), LIMIT_REACHED)
     assert.equal(real("relatif/f"), undefined)
-    assert.equal(real(`/${"x".repeat(5000)}`), undefined)
+    assert.equal(real(`/${"x".repeat(5000)}`), LIMIT_REACHED)
   })
 
   it("/proc/self: caller and server directories for cwd, root for root, unknown otherwise", () => {
@@ -88,7 +89,7 @@ describe("batch 24: link resolution, component by component", () => {
   it("lookup cap per call, memoized results", () => {
     const { io, calls } = plainIo()
     const real = createRealPath({ io })
-    assert.equal(real(`/${Array.from({ length: MAX_LOOKUPS + 10 }, () => "d").join("/")}`), undefined)
+    assert.equal(real(`/${Array.from({ length: MAX_LOOKUPS + 10 }, () => "d").join("/")}`), LIMIT_REACHED)
     assert.equal(calls.lstat, MAX_LOOKUPS)
     const fresh = plainIo()
     const memo = createRealPath({ io: fresh.io })
