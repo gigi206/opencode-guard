@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as zlib from "node:zlib"
 import plugin, { setupGuard } from "../src/index.ts"
-import { GUARD_ACTION } from "../src/hooks/gate.ts"
+import { GUARD_ACTION, GUARD_SEPARATOR } from "../src/hooks/gate.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -44,7 +44,7 @@ describe("registration", () => {
 describe("guard: execute.before", () => {
   it("deny → exception with the reason, no ask", async () => {
     const { trigger, asserts } = await setup()
-    await assert.rejects(trigger("tool.execute.before", before("shell", { command: "rm -rf ~" })), /\[guard\] Blocked: recursive deletion/)
+    await assert.rejects(trigger("tool.execute.before", before("shell", { command: "rm -rf ~" })), /\[guard\] Blocked \(rule rm-critical\): recursive deletion/)
     assert.equal(asserts.length, 0)
   })
 
@@ -53,7 +53,7 @@ describe("guard: execute.before", () => {
     await trigger("tool.execute.before", before("shell", { command: `git reset --hard && echo ${FAKE.openai}` }))
     assert.equal(asserts.length, 1)
     const input = asserts[0]!
-    assert.equal(input.action, GUARD_ACTION)
+    assert.equal(input.action, `${GUARD_ACTION}${GUARD_SEPARATOR}git-reset-hard: git reset --hard (uncommitted changes lost)`)
     assert.equal(input.sessionID, "ses_1")
     assert.deepEqual(input.source, { type: "tool", messageID: "msg_1", id: "call_1" })
     assert.match(String(input.metadata?.reason), /git reset --hard/)
@@ -243,7 +243,7 @@ describe("plugin log", () => {
     assert.match(log, /WARN decision model disabled: local rules only/)
     assert.match(log, /INFO active \(decision model: disabled; confirmations: ask; system config: (?:not )?enforced\)/)
     assert.match(log, /DEBUG execute\.after read: 1 secret\(s\) redacted/)
-    assert.match(log, /DEBUG shell → deny \(local\)/)
+    assert.match(log, /INFO shell → deny \(local, rule secret-network\)/)
     assert.ok(!log.includes(FAKE.openai) && !log.includes(FAKE.github))
   })
   it("logFile: false → no file", async () => {
@@ -293,7 +293,7 @@ describe("unattended mode (askAs: deny)", () => {
     const { trigger, asserts } = await setup(unattended)
     await assert.rejects(
       trigger("tool.execute.before", before("shell", { command: "git reset --hard" })),
-      /\[guard\] Blocked: confirmation required, but unattended mode \(askAs: deny\) denies it: git reset --hard/,
+      /\[guard\] Blocked \(rule git-reset-hard\): confirmation required, but unattended mode \(askAs: deny\) denies it: git reset --hard/,
     )
     assert.equal(asserts.length, 0)
   })
@@ -401,7 +401,7 @@ describe("decision model key from settings", () => {
     await fake.trigger("tool.execute.before", before("shell", { command: "cargo build" })).catch(() => {})
     const log = readFileSync(file, "utf8")
     assert.match(log, /INFO active \(decision model: nox-4b via http:\/\/127\.0\.0\.1:9\/v1 \(chat\); confirmations: ask; system config: (?:not )?enforced\)/)
-    assert.match(log, /DEBUG shell → ask \(model-error\): nox-4b unavailable/)
+    assert.match(log, /INFO shell → ask \(model-error\): nox-4b unavailable/)
     assert.ok(!log.includes(KEY))
   })
 })
@@ -468,12 +468,12 @@ describe("audit no. 4: plugin enforced by system configuration", () => {
 describe("session ses_ec3c…: log and rejection message", () => {
   const capture = () => {
     const lines: string[] = []
-    return { lines, log: { debug: (m: string) => lines.push(m), info() {}, warn() {}, error() {} } }
+    return { lines, log: { debug: (m: string) => lines.push(m), info: (m: string) => lines.push(m), warn() {}, error() {} } }
   }
   it("rejection: anti-evasion instruction, except for the placeholder (which asks for another change)", async () => {
     const { blockedMessage } = await import("../src/hooks/gate.ts")
-    assert.match(blockedMessage("fork bomb", "fork-bomb"), /^\[guard\] Blocked: fork bomb\. Do not try to evade this check/)
-    assert.equal(blockedMessage("placeholder reason", "placeholder"), "[guard] Blocked: placeholder reason")
+    assert.match(blockedMessage("fork bomb", "fork-bomb"), /^\[guard\] Blocked \(rule fork-bomb\): fork bomb\. Do not try to evade this check/)
+    assert.equal(blockedMessage("placeholder reason", "placeholder"), "[guard] Blocked (rule placeholder): placeholder reason")
     const { trigger } = await setup()
     await assert.rejects(trigger("tool.execute.before", before("shell", { command: "rm -rf /" })), /Do not try to evade this check/)
     await assert.rejects(trigger("tool.execute.before", before("write", { path: "a.ts", content: "[[GUARD_REDACTED:jwt]]" })), (error: Error) => !/evade/.test(error.message))
@@ -976,7 +976,7 @@ describe("lot 8: approvals per session, rejections always applied", () => {
     const { fake, warns, evaluation } = await gate()
     const event = await fake.trigger("permission.evaluate", evaluation("ses_1", ["git reset --hard", "rm -rf ~"]))
     assert.equal(event.effect, "deny")
-    assert.match(String(event.message), /\[guard\] Blocked: recursive deletion/)
+    assert.match(String(event.message), /\[guard\] Blocked \(rule rm-critical\): recursive deletion/)
     assert.deepEqual(warns, ["deny found only in shell sub-commands after approval (rule rm-critical)"])
   })
 
@@ -1361,7 +1361,7 @@ describe("lot 28: MCP tool with a credential path", () => {
     const input = { pageId: 1, uid: "e1", filePaths: ["~/.ssh/id_ed25519_guard_test"] }
     await trigger("tool.execute.before", before("chrome-devtools-mcp_upload_file", input))
     assert.equal(asserts.length, 1)
-    assert.equal(asserts[0]!.action, GUARD_ACTION)
+    assert.ok(asserts[0]!.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}secret-file-read: access to a credential file`), asserts[0]!.action)
     assert.match(String(asserts[0]!.metadata?.reason), /credential file/)
     const own = await trigger("permission.evaluate", {
       sessionID: "ses_1",

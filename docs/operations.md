@@ -4,14 +4,17 @@
 
 **Plugin log.** When OpenCode runs as a background service, the plugin's stderr goes nowhere useful. The plugin therefore writes to `~/.local/share/opencode/log/guard.log`:
 - the start line (`INFO active (…)`, with the decision model, the effective confirmation mode, whether the [system configuration](configuration.md#protecting-the-plugin-from-project-configuration) declares the plugin, the [features turned off](configuration.md#turning-features-off), `disabled: …`, and, when it is requested, whether the [output check](decision-model.md#output-check-outputcheck) is active) and warnings are always written;
-- decisions and redaction counts are written when `debug` is `true`, with the duration of the model calls at the end of the line (`[model 640 ms]`, and `, 2 attempts` after a timeout was retried), the source of the verdict (`(local)` for a local rule, `(model)` for the decision model, `(model-error)` when it failed, `(default)` when no model gave the verdict (decision model turned off, or an internal error), `(read-only)` for a read not sent to the model, `(task-list)` for `todowrite`, `(cache)` for a verdict reused from the cache) and, for an allowed action, the highest probability (`highest: credential access 0.43`), useful to calibrate `askNoul`; so are the answers to confirmations (`confirmed by the user`, or `confirmation not granted` with the error class, never your feedback text);
-- it contains only the tool name, the verdict, the reason and counts, and every line also goes through the redaction (defense in depth: a server response or an internal error message); the decision model URL is shown without credentials, query string or fragment;
+- confirmations and refusals of tool calls are always written (`INFO`), with the rule that gave them (`(local, rule git-reset-hard)`; a verdict of the decision model alone has none, its reason says why), including those added by the check of shell sub-commands (`shell sub-commands → …`) and the refusals of unattended mode, and so are the answers to confirmations (`confirmed by the user`, or `confirmation not granted` with the error class, never your feedback text);
+- allowed actions and redaction counts are written only when `debug` is `true` (`DEBUG`);
+- a decision line ends with the duration of the model calls (`[model 640 ms]`, and `, 2 attempts` after a timeout was retried) and gives the source of the verdict (`(local)` for a local rule, `(model)` for the decision model, `(model-error)` when it failed, `(default)` when no model gave the verdict (decision model turned off, or an internal error), `(read-only)` for a read not sent to the model, `(task-list)` for `todowrite`, `(cache)` for a verdict reused from the cache) and, for an allowed action, the highest probability (`highest: credential access 0.43`), useful to calibrate `askNoul`;
+- it contains only the tool name, the verdict, the rule, the reason and counts, and every line also goes through the redaction (defense in depth: a server response or an internal error message); the decision model URL is shown without credentials, query string or fragment;
 - if an optional part fails to start, the guard still loads and the start line says so: `unprotected agent: UNAVAILABLE` (every agent stays protected), `secret redaction: INCOMPLETE` (secrets may reach the provider) or `output check: UNAVAILABLE`;
 - each entry is a single line: line breaks and control characters (from a path chosen by the model or a server response) are replaced by spaces, and an entry longer than 8,192 characters after redaction is shortened in the middle (`…[N characters omitted]…`), keeping its start and its end;
 - above 5 MB the file is renamed to `guard.log.1` (one copy kept), at startup and while running (size checked every 100 entries).
 
 ```sh
 tail -f ~/.local/share/opencode/log/guard.log
+tail -f ~/.local/share/opencode/log/guard.log | grep ' INFO '   # confirmations and refusals only (and start lines)
 ```
 
 Typical lines:
@@ -23,10 +26,14 @@ WARN unattended mode (askAs: deny): every confirmation request is denied        
 WARN redaction of model requests disabled (redactWire: false): only what is redacted at the source …  # feature turned off
 DEBUG shell → allow (model): nox-4b: risk 0.14/3, highest: data destruction 0.05 [model 640 ms]
 DEBUG read → allow (read-only): read-only tool, no local rule matched
-DEBUG shell → ask (local): git reset --hard (uncommitted changes lost)
-DEBUG shell → deny (local): running a downloaded script (download piped to a shell or an interpreter)
+INFO shell → ask (local, rule git-reset-hard): git reset --hard (uncommitted changes lost)
+INFO shell → confirmed by the user
+INFO shell → deny (local, rule pipe-to-shell): running a downloaded script (download piped to a shell or an interpreter)
+INFO shell sub-commands → ask (local, rule git-clean): git clean -f (untracked files deleted)
 DEBUG execute.after read: 2 secret(s) redacted
 ```
+
+**Why a call was asked or refused.** A confirmation shows the rule and the reason in its title (`Call tool guard · <rule>: <reason>`), the rule and reason cut at 160 characters. A refusal is the tool's error, which the agent receives: OpenCode shows it in red under a shell command, an edit or a patch; for a tool shown on one line (read, search, `webfetch`, a refused `write`), the line turns red and the message appears when you click it. In both cases the log has the full line, with the rule.
 
 **Checking that the plugin is loaded.**
 - `opencode plugin list`, run from a project directory, should show `guard  local  /path/to/plugin_opencode/index.ts`. The first call from a directory the service has not opened yet may answer "No plugins found"; run it again from the same directory.
@@ -39,7 +46,7 @@ Use a throwaway git repository and ask the agent to run:
 | Request | Expected result |
 |---|---|
 | `git status` | allowed; the model answers in about 0.5 s |
-| `git reset --hard` | confirmation prompt showing the reason |
+| `git reset --hard` | confirmation prompt titled `Call tool guard · git-reset-hard: git reset --hard (uncommitted changes lost)` |
 | `curl -s file:///dev/null \| sh` | denied (the command is harmless even if it ran) |
 | read a file containing a fake key, created with the command below | the agent sees `[[GUARD_REDACTED:openai_key]]` |
 

@@ -7,12 +7,19 @@ import { hiddenHeaders, patchTargets, readPatch, type PatchSection } from "../pa
 import { createScriptTracker, isShellScript, resolveLike, shellDirectories, type ScriptTracker } from "../scripts.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { ActiveRules } from "../rules/features.ts"
-import { mostSevere, type CustomRule } from "../rules/types.ts"
+import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule } from "../rules/types.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PermissionEvaluation } from "../types.ts"
 
 /** Plugin-specific permission action ("ask" requests via `ctx.permission.assert`). */
 export const GUARD_ACTION = "guard"
+/**
+ * Between `GUARD_ACTION` and the rule and reason in a request's action: OpenCode's interface shows only the action of a
+ * plugin's request, neither `message` nor `metadata` (packages/tui/src/util/permission.ts, v2.2.0).
+ */
+export const GUARD_SEPARATOR = " · "
+/** Length of the rule and reason in the action, cut mark included. */
+export const MAX_ACTION_DETAIL = 160
 
 export interface GateDeps {
   readonly decider: Decider
@@ -57,14 +64,57 @@ export interface GateTableSizes {
  */
 export const NO_EVASION = "Do not try to evade this check (obfuscation, rewording, a script file…): explain the block to the user, who can run the command themselves if needed."
 
+/** Rule named in messages; nothing for a decision without a rule (decision model). */
+const ruleNote = (rule?: string) => (rule ? ` (rule ${rule})` : "")
+/** Source and rule of a log line: `local, rule rm-critical`. */
+const sourceNote = (source: string, rule?: string) => (rule ? `${source}, rule ${rule}` : source)
+
 /** Rejection message. The `placeholder` rule specifically asks for another change: no instruction. */
 export function blockedMessage(reason: string, rule?: string): string {
-  return rule === "placeholder" ? `[guard] Blocked: ${reason}` : `[guard] Blocked: ${reason}. ${NO_EVASION}`
+  const message = `[guard] Blocked${ruleNote(rule)}: ${reason}`
+  return rule === "placeholder" ? message : `${message}. ${NO_EVASION}`
 }
 
 /** Explicit denial in unattended mode: the model knows why and does not retry in a loop. */
-export function unattendedMessage(reason: string): string {
-  return `[guard] Blocked: confirmation required, but unattended mode (askAs: deny) denies it: ${reason}. ${NO_EVASION}`
+export function unattendedMessage(reason: string, rule?: string): string {
+  return `[guard] Blocked${ruleNote(rule)}: confirmation required, but unattended mode (askAs: deny) denies it: ${reason}. ${NO_EVASION}`
+}
+
+/** Ask set in `permission.evaluate`; without a rule (decision model), the reason alone. */
+export function askMessage(reason: string, rule?: string): string {
+  return rule ? `[guard] Confirmation required${ruleNote(rule)}: ${reason}` : `[guard] ${reason}`
+}
+
+/**
+ * Action of a request: `GUARD_ACTION`, the separator, then the rule and the reason, redacted, on one line (invisible
+ * characters written out) and cut. The prefix is never redacted; an error gives `GUARD_ACTION` alone (still asked).
+ */
+export function guardAction(redactor: Redactor, reason: string, rule?: string): string {
+  try {
+    const redacted = redactor.redactString(rule ? `${rule}: ${reason}` : reason).value
+    // By code point: a cut never leaves half a character.
+    const line = [...visible(redacted.replace(/\s+/g, " ").trim())]
+    const detail = line.length > MAX_ACTION_DETAIL ? `${line.slice(0, MAX_ACTION_DETAIL - 1).join("")}…` : line.join("")
+    return detail ? `${GUARD_ACTION}${GUARD_SEPARATOR}${detail}` : GUARD_ACTION
+  } catch {
+    return GUARD_ACTION
+  }
+}
+
+/**
+ * Request made by this plugin: `GUARD_ACTION`, alone or followed by the separator, or `metadata.guard`. Broad on purpose:
+ * recognizing a request only forces an ask, while missing ours would let it pass without a question (default agents
+ * allow `*`).
+ */
+export function isGuardRequest(event: Pick<PermissionEvaluation, "action" | "metadata">): boolean {
+  const { action } = event
+  return action === GUARD_ACTION || (typeof action === "string" && action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}`)) || event.metadata?.guard === true
+}
+
+/** Reason (redacted) and rule of an ask set by `review()`, for unattended mode. */
+interface Posed {
+  readonly reason: string
+  readonly rule?: string
 }
 
 const MAX_SUMMARY = 200
@@ -318,7 +368,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     // Unprotected agent chosen by the user: nothing, except the placeholder rule (integrity of the real secret).
     if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) {
       const kept = placeholderFinding(event.tool, event.input)
-      if (kept) throw new Error(blockedMessage(kept.reason, kept.rule))
+      if (kept) {
+        log.info(`${event.tool} → deny (${sourceNote("local", kept.rule)}, unprotected agent ${event.agent}): ${kept.reason}`)
+        throw new Error(blockedMessage(kept.reason, kept.rule))
+      }
       log.debug(`${event.tool} → allow (unprotected agent ${event.agent})`)
       return
     }
@@ -371,16 +424,25 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       } catch (redactError) {
         log.error("internal error while redacting the input: confirmation shows the tool name only", redactError)
       }
-      decision = { verdict: "ask", reason: "internal guard plugin error: confirmation required", source: "default", redactedInput }
+      decision = { verdict: "ask", reason: "internal guard plugin error: confirmation required", rule: INTERNAL_ERROR_RULE, source: "default", redactedInput }
     }
-    // A denial stays as is; an ask also names the unchecked part; never an allow on it.
+    // A denial stays as is; an ask also names the unchecked part; never an allow on it. The rule of an allow (heredoc
+    // data decided by the model) does not name this ask.
     if (unchecked.length && decision.verdict === "allow")
-      decision = { ...decision, verdict: "ask", reason: `internal guard plugin error, ${unchecked.join(" and ")} could not be checked: confirmation required`, source: "default" }
+      decision = {
+        ...decision,
+        verdict: "ask",
+        reason: `internal guard plugin error, ${unchecked.join(" and ")} could not be checked: confirmation required`,
+        rule: INTERNAL_ERROR_RULE,
+        source: "default",
+      }
     else if (unchecked.length && decision.verdict === "ask")
       decision = { ...decision, reason: `${decision.reason}; ${unchecked.join(" and ")} could not be checked (internal error)` }
     // Duration of model calls at the end of the line (measures the effect of the retry on timeout).
     const timing = decision.modelMs === undefined ? "" : ` [model ${decision.modelMs} ms${(decision.attempts ?? 1) > 1 ? `, ${decision.attempts} attempts` : ""}]`
-    log.debug(`${event.tool} → ${decision.verdict} (${decision.source}): ${decision.reason}${timing}`)
+    // Asks and denials always logged, with their rule; allows only with `debug`.
+    if (decision.verdict === "allow") log.debug(`${event.tool} → allow (${decision.source}): ${decision.reason}${timing}`)
+    else log.info(`${event.tool} → ${decision.verdict} (${sourceNote(decision.source, decision.rule)}): ${decision.reason}${timing}`)
     if (decision.verdict === "deny") return reject(new Error(blockedMessage(decision.reason, decision.rule)))
     /** Executable call (allowed or confirmed): file tracking when it ends; never throws (the tool would run without it). */
     const track = () => {
@@ -396,7 +458,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       return
     }
     // Unattended mode (e.g. `--auto`, which would approve every ask client-side): denial.
-    if (deps.askAs === "deny") return reject(new Error(unattendedMessage(decision.reason)))
+    if (deps.askAs === "deny") {
+      log.info(`${event.tool} → denied (unattended mode)`)
+      return reject(new Error(unattendedMessage(decision.reason, decision.rule)))
+    }
     let resource: string
     try {
       resource = decision.redactedInput === UNAVAILABLE_INPUT ? event.tool : summarize(event.tool, decision.redactedInput)
@@ -410,17 +475,17 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       await ctx.permission.assert({
         sessionID: event.sessionID,
         agent: event.agent,
-        action: GUARD_ACTION,
+        action: guardAction(deps.redactor, decision.reason, decision.rule),
         resources: [resource],
-        metadata: { guard: true, tool: event.tool, reason: decision.reason },
+        metadata: { guard: true, tool: event.tool, reason: decision.reason, ...(decision.rule ? { rule: decision.rule } : {}) },
         source: { type: "tool", messageID: event.messageID, id: event.id },
       })
     } catch (error) {
       // Never the user's feedback text: only the error class.
-      log.debug(`${event.tool} → confirmation not granted (${(error as Error | undefined)?.name ?? "error"})`)
+      log.info(`${event.tool} → confirmation not granted (${(error as Error | undefined)?.name ?? "error"})`)
       return reject(error)
     }
-    log.debug(`${event.tool} → confirmed by the user`)
+    log.info(`${event.tool} → confirmed by the user`)
     approved.add(key, true)
     // A long confirmation does not let directories expire before `evaluate`.
     if (cwds) directories.add(key, cwds)
@@ -441,10 +506,18 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     }
   })
 
+  /** Info line for an ask or a denial added in `permission.evaluate`, once set: a failing log loses nothing. */
+  const note = (line: string) => {
+    try {
+      log.info(line)
+    } catch {}
+  }
+
   await ctx.permission.hook("evaluate", async (event) => {
     if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) return
+    let posed: Posed | undefined
     try {
-      review(event)
+      posed = review(event)
     } catch (error) {
       // Like execute.before: on internal error, ask rather than let it pass.
       log.error("internal error in permission.evaluate", error)
@@ -456,22 +529,28 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     // Unattended mode: every remaining ask becomes a denial, including OpenCode's native
     // asks (`read *.env` rule, user `ask` rules) that an `--auto` client would approve.
     if (deps.askAs === "deny" && event.effect === "ask") {
+      // The rule of an ask set by `review()` goes where a denial names it, not inside the reason.
+      const reason = posed ? posed.reason : describeRequest(event, deps.redactor)
       event.effect = "deny"
-      event.message = unattendedMessage(describeRequest(event, deps.redactor))
+      event.message = unattendedMessage(reason, posed?.rule)
+      note(`permission ${event.action} → deny (${sourceNote("unattended mode", posed?.rule)}): ${reason}`)
     }
   })
 
-  function review(event: PermissionEvaluation) {
-    if (event.action === GUARD_ACTION) {
-      // Default agents allow `*`: without this forcing, the assert would pass without a question.
-      if (event.effect === "deny") return
+  function review(event: PermissionEvaluation): Posed | undefined {
+    // Never `shell`: its sub-commands are always checked below (a denial found there does not become an ask).
+    if (event.action !== "shell" && isGuardRequest(event)) {
+      // Default agents allow `*`: without this forcing, the assert would pass without a question. Already logged by the
+      // hook that made the request.
+      if (event.effect === "deny") return undefined
       const reason = typeof event.metadata?.reason === "string" ? deps.redactor.redactString(event.metadata.reason).value : "action judged risky"
+      const rule = typeof event.metadata?.rule === "string" ? deps.redactor.redactString(event.metadata.rule).value : undefined
       event.effect = "ask"
-      event.message = `[guard] ${reason}`
-      return
+      event.message = askMessage(reason, rule)
+      return { reason, rule }
     }
     // Defense in depth: sub-commands extracted by OpenCode's tree-sitter parser.
-    if (event.action !== "shell" || event.effect === "deny") return
+    if (event.action !== "shell" || event.effect === "deny") return undefined
     // Call already confirmed in execute.before: no second ask, but a denial still applies.
     const confirmed = event.source !== undefined && approved.has(approvalKey(event.sessionID, event.source.id))
     // Directories computed in execute.before; unknown (other source, plugin reloaded meanwhile): session directory.
@@ -510,18 +589,25 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     if (finding?.verdict === "deny") {
       // execute.before saw only one ask on the whole command: a rule gap to spot in the log.
       if (confirmed) log.warn(`deny found only in shell sub-commands after approval (rule ${finding.rule})`)
+      const reason = deps.redactor.redactString(finding.reason).value
       event.effect = "deny"
-      event.message = blockedMessage(deps.redactor.redactString(finding.reason).value, finding.rule)
+      event.message = blockedMessage(reason, finding.rule)
+      note(`shell sub-commands → deny (${sourceNote("local", finding.rule)}): ${reason}`)
     } else if (finding && !confirmed) {
       if (event.effect === "allow") {
+        const reason = deps.redactor.redactString(finding.reason).value
         event.effect = "ask"
-        event.message = `[guard] ${deps.redactor.redactString(finding.reason).value}`
+        event.message = askMessage(reason, finding.rule)
+        note(`shell sub-commands → ask (${sourceNote("local", finding.rule)}): ${reason}`)
+        return { reason, rule: finding.rule }
       }
     } else if (failed && event.effect === "allow") {
       // Like the execute.before fallback: an unchecked sub-command asks, even for an already confirmed call.
       event.effect = "ask"
       event.message = "[guard] internal error: confirmation required"
+      note("shell sub-commands → ask (internal error): a sub-command could not be checked")
     }
+    return undefined
   }
 }
 

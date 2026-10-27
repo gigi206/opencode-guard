@@ -9,7 +9,7 @@ import { redactToolError } from "../secrets/errors.ts"
 import { PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
 import type { GuardContext, Logger, ToolAfterEvent, ToolResult } from "../types.ts"
-import { GUARD_ACTION, summarize, timedMap } from "./gate.ts"
+import { guardAction, summarize, timedMap } from "./gate.ts"
 import { REDACTION_NOTE } from "./redaction.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 
@@ -229,7 +229,7 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
           await ctx.permission.assert({
             sessionID: event.sessionID,
             agent: event.agent,
-            action: GUARD_ACTION,
+            action: guardAction(deps.redactor, reason),
             resources: [resource],
             metadata: { guard: true, tool: event.tool, reason },
             source: { type: "tool", messageID: event.messageID, id: event.id },

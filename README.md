@@ -106,14 +106,14 @@ All options live under `options` in the plugin entry.
 | `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`. |
 | `outputCheck` | off | Also ask the decision model whether an output still holds a secret in clear. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
-| `debug` | `false` | Log every decision and every redaction count. |
+| `debug` | `false` | Also log allowed actions and redaction counts; confirmations and refusals are always logged. |
 | `logFile` | `~/.local/share/opencode/log/guard.log` | Plugin log file; `false` means stderr only. |
 
 Full reference, defaults, environment substitutions and edge cases: [Configuration](docs/configuration.md). Model choices, thresholds and local serving: [Decision model](docs/decision-model.md).
 
 ## Logs
 
-The start line states the model, the confirmation mode and whether the system configuration enforces the plugin. With `debug: true`, each line shows the verdict, its source (`local`, `model`, `cache`…) and the duration of the model call.
+The start line states the model, the confirmation mode and whether the system configuration enforces the plugin. Every confirmation and refusal is logged with its source (`local`, `model`, `cache`…), its rule, its full reason and the duration of the model call, for example `shell → ask (local, rule git-reset-hard): …`; with `debug: true`, allowed actions too. A confirmation prompt shows the same rule and reason in its title, cut at 160 characters.
 
 ```sh
 tail -f ~/.local/share/opencode/log/guard.log

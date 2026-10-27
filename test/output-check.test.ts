@@ -161,7 +161,7 @@ describe("batch 32: output check (fake model)", () => {
     const event = done("webfetch", { output: "db password is hunter-two-x", content: [{ type: "text", text: "db password is hunter-two-x" }] })
     await fake.trigger("tool.execute.after", event)
     assert.equal(fake.asserts.length, 1)
-    assert.equal(fake.asserts[0]!.action, "guard")
+    assert.equal(fake.asserts[0]!.action, "guard · the output of webfetch may contain a secret in clear (nox-4b 0.90): approve to pass it to the agent, reject to withhold it")
     assert.match(String(fake.asserts[0]!.metadata?.reason), /output of webfetch may contain a secret in clear \(nox-4b 0\.90\)/)
     assert.deepEqual(fake.asserts[0]!.source, { type: "tool", messageID: "msg_1", id: "call_1" })
     assert.equal(event.result.output, "db password is hunter-two-x")

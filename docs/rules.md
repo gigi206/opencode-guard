@@ -91,7 +91,7 @@ For autonomous runs, set `askAs` to `"deny"`, typically through `"askAs": "{env:
 
 Actions that the decision model allows are not confirmations and still run in this mode, including a CodeMode script that uses `fetch` without referring to `tools` or writing a local address (see [Local rules](#local-rules)).
 
-The model receives an explicit reason, e.g. `[guard] Blocked: confirmation required, but unattended mode (askAs: deny) denies it: git reset --hard (uncommitted changes lost)`. The plugin log states the effective mode at every start (`INFO active (…; confirmations: denied (unattended mode))`), so a misspelled variable, which silently yields `"ask"`, is visible there.
+The model receives an explicit reason, e.g. `[guard] Blocked (rule git-reset-hard): confirmation required, but unattended mode (askAs: deny) denies it: git reset --hard (uncommitted changes lost)`. The plugin log states the effective mode at every start (`INFO active (…; confirmations: denied (unattended mode))`), so a misspelled variable, which silently yields `"ask"`, is visible there.
 
 With `"askAs": "{env:GUARD_ASK_AS}"`, the variable must reach the **server**, since the configuration is read there. Use `--standalone`, which starts a private server that inherits the CLI's environment:
 
