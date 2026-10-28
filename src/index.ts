@@ -6,14 +6,18 @@ import { readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features } from "./config.ts"
+import { defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
 import { createDecider } from "./decide.ts"
+import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
+import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
 import { registerGate } from "./hooks/gate.ts"
 import { registerOutputCheck } from "./hooks/output-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
-import { declaredOutputCheck, globalConfigDirectory, type OutputCheckState } from "./output-check.ts"
+import { declaredOutputCheck, declaredPluginOptions, globalConfigDirectory, type OutputCheckState } from "./output-check.ts"
+import { RULE_FEATURES } from "./rules/features.ts"
+import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
 import { serviceDirectories, serviceSecretSource } from "./secrets/opencode-service.ts"
 import { createRedactor } from "./secrets/redact.ts"
@@ -67,6 +71,14 @@ export function enforcedBySystemConfig(pluginDir: string, systemDir: string): bo
   })
 }
 
+/** The key and headers come from the settings ({env:…}): redacted even if they are not in the environment. */
+export function knownSecrets(config: GuardConfig): Array<{ name: string; value: string }> {
+  return [
+    ...(config.decision?.apiKey ? [{ name: "decision.apiKey", value: config.decision.apiKey }] : []),
+    ...Object.entries(config.decision?.headers ?? {}).map(([name, value]) => ({ name: `decision.headers.${name}`, value })),
+  ]
+}
+
 /**
  * Configured log file: refused if it designates a credential file or a write-protected location
  * (OpenCode configuration, plugin directory, startup files, `~/.ssh`, git hooks, `/etc`) → default
@@ -104,16 +116,49 @@ export async function setupGuard(
   env: Record<string, string | undefined> = process.env,
   systemDir: string = systemConfigDirectory(),
   globalDir: string | undefined = globalConfigDirectory(env),
+  scopeClock?: { readonly now: () => number; readonly intervalMs: number },
 ) {
-  const { config, warnings } = parseConfig(ctx.options, env)
-  // The key and headers come from the settings ({env:…}): redacted even if they are not in process.env.
-  const knownSecrets = [
-    ...(config.decision?.apiKey ? [{ name: "decision.apiKey", value: config.decision.apiKey }] : []),
-    ...Object.entries(config.decision?.headers ?? {}).map(([name, value]) => ({ name: `decision.headers.${name}`, value })),
-  ]
+  // The plugin directory is hot-reloaded: modifying it would disable the guardrail. Real form too (plugin loaded
+  // through a path containing a symbolic link).
+  const pluginDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
+  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir)])]
+  // Settings by agent and by project: guard.json files (global, and each `.opencode` OpenCode reads for the session
+  // directory), identity taken before reading (a change in between is seen at the next check). Never throws.
+  const paths = guardPaths(ctx.location.directory, globalDir, systemDir)
+  let identity: string | undefined
+  let files: GuardFile[] = []
+  const unread: string[] = []
+  try {
+    identity = guardIdentity(paths)
+    files = readGuardFiles(paths)
+  } catch {
+    unread.push("guard.json files could not be read: they are read again at the next check")
+  }
+  const project = (() => {
+    try {
+      return realpathSync(ctx.location.directory)
+    } catch {
+      return undefined
+    }
+  })()
+  const realOrUndefined = (path: string) => {
+    try {
+      return realpathSync(path)
+    } catch {
+      return undefined
+    }
+  }
+  // Relaxations (`profile`, `ruleOverrides`): kept only if the global or system configuration declares them too, or the
+  // project is trusted when a guard.json file or a section exists.
+  const { config, warnings } = parseConfig(ctx.options, env, () => declaredPluginOptions({ pluginDir, globalDir, systemDir, env }), {
+    files,
+    ...(project ? { project } : {}),
+    realPath: realOrUndefined,
+  })
+  warnings.push(...unread)
   // OpenCode service password and remote access route: re-read from its files (`env` directories).
   const runtimeSecrets = serviceSecretSource(serviceDirectories(env))
-  const redactor = createRedactor({ extraPatterns: config.secretPatterns, allowlist: config.allowlist, env, knownSecrets, runtimeSecrets })
+  const redactor = createRedactor({ extraPatterns: config.secretPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
   let home: string | undefined
   let homeError: unknown
   try {
@@ -121,10 +166,6 @@ export async function setupGuard(
   } catch (error) {
     homeError = error
   }
-  // The plugin directory is hot-reloaded: modifying it would disable the guardrail. Real form too (plugin loaded
-  // through a path containing a symbolic link).
-  const pluginDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
-  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir)])]
   // OpenCode global configuration directory resolved from the server environment (`OPENCODE_CONFIG_DIR`,
   // `XDG_CONFIG_HOME`): protected like the default directory, which the rules recognize by name only.
   const configDir = globalDir ? resolve(globalDir) : undefined
@@ -148,10 +189,28 @@ export async function setupGuard(
   for (const name of FEATURE_NAMES) if (!config.features[name] && name !== "decisionModel") log.warn(FEATURE_OFF[name])
   if (!config.features.dangerousCommands && !config.features.sensitiveFiles && !(config.decision && config.features.decisionModel))
     log.warn("no built-in local rule and no decision model: only the placeholder rule, self-protection and your own rules apply")
+  // Settings that leave local asks to the decision model: without it, they do nothing.
+  const { localAsksByModel, selfProtectionByModel } = config.policy
+  const byModel = [
+    ...(localAsksByModel ? ['localAsks "model"'] : []),
+    ...[...(config.policy.overrides ?? [])].filter(([, setting]) => setting === "model").map(([rule]) => `ruleOverrides.${rule} "model"`),
+    ...(selfProtectionByModel ? ["selfProtectionByModel"] : []),
+  ]
+  if (byModel.length && !(config.decision && config.features.decisionModel))
+    log.warn(`${byModel.join(", ")} retained but the decision model is disabled: these asks stay with you`)
+  else if (selfProtectionByModel && !localAsksByModel && ![...(config.policy.overrides ?? [])].some(([rule, setting]) => setting === "model" && RULE_FEATURES.get(rule) === "always"))
+    log.warn('selfProtectionByModel has no effect without localAsks "model" or an always-active rule set to "model"')
+  // A repository may replace the model's address or switch it on: such a model never allows an ask.
+  if (config.decision && config.features.decisionModel && !config.modelGrants)
+    log.warn(
+      `decision model not declared by the global configuration (${config.modelWithheld}): it may deny, but never allows an ask left to it (heredoc data, CodeMode's fetch, localAsks, "model", selfProtectionByModel): these stay with you`,
+    )
 
   if (homeError !== undefined) log.warn(`home directory unknown (${String(homeError)}): only the ~ and $HOME forms are recognized`)
-  const model = config.decision && config.features.decisionModel ? createModelClient(config.decision) : undefined
-  const decider = createDecider({ config, redactor, model, home, protectedDirs, serviceDirs, readContent: true, resolveLinks: true, log })
+  // Client created with `decision` even when the switch is off: an agent section may turn the model on (each call says).
+  const client = config.decision ? createModelClient(config.decision) : undefined
+  const model = config.features.decisionModel ? client : undefined
+  const decider = createDecider({ config, redactor, model: client, home, protectedDirs, pluginDirs, serviceDirs, readContent: true, resolveLinks: true, log })
 
   // Optional parts isolated: their failure must not prevent the guard from loading (plugin not loaded = no
   // protection); the degraded state is announced in the startup line.
@@ -163,6 +222,18 @@ export async function setupGuard(
     log.error("unprotected agent unavailable, every agent stays protected", error)
     degraded.push("unprotected agent: UNAVAILABLE")
   }
+  // Main agent of each session, recorded at the prompt while the settings in force have an agent section (an agent
+  // section written while OpenCode runs counts from the next prompt).
+  let agents: MainAgents | undefined
+  let sectioned = () => false
+  try {
+    agents = await registerMainAgents(ctx, log, () => sectioned())
+  } catch (error) {
+    log.error("agent sections: main agents cannot be recorded, only the hardenings of the agent sections apply", error)
+    degraded.push("main agents: UNAVAILABLE")
+  }
+  const scopes = createScopes({ config, paths, ...(identity === undefined ? {} : { identity }), ...(agents ? { agents } : {}), log, ...(scopeClock ? { now: scopeClock.now, intervalMs: scopeClock.intervalMs } : {}) })
+  sectioned = () => scopes.sectioned()
   try {
     await registerGate(ctx, {
       decider,
@@ -170,12 +241,14 @@ export async function setupGuard(
       home,
       rules: config.rules,
       protectedDirs,
+      pluginDirs,
       serviceDirs,
       askAs: config.askAs,
       log,
       unprotected,
-      active: config.features,
+      active: config.policy,
       trackScripts: config.features.scripts,
+      scopes,
       readContent: true,
       resolveLinks: true,
     })
@@ -232,8 +305,13 @@ export async function setupGuard(
   const modelText = model && config.decision ? `${config.decision.model} via ${displayURL(config.decision.baseURL)} (${config.decision.protocol})` : "disabled"
   const disabled = FEATURE_NAMES.filter((name) => !config.features[name])
   const off = disabled.length ? `; disabled: ${disabled.join(", ")}` : ""
+  // Profile and rule settings retained, only when they differ from the defaults.
+  const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
+  const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)
+  const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}`
   const checked = outputCheck === undefined ? "" : `; output check: ${outputCheck.active ? "active" : "inactive"}`
-  log.info(`active (decision model: ${modelText}; confirmations: ${confirmations}; system config: ${enforced}${off}${checked}${degraded.map((item) => `; ${item}`).join("")})`)
+  log.info(`active (decision model: ${modelText}; confirmations: ${confirmations}; system config: ${enforced}${profile}${overrides}${off}${checked}${degraded.map((item) => `; ${item}`).join("")})`)
+  if (config.version) log.info(`settings by agent and by project (${config.version.summary})`)
   if (config.askAs === "deny") log.warn("unattended mode (askAs: deny): every confirmation request is denied")
 }
 

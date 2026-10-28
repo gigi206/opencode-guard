@@ -26,7 +26,7 @@ decision model ── deny / ask / allow
   └▶ confirmation prompt
 ```
 
-A local `deny` is final, and the decision model can only make a decision **stricter**. Read-only tools (`read`, `glob`, `grep`) and the task list are not sent to the model. See [How it works](docs/architecture.md) for the full hook list and principles.
+A local `deny` is final, and the decision model can only make a decision **stricter**, unless you leave some local confirmations to it (`localAsks`, `"model"` in `ruleOverrides`); only the model your global configuration declares, with the same thresholds and other settings, can allow them. Read-only tools (`read`, `glob`, `grep`) and the task list are not sent to the model. See [How it works](docs/architecture.md) for the full hook list and principles.
 
 ## Rules at a glance
 
@@ -106,10 +106,15 @@ All options live under `options` in the plugin entry.
 | `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`. |
 | `outputCheck` | off | Also ask the decision model whether an output still holds a secret in clear. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
-| `debug` | `false` | Also log allowed actions and redaction counts; confirmations and refusals are always logged. |
+| `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"` (or `"allow"`), `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"allow"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
+| `localAsks` | `"ask"` | `"model"`: the confirmations of the built-in rules without a setting are decided by the decision model (self-protection only with `selfProtectionByModel: true`); must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
+| `profile` | `"standard"` | `"credentials-only"` turns `dangerousCommands`, `decisionModel` and `scripts` off by default; must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
+| `debug` | `false` | Also log allowed actions and redaction counts; confirmations, refusals and local confirmations decided by the model are always logged. |
 | `logFile` | `~/.local/share/opencode/log/guard.log` | Plugin log file; `false` means stderr only. |
 
 Full reference, defaults, environment substitutions and edge cases: [Configuration](docs/configuration.md). Model choices, thresholds and local serving: [Decision model](docs/decision-model.md).
+
+The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the rules, shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard allow <rule>`, `--agent`, `--project`, `guard trust`), applied without a restart.
 
 ## Logs
 

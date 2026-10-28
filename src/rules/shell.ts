@@ -1,15 +1,19 @@
 import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes, NETWORK_FUNCTION } from "./code-network.ts"
-import { ruleEnabled, type ActiveRules } from "./features.ts"
-import { credentialFile, isCredentialFile, pathTokens, protectedWriteKind, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WriteKind, type WritePathContext } from "./sensitive-paths.ts"
+import { entrusted, hardened, overrideOf, ruleEnabled, withoutLowered, type ActiveRules } from "./features.ts"
+import { credentialFile, isCredentialFile, pathTokens, protectedWriteClass, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WriteClass, type WritePathContext } from "./sensitive-paths.ts"
 import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
 
 export interface ShellRuleContext extends WritePathContext, CredentialContext {
   readonly redactor: Redactor
   readonly home?: string
   readonly custom?: readonly CustomRule[]
-  /** `dangerousCommands` / `sensitiveFiles` switches: a disabled rule is not evaluated; absent = all. */
+  /**
+   * Rule policy (`dangerousCommands` / `sensitiveFiles` switches, `ruleOverrides`): a disabled rule is not evaluated, an ask
+   * of a rule set to `deny` is a deny where it is built; a deny of a rule set to `ask` is lowered at the end of
+   * `shellFinding`; absent = all, unchanged.
+   */
   readonly active?: ActiveRules
   /** Content of an executed script (`scriptFinding`): the placeholder rule (write) does not apply to an execution. */
   readonly executedScript?: boolean
@@ -82,6 +86,13 @@ const mentionsNetwork = (command: string) => runsNetwork(command) || NETWORK_WOR
  */
 const NESTED_OPENCODE = commandRegex("opencode", "(?:\\s+(?:run|serve|web|acp|attach)\\b|(?=[^;&|\\n]{0,500}?\\s--auto\\b))")
 const OPENCODE_CONFIG_VARIABLE = /\bOPENCODE_CONFIG(?:_DIR|_CONTENT)?=/
+/**
+ * With a nested OpenCode launch (OpenCode 2.2.0): the other variables that change the configuration or the plugins it
+ * loads (TUI settings and plugins, project configuration skipped, the directories its global configuration and the code
+ * of its npm plugins are found from), and the options that approve its confirmations.
+ */
+const NESTED_CONFIG_VARIABLE = /(?:^|[^\w$])(?:OPENCODE_CLI_CONFIG_CONTENT|OPENCODE_CONFIG_PROJECT_DISABLE|OPENCODE_DISABLE_PROJECT_CONFIG|XDG_CONFIG_HOME|XDG_CACHE_HOME|HOME)=/
+const AUTO_APPROVE = /\s--(?:auto|yolo|dangerously-skip-permissions)(?![\w-])/
 
 const PLACEHOLDER_REASON =
   "the command contains a redacted secret ([[GUARD_REDACTED:…]]): writing it would destroy the real secret. Make a targeted edit that does not include the placeholder"
@@ -155,7 +166,8 @@ function isHomeLevelTarget(target: string, home?: string): boolean {
 /** Command start for rm/chmod/dd: start, space, `(`, backtick, quote, `{` (zsh), `=cmd` (zsh) outside an assignment. */
 const COMMAND_START = "(?:^|[\\s(`'\"{]|(?<![\\w])=)"
 
-function rmFinding(segment: string, home?: string): Finding | undefined {
+/** `critical`: `rm-critical` active; otherwise a recursive or forced deletion of a critical target is still an `rm` ask. */
+function rmFinding(segment: string, home?: string, critical = true): Finding | undefined {
   // A quote immediately before also counts: `bash -c "rm -rf ~"`, `sh -c 'rm -rf /'`.
   const match = segment.match(new RegExp(`${COMMAND_START}rm\\s+(.*)$`))
   if (!match) return undefined
@@ -175,8 +187,7 @@ function rmFinding(segment: string, home?: string): Finding | undefined {
       if (/f/.test(token)) force = true
     } else targets.push(cleanTarget(token))
   }
-  const critical = targets.some((target) => isCriticalTarget(target, home))
-  if (noPreserve || (recursive && critical))
+  if (critical && (noPreserve || (recursive && targets.some((target) => isCriticalTarget(target, home)))))
     return { verdict: "deny", rule: "rm-critical", reason: "recursive deletion of a system directory or HOME" }
   if (recursive || force) return { verdict: "ask", rule: "rm", reason: "file deletion (rm -r/-f)" }
   return undefined
@@ -260,6 +271,10 @@ interface RegexRule {
   readonly verdict: "deny" | "ask"
   readonly reason: string
   readonly test: (command: string, ctx: ShellRuleContext) => boolean
+  /** Ask born from a check stopped by a limit or a form the plugin does not read: never left to the decision model by a setting. */
+  readonly unfinished?: true
+  /** Ask about a change of the plugin's settings: never left to the decision model (user's decision), `selfProtectionByModel` included. */
+  readonly userOnly?: true
 }
 
 const re = (regex: RegExp) => (command: string) => regex.test(command)
@@ -459,7 +474,7 @@ function credentialTokens(command: string, ctx: CredentialContext): boolean | ty
  * Reading shared by two `ASK_RULES` rules evaluated in this order during the same evaluation: the first does it and
  * notes it (`note`), the second rereads it once for the same command and the same context, otherwise redoes it
  * (`reread`). The ask for a check interrupted by a limit thus costs neither an extra call of the budgeted predicates
- * nor a second walk of the command.
+ * nor a second walk of the command. A rule between them reads the noted value without taking it (`peek`).
  */
 function sharedReading<T>(read: (command: string, ctx: ShellRuleContext) => T) {
   let last: { readonly command: string; readonly ctx: ShellRuleContext; readonly value: T } | undefined
@@ -468,6 +483,9 @@ function sharedReading<T>(read: (command: string, ctx: ShellRuleContext) => T) {
       const value = read(command, ctx)
       last = { command, ctx, value }
       return value
+    },
+    peek(command: string, ctx: ShellRuleContext): T {
+      return last?.command === command && last.ctx === ctx ? last.value : read(command, ctx)
     },
     reread(command: string, ctx: ShellRuleContext): T {
       const noted = last
@@ -479,7 +497,7 @@ function sharedReading<T>(read: (command: string, ctx: ShellRuleContext) => T) {
 
 /** Credential files: noted by `secret-file-read`, reread by the ask for content not checked that follows it. */
 const CREDENTIAL_TOKENS = sharedReading(credentialTokens)
-/** Kinds of the targets: noted by `self-protection`, reread by the ask for an unchecked real path. */
+/** Kinds of the targets: noted by `self-protection` (settings), peeked by `self-protection`, reread by the ask for an unchecked real path. */
 const PROTECTED_TARGETS = sharedReading(protectedTargets)
 /** awk programs: noted by `awk-dynamic-exec`, reread by the ask for a quoted string not read that follows it. */
 const AWK_PROGRAMS = sharedReading(awkDynamicExec)
@@ -2170,10 +2188,12 @@ const OPENCODE_COMMANDS = new Map<string, readonly string[]>([
 ])
 
 /** Findings of a call (`printed`: output that prints a secret); `OPENCODE_KINDS`: without examining arguments. */
-type OpencodeKind = "nested" | "service-change" | "service-secret" | "credentials" | "printed" | "heap-dump" | "api" | "config" | "unchecked" | "long"
+type OpencodeKind = "nested" | "service-config" | "service-change" | "service-secret" | "credentials" | "printed" | "heap-dump" | "api" | "config" | "unchecked" | "long"
 const OPENCODE_KINDS = new Map<string, readonly OpencodeKind[]>([
   ...["run", "serve", "acp"].map((name) => [name, ["nested"]] as const),
-  ...["uninstall", "service set", "service unset", "service stop", "service restart"].map((name) => [name, ["service-change"]] as const),
+  // `service set` and `unset` write the service's settings and environment (`service.json`); the others leave them as they are.
+  ...["service set", "service unset"].map((name) => [name, ["service-config"]] as const),
+  ...["uninstall", "service stop", "service restart"].map((name) => [name, ["service-change"]] as const),
   ["pair", ["service-secret"]],
   ["auth export", ["credentials", "printed"]],
   ["debug heap-dump", ["heap-dump"]],
@@ -2509,6 +2529,7 @@ const CONFIRMED_OUTPUT_REDACTION =
  */
 const OPENCODE_ASK_RULES: readonly RegexRule[] = (
   [
+    ["opencode-service", "service-config", "change to the OpenCode service (environment, restart) or uninstall: can disable the guard"],
     ["opencode-service", "service-change", "change to the OpenCode service (environment, restart) or uninstall: can disable the guard"],
     ["opencode-service", "service-secret", `display of the OpenCode service password, environment or settings, or pairing (access to the server): ${CONFIRMED_OUTPUT_REDACTION}`],
     ["opencode-server-api", "credentials", `export of the OpenCode credentials (auth export, or the credential list of the server API): ${CONFIRMED_OUTPUT_REDACTION}`],
@@ -2519,9 +2540,26 @@ const OPENCODE_ASK_RULES: readonly RegexRule[] = (
     ["nested-opencode", "unchecked", "OpenCode command line with an unknown option or a word known only at run time in its subcommand: it cannot be checked"],
     ["self-protection", "config", "OpenCode command that adds or removes a plugin or adds an MCP server: rewrites OpenCode's configuration (self-protection)"],
   ] as const
-).map(([id, kind, reason]): RegexRule => ({ id, verdict: "ask", reason, test: (command) => opencodeKinds(command).has(kind) }))
+).map(([id, kind, reason]): RegexRule => ({
+  id,
+  verdict: "ask",
+  reason,
+  test: (command) => opencodeKinds(command).has(kind),
+  ...(kind === "long" || kind === "unchecked" ? { unfinished: true } : {}),
+  // Rewrites opencode.json, or the service's environment (`{env:…}` of the plugin's settings, OpenCode's configuration
+  // directory or content): a change of the plugin's settings.
+  ...(kind === "config" || kind === "service-config" ? { userOnly: true } : {}),
+}))
 
 const ASK_RULES: readonly RegexRule[] = [
+  // First: on equal terms, a command of the plugin's command line shows this rule.
+  {
+    id: "guard-cli",
+    verdict: "ask",
+    reason: "the guard command line, which changes the plugin's settings, run or named by the command (self-protection; another program named guard asks too)",
+    test: (command, ctx) => namesGuardCli(command, ctx),
+    userOnly: true,
+  },
   {
     id: "find-delete",
     verdict: "ask",
@@ -2666,11 +2704,19 @@ const ASK_RULES: readonly RegexRule[] = [
     reason: "GitHub CLI upload or API call",
     test: re(/(?:^|[\s;&|(`])gh\s+(?:gist\s+(?:create|edit)|api|release\s+(?:create|upload)|secret\s+set|variable\s+set|ssh-key\s+add|gpg-key\s+add)\b/),
   },
+  // `service set` and `unset` change the service's environment or settings: never left to the decision model.
   {
     id: "opencode-service",
     verdict: "ask",
     reason: "change to the OpenCode service (environment, restart) or uninstall: can disable the guard",
-    test: re(/(?:^|[\s;&|(`])opencode\s+(?:service\s+(?:set|unset|stop|restart|uninstall)|uninstall)\b/),
+    test: re(/(?:^|[\s;&|(`])opencode\s+service\s+(?:set|unset)\b/),
+    userOnly: true,
+  },
+  {
+    id: "opencode-service",
+    verdict: "ask",
+    reason: "change to the OpenCode service (environment, restart) or uninstall: can disable the guard",
+    test: re(/(?:^|[\s;&|(`])opencode\s+(?:service\s+(?:stop|restart|uninstall)|uninstall)\b/),
   },
   {
     // With the server password, these routes bypass the guardrail (switch to the unprotected agent, prompt or
@@ -2681,6 +2727,17 @@ const ASK_RULES: readonly RegexRule[] = [
     // Documentation template (`/api/session/{sessionID}/prompt`) excluded: a real identifier has no brace. OpenCode
     // 2.1.3 voice route: replaces the instructions of a voice call of the session.
     test: re(/\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/),
+  },
+  // Its configuration or plugins changed by its environment, or its confirmations approved: never left to the decision
+  // model (user's decision); another launch can be.
+  {
+    id: "nested-opencode",
+    verdict: "ask",
+    reason: "launches another OpenCode agent or server, or changes its configuration: it may run without the guard or approve its confirmations (--auto)",
+    test: (command) =>
+      OPENCODE_CONFIG_VARIABLE.test(command) ||
+      ((AUTO_APPROVE.test(command) || NESTED_CONFIG_VARIABLE.test(command)) && (NESTED_OPENCODE.test(command) || opencodeKinds(command).has("nested"))),
+    userOnly: true,
   },
   {
     id: "nested-opencode",
@@ -2760,6 +2817,7 @@ const ASK_RULES: readonly RegexRule[] = [
     verdict: "ask",
     reason: `awk program with a quoted string longer than the plugin checks (${AWK_STRING_LIMIT} characters): it cannot be checked for execution of non-literal text`,
     test: (command, ctx) => AWK_PROGRAMS.reread(command, ctx) === LIMIT_REACHED,
+    unfinished: true,
   },
   {
     id: "git-exec-config",
@@ -2778,6 +2836,7 @@ const ASK_RULES: readonly RegexRule[] = [
     verdict: "ask",
     reason: `interpreter code longer than the plugin checks (${INLINE_CODE_LIMIT} characters): it cannot be checked for a dangerous command`,
     test: interpreterCodeTooLong,
+    unfinished: true,
   },
   {
     id: "secret-file-read",
@@ -2791,12 +2850,21 @@ const ASK_RULES: readonly RegexRule[] = [
     verdict: "ask",
     reason: uncheckedCredentialReason(),
     test: (command, ctx) => CREDENTIAL_TOKENS.reread(command, ctx) === LIMIT_REACHED,
+    unfinished: true,
+  },
+  // Its settings (opencode.json, guard.json, the plugin directory): never left to the decision model; then the rest.
+  {
+    id: "self-protection",
+    verdict: "ask",
+    reason: "write to OpenCode's configuration or to the guard plugin (self-protection)",
+    test: (command, ctx) => PROTECTED_TARGETS.note(command, ctx).includes("settings"),
+    userOnly: true,
   },
   {
     id: "self-protection",
     verdict: "ask",
     reason: "write to OpenCode's configuration or to the guard plugin (self-protection)",
-    test: (command, ctx) => PROTECTED_TARGETS.note(command, ctx).includes("opencode"),
+    test: (command, ctx) => PROTECTED_TARGETS.peek(command, ctx).includes("opencode"),
   },
   {
     id: "protected-write",
@@ -2810,15 +2878,62 @@ const ASK_RULES: readonly RegexRule[] = [
     verdict: "ask",
     reason: uncheckedWriteReason("write to a location"),
     test: (command, ctx) => PROTECTED_TARGETS.reread(command, ctx).includes("unchecked"),
+    unfinished: true,
   },
   ...OPENCODE_ASK_RULES,
+  // Last: a protected location in another form of a target that self-protection holds, when this rule is stronger.
+  {
+    id: "protected-write",
+    verdict: "ask",
+    reason: "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
+    test: (command, ctx) => outranksSelfProtection(ctx.active) && writtenTargets(command).some((target) => systemWrite(target, ctx.home, ctx)),
+  },
 ]
 
-/** Kinds of protected locations targeted by the command's writes (`protectedWriteKind`). */
-function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteKind | undefined> {
+/**
+ * `protected-write` stronger than the weakest self-protection ask (rule set to `deny`, or an ask the user confirms against
+ * one left to the model): only then are the other forms of the targets looked up (`systemWrite`), never with the default
+ * settings. Otherwise the self-protection ask, earlier, stays shown.
+ */
+function outranksSelfProtection(active: ActiveRules | undefined): boolean {
+  const ask = (rule: string) => entrusted(hardened({ verdict: "ask", rule, reason: "" }, active), active)
+  const stronger = ask("protected-write")
+  return mostSevere([ask("self-protection"), stronger]) === stronger
+}
+
+/**
+ * The plugin's command line (`bin/guard`, which writes its settings): `guard` as the launched program, or a path to its
+ * launcher (`…/bin/guard`, in any directory: a link installed elsewhere) or to a module of the plugin's `src/cli/`
+ * anywhere in the command (run directly or by an interpreter, or only named). Lexical forms from the command's
+ * directories; only words that can name them are resolved.
+ */
+const GUARD_COMMAND = commandRegex("guard")
+
+function namesGuardCli(command: string, ctx: ShellRuleContext): boolean {
+  if (GUARD_COMMAND.test(command)) return true
+  const plugins = ctx.pluginDirs ?? ctx.protectedDirs ?? []
+  const bases = ctx.cwds?.length ? ctx.cwds : ctx.cwd ? [ctx.cwd] : []
+  const named = (path: string) => path.endsWith("/bin/guard") || plugins.some((dir) => path.startsWith(`${dir}/src/cli/`))
+  // A directory of the command among the plugin's `bin` and `src/cli`: any word may name one of their files.
+  const inside = bases.some((base) => plugins.some((dir) => base === `${dir}/bin` || base === `${dir}/src/cli` || base.startsWith(`${dir}/src/cli/`)))
+  if (!inside && !command.includes("guard") && !command.includes("cli")) return false
+  return pathTokens(command).some((token) => {
+    if (!inside && !token.includes("guard") && !token.includes("cli")) return false
+    const expanded = token.replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, ctx.home ?? "~")
+    return (posix.isAbsolute(expanded) ? [posix.resolve(expanded)] : bases.map((base) => posix.resolve(base, expanded))).some(named)
+  })
+}
+
+/** Kinds of protected locations targeted by the command's writes (`protectedWriteClass`). */
+function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteClass | undefined> {
+  return writtenTargets(command).map((target) => protectedWriteClass(target, ctx.home, ctx))
+}
+
+/** Targets of the command's writes. */
+function writtenTargets(command: string): string[] {
   // Without shell re-entry, an interpreter's code (`node -e "x => …"`) is not a redirection.
   const data = withoutData(command)
-  return writeTargets(reentersShell(data) ? command : data).map((target) => protectedWriteKind(target, ctx.home, ctx))
+  return writeTargets(reentersShell(data) ? command : data)
 }
 
 /**
@@ -3332,9 +3447,9 @@ const LONG_NETWORK_CODE: Finding = {
 
 function networkCodeFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const seen = { view: command, long: false }
-  if (!inlineCodeNetwork(command, seen)) return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? LONG_NETWORK_CODE : undefined
+  if (!inlineCodeNetwork(command, seen)) return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? hardened(LONG_NETWORK_CODE, ctx.active) : undefined
   const rule = NETWORK_CODE_RULES.find((candidate) => ruleEnabled(candidate.id, ctx.active) && candidate.test(seen.view, ctx))
-  return rule && { verdict: rule.verdict, rule: rule.id, reason: rule.reason }
+  return rule && entrusted(hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason }, ctx.active), ctx.active)
 }
 
 /**
@@ -3360,7 +3475,7 @@ function addedShellFinding(command: string, ctx: ShellRuleContext): Finding | un
   const rule = addedRecognition(command, ctx.active)
   if (!rule) return undefined
   const finding: Finding = { verdict: "deny", rule: rule.id, reason: rule.reason }
-  if (ctx.custom?.some((custom) => custom.id === rule.id)) return finding
+  if (ctx.custom?.some((custom) => custom.id === rule.id) || overrideOf(rule.id, ctx.active) === "deny") return finding
   const data = withoutData(command)
   if (data === command || reentersShell(data) || evaluate(data, ctx)?.verdict === "deny" || addedRecognition(data, ctx.active)) return finding
   return { verdict: "ask", rule: rule.id, reason: `${rule.reason}, only inside code passed to an interpreter or a heredoc: confirmation required` }
@@ -3373,8 +3488,9 @@ function addedShellFinding(command: string, ctx: ShellRuleContext): Finding | un
  */
 function existingShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const finding = evaluate(command, ctx)
-  if (finding?.verdict === "ask") return onlyInHeredocData(command, ctx) ? { ...finding, dataOnly: true } : finding
-  if (finding?.verdict !== "deny" || finding.rule === "placeholder" || ctx.custom?.some((rule) => rule.id === finding.rule))
+  if (finding?.verdict === "ask") return onlyInHeredocData(command, ctx) ? inHeredocData(command, finding, ctx) : finding
+  // Rule set to `deny` (`ruleOverrides`): final, never reduced to an ask.
+  if (finding?.verdict !== "deny" || finding.rule === "placeholder" || ctx.custom?.some((rule) => rule.id === finding.rule) || overrideOf(finding.rule, ctx.active) === "deny")
     return finding
   // Re-entry searched outside the data: `bash <<EOF`, `| bash`, `./x.sh` are outside the body; a body expanded
   // by the shell (`$(…)`) is kept in the view without data.
@@ -3385,6 +3501,16 @@ function existingShellFinding(command: string, ctx: ShellRuleContext): Finding |
     rule: finding.rule,
     reason: `${finding.reason}, only inside code passed to an interpreter or a heredoc: confirmation required`,
   }
+}
+
+/**
+ * Ask found only inside heredoc data: marked `dataOnly` (the decision model decides), unless a rule set to `ask`
+ * (`ruleOverrides`: the user confirms) asks there too, whichever ask won the combination: with such a setting only,
+ * the command is evaluated again with each ask marked before the combination, and an ask left without a mark wins.
+ */
+function inHeredocData(command: string, finding: Finding, ctx: ShellRuleContext): Finding {
+  const confirmed = [...(ctx.active?.overrides?.values() ?? [])].includes("ask") ? evaluate(command, ctx, true) : undefined
+  return confirmed && !confirmed.dataOnly ? confirmed : { ...finding, dataOnly: true }
 }
 
 /** Commands that only read, write or display data: never execute what they receive. */
@@ -3448,10 +3574,11 @@ function onlyInHeredocData(command: string, ctx: ShellRuleContext): boolean {
   return heredocsAreReal(command) && !reentersShell(view) && !evaluate(view, ctx)
 }
 
-function evaluate(command: string, ctx: ShellRuleContext): Finding | undefined {
-  // Rule disabled by a switch: discarded BEFORE choosing the most severe finding (otherwise a deny from a disabled
-  // feature would mask that of an active feature).
-  const on = (finding: Finding | undefined) => (finding && ruleEnabled(finding.rule, ctx.active) ? finding : undefined)
+function evaluate(command: string, ctx: ShellRuleContext, inData = false): Finding | undefined {
+  // Rule disabled by a switch or set to `off`: discarded BEFORE choosing the most severe finding (otherwise a deny from a
+  // disabled rule would mask that of an active rule); ask of a rule set to `deny`: a deny, before it too; ask left to
+  // the decision model by a setting: marked, before it too (an ask without a mark then wins the combination).
+  const on = (finding: Finding | undefined) => (finding && ruleEnabled(finding.rule, ctx.active) ? entrusted(hardened(finding, ctx.active), ctx.active) : undefined)
   const findings: Array<Finding | undefined> = []
   for (const rule of DENY_RULES) {
     // Executed script: the placeholder rule is discarded here, before any combination, in every view (otherwise its deny
@@ -3462,16 +3589,21 @@ function evaluate(command: string, ctx: ShellRuleContext): Finding | undefined {
   for (const segment of segments(command)) {
     const permissions = on(permissionFinding(segment, ctx.home))
     if (permissions) return permissions
-    findings.push(on(rmFinding(segment, ctx.home)), on(deletionFinding(segment)), on(moveFinding(segment, ctx.home)))
+    findings.push(on(rmFinding(segment, ctx.home, ruleEnabled("rm-critical", ctx.active))), on(deletionFinding(segment)), on(moveFinding(segment, ctx.home)))
   }
   for (const rule of ctx.custom ?? []) {
     if ((rule.tools.includes("shell") || rule.tools.includes("*")) && rule.pattern.test(command))
       findings.push({ verdict: rule.verdict, rule: rule.id, reason: rule.reason })
   }
   for (const rule of ASK_RULES) {
-    if (ruleEnabled(rule.id, ctx.active) && rule.test(command, ctx)) findings.push({ verdict: rule.verdict, rule: rule.id, reason: rule.reason })
+    if (ruleEnabled(rule.id, ctx.active) && rule.test(command, ctx)) {
+      const finding = hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason }, ctx.active)
+      findings.push(rule.unfinished || rule.userOnly ? finding : entrusted(finding, ctx.active))
+    }
   }
-  return mostSevere(findings)
+  // Asks found only inside heredoc data (`inHeredocData`): each marked, except those of a rule set to `ask`.
+  const marked = (finding: Finding | undefined) => (finding?.verdict === "ask" && overrideOf(finding.rule, ctx.active) !== "ask" ? { ...finding, dataOnly: true } : finding)
+  return mostSevere(inData ? findings.map(marked) : findings)
 }
 
 /**
@@ -3629,10 +3761,10 @@ function withoutAssignments(command: string): { view: string; flag?: string } {
 function assignedFinding(command: string, ctx: ShellRuleContext, found: Finding | undefined): Finding | undefined {
   try {
     const { view: bare, flag } = found?.verdict === "deny" ? { view: command } : withoutAssignments(command)
-    const undetermined: Finding | undefined = flag ? { verdict: "ask", rule: "nested-opencode", reason: flag } : undefined
+    const undetermined = flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined
     return mostSevere([found, bare === command ? undefined : layeredShellFinding(bare, ctx).finding, undetermined])
   } catch {
-    return mostSevere([found, ANALYSIS_FAILED])
+    return mostSevere([found, hardened(ANALYSIS_FAILED, ctx.active)])
   }
 }
 
@@ -3764,7 +3896,7 @@ function commandWordView(command: string): { view: string; flag?: string } {
  * and of its error come after those of the original view, by `strength` (deny, ask without a mark, ask that the model
  * can decide): at equal strength, the finding of the original view is kept.
  */
-export function shellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const [base, normalized, flag] = viewFindings(command, ctx)
   if (base?.verdict === "deny") return base
   let [continued, unstable, failed]: Array<Finding | undefined> = []
@@ -3772,13 +3904,26 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
     const joined = joinedLines(command)
     if (joined !== command) {
       continued = mostSevere(viewFindings(joined, ctx))
-      if (joinedLines(joined) !== joined) unstable = UNSTABLE_JOIN
+      if (joinedLines(joined) !== joined) unstable = hardened(UNSTABLE_JOIN, ctx.active)
     }
   } catch {
-    failed = ANALYSIS_FAILED
+    failed = hardened(ANALYSIS_FAILED, ctx.active)
   }
   // Findings of the original view first, in their order; an added finding takes the place only if it is stronger.
   return [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag]))
+}
+
+/**
+ * Shell finding (`viewsFinding`), then the deny of a rule set to `ask` (`ruleOverrides`) lowered, once, here: inside, it
+ * stays a deny, which early exits and first matches can return in place of another rule's. The command is then
+ * examined again with the rules set to `ask` turned off (same call predicates, memoized: no new read of an already
+ * read path); a deny found then holds, otherwise the lowered ask, without a mark (the user is asked).
+ */
+export function shellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+  const found = viewsFinding(command, ctx)
+  if (found?.verdict !== "deny" || overrideOf(found.rule, ctx.active) !== "ask") return found
+  const other = viewsFinding(command, { ...ctx, active: ctx.active && withoutLowered(ctx.active) })
+  return other?.verdict === "deny" ? other : { verdict: "ask", rule: found.rule, reason: found.reason }
 }
 
 /**
@@ -3792,9 +3937,9 @@ function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | u
   try {
     const { view, flag } = commandWordView(command)
     const normalized = view !== command ? assignedFinding(view, ctx, layeredShellFinding(view, ctx).finding) : undefined
-    return [base, normalized, flag ? { verdict: "ask", rule: "nested-opencode", reason: flag } : undefined]
+    return [base, normalized, flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined]
   } catch {
-    return [base, ANALYSIS_FAILED]
+    return [base, hardened(ANALYSIS_FAILED, ctx.active)]
   }
 }
 
@@ -3863,7 +4008,7 @@ function deviceTargets(group: DeviceGroup, text: string): string[] {
 const unknownTarget = (target: string) => literalPath(target) === undefined && (startsWithVariable(target) || isNonLiteralSource(target))
 
 /**
- * Forms of a target, copied word for word from `protectedWriteKind` (sensitive-paths.ts): expanded form (blanks,
+ * Forms of a target, copied word for word from `protectedWriteClass` (sensitive-paths.ts): expanded form (blanks,
  * leading/trailing quotes and backticks removed, leading home directory expanded), base directories (root for an
  * absolute path, otherwise the command's directories), form resolved from each (`lexical`), and the two forms passed
  * to the real-path predicate (`asked`: raw, then resolved). Same strings: the replay finds exactly the
@@ -3954,7 +4099,7 @@ interface DeviceHit {
  */
 function deviceHit(text: string, ctx: ShellRuleContext): DeviceHit | undefined {
   // Replayed limit (`LIMIT_REACHED`): no real path; the same target already gave the `self-protection` ask (the
-  // replay only returns answers obtained through `protectedWriteKind`).
+  // replay only returns answers obtained through `protectedWriteClass`).
   const reals = (form: string) => {
     const found = ctx.realPaths?.(form)
     return found === LIMIT_REACHED ? undefined : found
@@ -3969,8 +4114,12 @@ function deviceHit(text: string, ctx: ShellRuleContext): DeviceHit | undefined {
         return { group, rule, ...forms, process, launched: forms.relative || process }
       }),
   )
-  for (const relative of [false, true]) {
-    const level = known.filter((target) => target.launched === relative)
+  // Rule set to `deny` (`ruleOverrides`): its ask is a deny, so its targets that depend on the launch directory come
+  // before the others' at the ask level.
+  const hardens = (target: (typeof known)[number]) => overrideOf(target.rule.id, ctx.active) === "deny"
+  const levels = [known.filter((target) => !target.launched), known.filter((target) => target.launched && hardens(target)), known.filter((target) => target.launched && !hardens(target))]
+  for (const [index, level] of levels.entries()) {
+    const relative = index > 0
     const reshaped = level.find(({ lexical }) => lexical.some(isDevicePath))
     if (reshaped) return { group: reshaped.group, rule: reshaped.rule, axis: "A", relative, process: reshaped.process }
     const linked = level.find(({ asked }) => asked.some((form) => (reals(form) ?? []).some(isDevicePath)))
@@ -4036,9 +4185,9 @@ function deviceLayer(command: string, replay: ShellRuleContext, guard: LayerGuar
   if (hit) {
     const { rule, axis, group, relative, process } = hit
     const through = process ? "through a path that stands for the directory where the command runs" : "through a relative path"
-    if (relative) return { finding: { verdict: "ask", rule: rule.id, reason: `${rule.reason} ${through}: confirmation required` }, axis, group, relative }
+    if (relative) return { finding: hardened({ verdict: "ask", rule: rule.id, reason: `${rule.reason} ${through}: confirmation required` }, replay.active), axis, group, relative }
     const kept = () => {
-      if (replay.custom?.some((custom) => custom.id === rule.id)) return true
+      if (replay.custom?.some((custom) => custom.id === rule.id) || overrideOf(rule.id, replay.active) === "deny") return true
       const data = withoutData(command)
       if (data === command || reentersShell(data) || evaluate(data, replay)?.verdict === "deny") return true
       return addedRecognition(data, replay.active) !== undefined || deviceHit(data, replay)?.relative === false
@@ -4049,11 +4198,12 @@ function deviceLayer(command: string, replay: ShellRuleContext, guard: LayerGuar
     return { finding, axis, group, relative }
   }
   if (!guard.unknown) return undefined
-  const group = unknownGroups(command, replay)[0]
-  const entry = DEVICE_RULES.find((candidate) => candidate.group === group)
+  // First group concerned, a group set to `deny` (`ruleOverrides`) first: its ask is a deny.
+  const groups = unknownGroups(command, replay).map((group) => DEVICE_RULES.find((candidate) => candidate.group === group)!)
+  const entry = groups.find(({ rule }) => overrideOf(rule.id, replay.active) === "deny") ?? groups[0]
   if (!entry) return undefined
   const reason = `write target known only when the command runs, possibly a device (${entry.rule.reason}): confirmation required`
-  return { finding: { verdict: "ask", rule: entry.rule.id, reason }, axis: "C", group: entry.group, relative: false }
+  return { finding: hardened({ verdict: "ask", rule: entry.rule.id, reason }, replay.active), axis: "C", group: entry.group, relative: false }
 }
 
 /**

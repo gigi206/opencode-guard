@@ -3,7 +3,7 @@
 ## Logs and verification
 
 **Plugin log.** When OpenCode runs as a background service, the plugin's stderr goes nowhere useful. The plugin therefore writes to `~/.local/share/opencode/log/guard.log`:
-- the start line (`INFO active (…)`, with the decision model, the effective confirmation mode, whether the [system configuration](configuration.md#protecting-the-plugin-from-project-configuration) declares the plugin, the [features turned off](configuration.md#turning-features-off), `disabled: …`, and, when it is requested, whether the [output check](decision-model.md#output-check-outputcheck) is active) and warnings are always written;
+- the start line (`INFO active (…)`, with the decision model, the effective confirmation mode, whether the [system configuration](configuration.md#protecting-the-plugin-from-project-configuration) declares the plugin, the [profile](configuration.md#profile-profile) and the [rule settings](configuration.md#setting-one-rule-ruleoverrides) retained, when set, `profile: …` and `rule overrides: …`, the [features turned off](configuration.md#turning-features-off), `disabled: …`, and, when it is requested, whether the [output check](decision-model.md#output-check-outputcheck) is active) and warnings are always written;
 - confirmations and refusals of tool calls are always written (`INFO`), with the rule that gave them (`(local, rule git-reset-hard)`; a verdict of the decision model alone has none, its reason says why), including those added by the check of shell sub-commands (`shell sub-commands → …`) and the refusals of unattended mode, and so are the answers to confirmations (`confirmed by the user`, or `confirmation not granted` with the error class, never your feedback text);
 - allowed actions and redaction counts are written only when `debug` is `true` (`DEBUG`);
 - a decision line ends with the duration of the model calls (`[model 640 ms]`, and `, 2 attempts` after a timeout was retried) and gives the source of the verdict (`(local)` for a local rule, `(model)` for the decision model, `(model-error)` when it failed, `(default)` when no model gave the verdict (decision model turned off, or an internal error), `(read-only)` for a read not sent to the model, `(task-list)` for `todowrite`, `(cache)` for a verdict reused from the cache) and, for an allowed action, the highest probability (`highest: credential access 0.43`), useful to calibrate `askNoul`;
@@ -122,23 +122,28 @@ Source layout:
 ```
 index.ts                     entry point resolved by the OpenCode loader
 src/index.ts                 plugin definition and wiring
-src/config.ts                options parsing and defaults (settings come from opencode.json only)
+src/config.ts                options parsing and defaults, guard.json settings, layers by agent and by project
 src/decide.ts                local rules → decision model → verdict, cache
 src/scripts.ts               files created in full by the agent (fingerprints, protected reads)
 src/patch.ts                 patch headers read like OpenCode's patch tool (broad reading for checks, exact for tracking)
 src/output-check.ts          output check: activation only if the global configuration declares it
+src/guard-file.ts            guard.json files: locations and bounded reads
+src/scopes.ts                settings in force for a call (guard.json re-read, main agent, agent and project sections)
 src/credential-content.ts    private keys recognized by their content (bounded header reads)
 src/real-path.ts             real paths of write targets (symbolic links resolved like the kernel)
 src/hooks/gate.ts            tool.execute.before, permission.evaluate
 src/hooks/redaction.ts       tool.execute.before (running CodeMode scripts), tool.execute.after, session.prompt, http.request, ws.send
 src/hooks/output-check.ts    tool.execute.before, tool.execute.after: optional check of tool outputs by the decision model
 src/hooks/unprotected.ts     unprotected agent: sessions and prompts where the plugin does nothing
+src/hooks/agents.ts          session.prompt: main agent of each session, for the agent sections
+src/cli/                     the guard command (rules, settings, trust, show, last)
 src/model/client.ts          decision model client (System One API: chat and systemone protocols)
 src/model/questions.ts       question set and verdict mapping
 src/rules/                   shell rules, per-tool rules, network checks shared by both (code-network.ts), sensitive paths, feature of each rule
 src/secrets/                 secret patterns, redaction, tool error redaction, OpenCode's own secrets (service files, credential formats)
 src/types.ts                 structural subset of the plugin context, logger
 test/                        node:test suites (runnable with Node and Bun)
+bin/guard                    launcher of the guard command (Node.js)
 tools/serve.sh       local Decision 3.0 service (native, engine/container, llama)
 tools/model-bench/           bench harness behind the "Measured models" table
 ```

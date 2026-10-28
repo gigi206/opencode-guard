@@ -4,7 +4,7 @@
 // own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
-import { outputCheckRequested } from "./config.ts"
+import { declaredDecision, normalizedURL, outputCheckRequested, type PluginDeclaration } from "./config.ts"
 
 /**
  * OpenCode 2.0.31 global configuration directory (`util/src/global.ts`, `global-roots.ts`): `OPENCODE_CONFIG_DIR`
@@ -26,17 +26,6 @@ function realPath(path: string): string {
     return realpathSync(path)
   } catch {
     return resolve(path)
-  }
-}
-
-/** Comparable address: protocol, host (lowercase), path without trailing slash, query. */
-function normalizedURL(raw: unknown): string | undefined {
-  if (typeof raw !== "string" || !raw.trim()) return undefined
-  try {
-    const url = new URL(raw.trim())
-    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}${url.search}`
-  } catch {
-    return undefined
   }
 }
 
@@ -81,6 +70,24 @@ function pluginOptions(dir: string, pluginDir: string, env: Record<string, strin
 }
 
 /**
+ * Plugin entry of the global file and of the system configuration, read like `declaredOutputCheck` (relaxations of
+ * `config.ts`: `profile`, `ruleOverrides`); reason in words (never a value) for an entry not found.
+ */
+export function declaredPluginOptions(input: {
+  readonly pluginDir: string
+  readonly globalDir: string | undefined
+  readonly systemDir: string | undefined
+  readonly env: Record<string, string | undefined>
+}): PluginDeclaration[] {
+  return (
+    [
+      ["global", input.globalDir],
+      ["system", input.systemDir],
+    ] as const
+  ).map(([label, dir]) => (dir ? { label, ...pluginOptions(dir, input.pluginDir, input.env) } : { label, reason: "its directory is unknown" }))
+}
+
+/**
  * Is the option declared, with the same address as the effective configuration, by the global file or by the
  * system configuration? Reason in words (never a value) otherwise.
  */
@@ -116,9 +123,7 @@ export function declaredOutputCheck(input: {
       reasons.push(`${label} configuration: outputCheck is not enabled there`)
       continue
     }
-    // `decision` wins over `jev` (former name), as in the effective configuration.
-    const decision = isRecord(options.decision) ? options.decision : isRecord(options.jev) && options.decision === undefined ? options.jev : undefined
-    const declared = normalizedURL(decision?.baseURL)
+    const declared = normalizedURL(declaredDecision(options)?.baseURL)
     if (!effective || !declared || declared !== effective) {
       reasons.push(`${label} configuration: the decision model address differs`)
       continue

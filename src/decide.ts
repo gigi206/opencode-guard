@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto"
-import type { GuardConfig } from "./config.ts"
+import type { GuardConfig, Scope } from "./config.ts"
 import { ModelError, type ModelClient } from "./model/client.ts"
 import { QUESTIONS, SCRIPTS_NOTE, STATE_NOTE, interpret } from "./model/questions.ts"
 import { shellFinding, type ShellRuleContext } from "./rules/shell.ts"
-import { toolFinding } from "./rules/tools.ts"
+import { CODEMODE_TOOL, toolFinding } from "./rules/tools.ts"
 import { INTERNAL_ERROR_RULE, mostSevere, type Finding, type Verdict } from "./rules/types.ts"
 import { createCredentialContent } from "./credential-content.ts"
 import { createRealPath } from "./real-path.ts"
-import { ruleEnabled } from "./rules/features.ts"
+import { bySetting, hardened, ruleEnabled } from "./rules/features.ts"
 import { scriptDirectories, type UnverifiableCause } from "./scripts.ts"
 import type { Redactor } from "./secrets/redact.ts"
 import type { Logger } from "./types.ts"
@@ -42,6 +42,8 @@ export interface ToolCall {
   /** Shell command: directories from which its relative paths start (`shellDirectories`); absent: `directory`. */
   readonly cwds?: readonly string[]
   readonly scripts?: readonly ExecutedScript[]
+  /** Settings of the call (agent and project sections, `scopes.ts`); absent: the configuration's. */
+  readonly scope?: Scope
 }
 
 export interface Decision {
@@ -57,6 +59,11 @@ export interface Decision {
   readonly redactedInput: unknown
   /** The model judged the input in full (opinion obtained, input not truncated): condition for tracking created files. */
   readonly judgedInFull?: boolean
+  /**
+   * Local ask left to the decision model by a setting (`ruleOverrides`, `localAsks`) and decided by it: logged at info;
+   * allowed and judged in full, it exempts the shell sub-commands' asks left to the model in the same way (`gate.ts`).
+   */
+  readonly bySetting?: boolean
 }
 
 export interface DeciderDeps {
@@ -66,6 +73,8 @@ export interface DeciderDeps {
   readonly home?: string
   /** Directories protected against writes (plugin directory). */
   readonly protectedDirs?: readonly string[]
+  /** The plugin's own directories among them (its settings: never left to the decision model). */
+  readonly pluginDirs?: readonly string[]
   /** Directories of the OpenCode service files resolved from the environment (`service.json` recognized under them). */
   readonly serviceDirs?: readonly string[]
   /** Private keys recognized by their content (`credential-content.ts`): true in production; absent = names only. */
@@ -78,6 +87,10 @@ export interface DeciderDeps {
 }
 
 export { INTERNAL_ERROR_RULE }
+
+/** Reason of an ask the decision model could have decided, had its configuration been the global one. */
+const MODEL_WITHHELD =
+  "the decision model or its settings are not those the global configuration declares, or the global sources turn it off (nor is this project trusted): it never allows this ask"
 
 /** Input that cannot be redacted: nothing leaves (neither to the model nor in the request, which only shows the tool name). */
 export const UNAVAILABLE_INPUT = Symbol("guard/unavailable-input")
@@ -108,25 +121,26 @@ const modelSkipped = (tool: string): boolean => READ_ONLY_TOOLS.has(tool) || TAS
  * executed), never "data only"; the placeholder rule (write) does not apply to an execution: discarded by the shell
  * rules before the findings are combined (`executedScript`), it never takes the place of another rule's finding.
  * Unverifiable script (created by the agent, unreadable since; or named by an unreadable patch): `script-unverifiable` ask.
+ * Rule set to `deny` (`ruleOverrides`): its finding stays a deny, in a script too.
  */
 export function scriptFinding(script: ExecutedScript, ctx: ShellRuleContext): Finding | undefined {
   // Unknown content: whether read by a shell or not, it could not be checked. Cause `patch`: file not necessarily created by
   // the agent (modified or moved by the patch), separate reason.
   if (script.unverifiable)
     return ruleEnabled("script-unverifiable", ctx.active)
-      ? {
+      ? hardened({
           verdict: "ask",
           rule: "script-unverifiable",
           reason:
             script.unverifiable === "patch"
               ? `the script ${script.path} run by this command was named in this session by a patch the plugin could not read (${UNVERIFIABLE_TEXT.patch})`
               : `the script ${script.path} run by this command was created by the agent in this session but can no longer be checked (${UNVERIFIABLE_TEXT[script.unverifiable]})`,
-        }
+        }, ctx.active)
       : undefined
   if (!script.shell) return undefined
   const found = shellFinding(script.content, { ...ctx, executedScript: true })
   if (!found) return undefined
-  return { verdict: "ask", rule: found.rule, reason: `${found.reason}, in the script ${script.path} run by this command` }
+  return hardened({ verdict: "ask", rule: found.rule, reason: `${found.reason}, in the script ${script.path} run by this command` }, ctx.active)
 }
 
 /** Truncates the redacted input for the model (accuracy drops with a long `state`). */
@@ -260,6 +274,10 @@ export function createDecider(deps: DeciderDeps) {
       report("internal error while redacting the input", error)
     }
     const unredacted = redactedInput === UNAVAILABLE_INPUT
+    // `decisionModel` of the call's settings (the client exists whenever `decision` is set).
+    const model = (call.scope ? call.scope.decisionModel : config.features.decisionModel) ? deps.model : undefined
+    // It allows an ask left to it only with the global sources' configuration, or in a trusted project.
+    const grants = call.scope ? call.scope.modelGrants : config.modelGrants
     // Lazy read: no file opened until an active rule asks for it.
     const directories = call.cwds ?? (call.directory === undefined ? [] : [call.directory])
     const credentialContent = deps.readContent && directories.length > 0 ? createCredentialContent({ directories, home: deps.home }) : undefined
@@ -273,8 +291,9 @@ export function createDecider(deps: DeciderDeps) {
       ...(credentialContent ? { credentialContent } : {}),
       ...(realPaths ? { realPaths } : {}),
       protectedDirs: deps.protectedDirs,
+      ...(deps.pluginDirs ? { pluginDirs: deps.pluginDirs } : {}),
       ...(deps.serviceDirs ? { serviceDirs: deps.serviceDirs } : {}),
-      active: config.features,
+      active: call.scope?.policy ?? config.policy,
       // Tool check that throws (`rules/tools.ts`, ask for it alone): cause to the log.
       report,
     }
@@ -323,24 +342,37 @@ export function createDecider(deps: DeciderDeps) {
     if (local) {
       // Local confirmation: the model opinion is shown to the user; it never changes the verdict (neither stricter:
       // the user keeps control of doubtful cases, nor looser). Unreachable: ask without opinion.
-      const consultation = deps.model && !modelSkipped(call.tool) && !unredacted ? await consult(call, redactedInput, deps.model) : undefined
+      const consultation = model && !modelSkipped(call.tool) && !unredacted ? await consult(call, redactedInput, model) : undefined
       // Exceptions: an ask rule triggered only by heredoc data (test file written with `cat`), or
-      // an ask left to the model (CodeMode script that reads the web without a tool), provided in the latter case that it judged
-      // the whole input: the model decides, as for any command with no local rule. Unreachable: ask.
-      if (consultation && "judgement" in consultation && (local.dataOnly || (local.modelDecides !== undefined && consultation.inFull))) {
+      // an ask left to the model (CodeMode script that reads the web without a tool, or a setting: `ruleOverrides`,
+      // `localAsks`), provided in the latter case that it judged the whole input: the model decides, as for any command
+      // with no local rule. Unreachable: ask. A model whose configuration is not the global one may only deny there.
+      if (
+        consultation &&
+        "judgement" in consultation &&
+        (local.dataOnly || (local.modelDecides !== undefined && consultation.inFull)) &&
+        (grants || consultation.judgement.verdict === "deny")
+      ) {
         const { verdict, reason } = consultation.judgement
         return {
           verdict,
-          reason: `${local.reason}, ${local.modelDecides ?? "only inside heredoc data"}, decided by ${reason}`,
+          reason: `${local.reason}, ${local.dataOnly ? "only inside heredoc data" : local.modelDecides}, decided by ${reason}`,
           rule: local.rule,
           source: consultation.source,
           redactedInput,
           judgedInFull: consultation.inFull,
+          ...(bySetting(local) ? { bySetting: true } : {}),
           ...timing(consultation),
         }
       }
-      // Ask left to the model that it could not decide: the reason says why (truncated code, failing model).
-      const untried = local.modelDecides === undefined ? "" : "; the code was too long for the decision model to decide"
+      // Ask left to the model that it could not decide: the reason says why (configuration not the global one, truncated
+      // input, failing model).
+      const untried =
+        !grants && (local.dataOnly || local.modelDecides !== undefined)
+          ? `; ${MODEL_WITHHELD}`
+          : local.modelDecides === undefined
+            ? ""
+            : `; the ${call.tool === CODEMODE_TOOL ? "code" : "input"} was too long for the decision model to decide`
       if (consultation && "judgement" in consultation)
         return {
           verdict: "ask",
@@ -365,7 +397,7 @@ export function createDecider(deps: DeciderDeps) {
     if (READ_ONLY_TOOLS.has(call.tool)) return { verdict: "allow", reason: "read-only tool, no local rule matched", source: "read-only", redactedInput }
     if (TASK_LIST_TOOLS.has(call.tool))
       return { verdict: "allow", reason: "task list tool (session state only), no local rule matched", source: "task-list", redactedInput }
-    if (!deps.model) return { verdict: "allow", reason: "no local rule matched, decision model disabled", source: "default", redactedInput }
+    if (!model) return { verdict: "allow", reason: "no local rule matched, decision model disabled", source: "default", redactedInput }
     if (unredacted)
       return {
         verdict: "ask",
@@ -374,7 +406,7 @@ export function createDecider(deps: DeciderDeps) {
         source: "default",
         redactedInput,
       }
-    const consultation = await consult(call, redactedInput, deps.model)
+    const consultation = await consult(call, redactedInput, model)
     if ("judgement" in consultation)
       return { ...consultation.judgement, source: consultation.source, redactedInput, judgedInFull: consultation.inFull, ...timing(consultation) }
     return { verdict: "ask", reason: consultation.error, source: consultation.source, redactedInput, ...timing(consultation) }

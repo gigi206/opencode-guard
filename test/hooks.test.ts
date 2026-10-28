@@ -35,9 +35,12 @@ describe("registration", () => {
       "tool.execute.before",
     ])
   })
-  it("redactPrompt: false → no prompt hook", async () => {
-    const { hooks } = await setup({ redactPrompt: false })
-    assert.ok(!hooks.has("session.prompt"))
+  it("redactPrompt: false → no prompt redaction hook", async () => {
+    const { hooks, trigger } = await setup({ redactPrompt: false })
+    // Only the main agents' hook, always registered: the typed prompt is left as is.
+    assert.equal(hooks.get("session.prompt")?.length, 1)
+    const event = await trigger("session.prompt", { sessionID: "ses_1", prompt: { text: `my key ${FAKE.anthropic}` } })
+    assert.ok(event.prompt.text.includes(FAKE.anthropic))
   })
 })
 
@@ -1536,7 +1539,9 @@ describe("lot 40: a user rule keeps its verdict", () => {
     const { parseConfig } = await import("../src/config.ts")
     const answer = { answers: { risk: { score: 0.1 }, destructive: { noul: 0.01 }, exfiltration: { noul: 0.01 }, credentials: { noul: 0.01 }, privilege_persistence: { noul: 0.01 } } }
     const run = async (options: Record<string, unknown>) => {
-      const { config } = parseConfig({ decision: { baseURL: "https://decision.local/v1", model: "nox-4b" }, ...options })
+      // The same decision model declared by the global configuration: it may allow.
+      const decision = { baseURL: "https://decision.local/v1", model: "nox-4b" }
+      const { config } = parseConfig({ decision, ...options }, {}, () => [{ label: "global", options: { decision } }])
       const redactor = createRedactor()
       const decider = createDecider({ config, redactor, model: async () => answer })
       const fake = fakeContext()

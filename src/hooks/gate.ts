@@ -6,7 +6,9 @@ import { placeholderFinding } from "../rules/tools.ts"
 import { hiddenHeaders, patchTargets, readPatch, type PatchSection } from "../patch.ts"
 import { createScriptTracker, isShellScript, resolveLike, shellDirectories, type ScriptTracker } from "../scripts.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
-import type { ActiveRules } from "../rules/features.ts"
+import type { Scope } from "../config.ts"
+import type { ScopeResolver } from "../scopes.ts"
+import { bySetting, type ActiveRules } from "../rules/features.ts"
 import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule } from "../rules/types.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PermissionEvaluation } from "../types.ts"
@@ -27,6 +29,8 @@ export interface GateDeps {
   readonly home?: string
   readonly rules?: readonly CustomRule[]
   readonly protectedDirs?: readonly string[]
+  /** The plugin's own directories among them (its settings: never left to the decision model). */
+  readonly pluginDirs?: readonly string[]
   /** Directories of the OpenCode service files resolved from the environment (`service.json` recognized under them). */
   readonly serviceDirs?: readonly string[]
   /** "deny": unattended mode, every confirmation request becomes a rejection. */
@@ -40,10 +44,12 @@ export interface GateDeps {
   readonly scripts?: ScriptTracker
   /** Directories of a shell command (injectable for tests; default: `shellDirectories`). */
   readonly directoriesOf?: typeof shellDirectories
-  /** Local rule switches (`evaluate` sub-commands); absent = all active. */
+  /** Rule policy, switches and `ruleOverrides` (`evaluate` sub-commands); absent = all active. */
   readonly active?: ActiveRules
   /** `scripts` switch: `false` = no tracking or reading of scripts written then executed. */
   readonly trackScripts?: boolean
+  /** Settings of each call (agent and project sections); absent: `active` and `trackScripts` for every call. */
+  readonly scopes?: ScopeResolver
   /** Private keys recognized by their content in the `evaluate` sub-commands (like the decider). */
   readonly readContent?: boolean
   /** Protected locations recognized through a symbolic link in the `evaluate` sub-commands (like the decider). */
@@ -218,13 +224,15 @@ export function summarize(tool: string, redactedInput: unknown): string {
 export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<void> {
   const { log } = deps
   /**
-   * Calls already approved via "guard" (session + id → date): avoids a second ask in `evaluate`. The id comes
-   * from the provider: without the session, a local server reusing its ids would exempt a call from another session.
+   * Calls already approved (session + id → date): `user`, confirmed via "guard", avoids a second ask in `evaluate`;
+   * `model`, a local ask left to the decision model by a setting and allowed by it on the whole input, exempts only the
+   * sub-command asks left to the model in the same way. The id comes from the provider: without the session, a local
+   * server reusing its ids would exempt a call from another session.
    */
   const approvalKey = (sessionID: string, id: string) => `${sessionID}\u0000${id}`
   const clock = deps.now ?? Date.now
   // Check on read: an expired approval no longer exempts from hardening.
-  const approved = timedMap<true>(clock)
+  const approved = timedMap<"user" | "model">(clock)
   /** Executable write/patch/shell/edit calls: the files they create or modify are tracked when they finish. */
   const pending = timedMap<PendingCall>(clock)
   /** Directories of a shell command (`shellDirectories`), re-read by `evaluate` for its sub-commands. */
@@ -250,8 +258,8 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
   }
 
   /** Scripts tracked by the session and run by the command (content, or cause if they can no longer be read). */
-  function executedScripts(sessionID: string, tool: string, input: unknown): ExecutedScript[] | undefined {
-    if (deps.trackScripts === false || tool !== "shell" || !scripts.has(sessionID)) return undefined
+  function executedScripts(sessionID: string, tool: string, input: unknown, scope: Scope | undefined): ExecutedScript[] | undefined {
+    if ((scope ? !scope.scripts : deps.trackScripts === false) || tool !== "shell" || !scripts.has(sessionID)) return undefined
     const shell = shellCommand(input)
     if (!shell) return undefined
     const { command, cwd } = shell
@@ -379,8 +387,16 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     let executed: ExecutedScript[] | undefined
     // Parts not checked after an internal error: an "allow" decision then becomes an ask.
     const unchecked: string[] = []
+    // Settings of this call; an internal error keeps the startup ones, and an allow then becomes an ask.
+    let scope: Scope | undefined
     try {
-      executed = executedScripts(event.sessionID, event.tool, event.input)
+      scope = deps.scopes?.resolve(event.sessionID, event.agent)
+    } catch (error) {
+      unchecked.push("the settings of this agent")
+      log.error("internal error while resolving the settings of this agent", error)
+    }
+    try {
+      executed = executedScripts(event.sessionID, event.tool, event.input, scope)
     } catch (error) {
       unchecked.push("the scripts run by the command")
       log.error("internal error while reading the scripts run by the command", error)
@@ -414,6 +430,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         directory: ctx.location.directory,
         ...(cwds ? { cwds } : {}),
         ...(executed ? { scripts: executed } : {}),
+        ...(scope ? { scope } : {}),
       })
     } catch (error) {
       log.error("internal error while deciding", error)
@@ -440,13 +457,15 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       decision = { ...decision, reason: `${decision.reason}; ${unchecked.join(" and ")} could not be checked (internal error)` }
     // Duration of model calls at the end of the line (measures the effect of the retry on timeout).
     const timing = decision.modelMs === undefined ? "" : ` [model ${decision.modelMs} ms${(decision.attempts ?? 1) > 1 ? `, ${decision.attempts} attempts` : ""}]`
-    // Asks and denials always logged, with their rule; allows only with `debug`.
-    if (decision.verdict === "allow") log.debug(`${event.tool} → allow (${decision.source}): ${decision.reason}${timing}`)
+    // Asks and denials always logged, with their rule; allows only with `debug`, except a local ask the decision model
+    // allowed because a setting left it to it.
+    if (decision.verdict === "allow" && !decision.bySetting) log.debug(`${event.tool} → allow (${decision.source}): ${decision.reason}${timing}`)
     else log.info(`${event.tool} → ${decision.verdict} (${sourceNote(decision.source, decision.rule)}): ${decision.reason}${timing}`)
     if (decision.verdict === "deny") return reject(new Error(blockedMessage(decision.reason, decision.rule)))
     /** Executable call (allowed or confirmed): file tracking when it ends; never throws (the tool would run without it). */
     const track = () => {
-      if (deps.trackScripts === false || !TRACKED_TOOLS.has(event.tool)) return
+      // Every agent's files: a script written by one agent may be run by another.
+      if (!(deps.scopes ? deps.scopes.tracking() : deps.trackScripts !== false) || !TRACKED_TOOLS.has(event.tool)) return
       try {
         pending.add(key, { judged: decision.judgedInFull === true, previous: trackedBefore(event.sessionID, event.tool, event.input) })
       } catch (error) {
@@ -454,6 +473,8 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       }
     }
     if (decision.verdict !== "ask") {
+      // Never after an internal error (the allow then became an ask above), nor on a truncated input.
+      if (decision.bySetting && decision.judgedInFull === true) approved.add(key, "model")
       track()
       return
     }
@@ -486,7 +507,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       return reject(error)
     }
     log.info(`${event.tool} → confirmed by the user`)
-    approved.add(key, true)
+    approved.add(key, "user")
     // A long confirmation does not let directories expire before `evaluate`.
     if (cwds) directories.add(key, cwds)
     track()
@@ -519,11 +540,13 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     try {
       posed = review(event)
     } catch (error) {
-      // Like execute.before: on internal error, ask rather than let it pass.
+      // Like execute.before: on internal error, ask rather than let it pass, under `internal-error` (no setting reaches it).
       log.error("internal error in permission.evaluate", error)
       if (event.effect === "allow") {
+        const reason = "internal error: the request could not be checked"
         event.effect = "ask"
-        event.message = "[guard] internal error: confirmation required"
+        event.message = askMessage(reason, INTERNAL_ERROR_RULE)
+        posed = { reason, rule: INTERNAL_ERROR_RULE }
       }
     }
     // Unattended mode: every remaining ask becomes a denial, including OpenCode's native
@@ -551,8 +574,11 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     }
     // Defense in depth: sub-commands extracted by OpenCode's tree-sitter parser.
     if (event.action !== "shell" || event.effect === "deny") return undefined
-    // Call already confirmed in execute.before: no second ask, but a denial still applies.
-    const confirmed = event.source !== undefined && approved.has(approvalKey(event.sessionID, event.source.id))
+    const active = deps.scopes ? deps.scopes.resolve(event.sessionID, event.agent).policy : deps.active
+    // Call already confirmed in execute.before: no second ask, but a denial still applies. Allowed there by the decision
+    // model on an ask a setting left to it: only the sub-command asks left to the model by a setting are discarded.
+    const approval = event.source === undefined ? undefined : approved.get(approvalKey(event.sessionID, event.source.id))
+    const confirmed = approval === "user"
     // Directories computed in execute.before; unknown (other source, plugin reloaded meanwhile): session directory.
     const cwds = event.source === undefined ? undefined : directories.get(approvalKey(event.sessionID, event.source.id))
     const credentialContent = deps.readContent ? createCredentialContent({ directories: cwds ?? [ctx.location.directory], home: deps.home }) : undefined
@@ -571,8 +597,9 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
           ...(credentialContent ? { credentialContent } : {}),
           ...(realPaths ? { realPaths } : {}),
           protectedDirs: deps.protectedDirs,
+          ...(deps.pluginDirs ? { pluginDirs: deps.pluginDirs } : {}),
           ...(deps.serviceDirs ? { serviceDirs: deps.serviceDirs } : {}),
-          active: deps.active,
+          active,
         })
       } catch (error) {
         failed = true
@@ -584,8 +611,9 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       }
     })
     // Ask coming only from heredoc data: already decided by the model in execute.before (discarded before
-    // `mostSevere`, so as not to mask another sub-command).
-    const finding = mostSevere(findings.filter((item) => !item?.dataOnly))
+    // `mostSevere`, so as not to mask another sub-command); likewise an ask left to the model by a setting, once it
+    // allowed the whole command.
+    const finding = mostSevere(findings.filter((item) => !item?.dataOnly && !(approval === "model" && item?.verdict === "ask" && bySetting(item))))
     if (finding?.verdict === "deny") {
       // execute.before saw only one ask on the whole command: a rule gap to spot in the log.
       if (confirmed) log.warn(`deny found only in shell sub-commands after approval (rule ${finding.rule})`)
@@ -602,10 +630,13 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         return { reason, rule: finding.rule }
       }
     } else if (failed && event.effect === "allow") {
-      // Like the execute.before fallback: an unchecked sub-command asks, even for an already confirmed call.
+      // Like the execute.before fallback: an unchecked sub-command asks, even for an already confirmed call, under
+      // `internal-error` (no setting reaches it).
+      const reason = "internal error: a shell sub-command could not be checked"
       event.effect = "ask"
-      event.message = "[guard] internal error: confirmation required"
-      note("shell sub-commands → ask (internal error): a sub-command could not be checked")
+      event.message = askMessage(reason, INTERNAL_ERROR_RULE)
+      note(`shell sub-commands → ask (${sourceNote("internal error", INTERNAL_ERROR_RULE)}): ${reason}`)
+      return { reason, rule: INTERNAL_ERROR_RULE }
     }
     return undefined
   }

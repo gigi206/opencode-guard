@@ -1,6 +1,8 @@
 // Files typically containing credentials (read → confirmation request)
 // and sensitive write locations (persistence, hooks, system, OpenCode config, plugin).
 import { isAbsolute, resolve } from "node:path"
+import { GUARD_FILE } from "../guard-file.ts"
+import type { ActiveRules } from "./features.ts"
 import { LIMIT_REACHED } from "./types.ts"
 
 const ENV_SAFE_SUFFIXES = new Set(["example", "sample", "template", "dist", "defaults"])
@@ -112,7 +114,8 @@ const PROTECTED_WRITE_SEGMENTS = [
 /** OpenCode config: the agent must not be able to disable the guardrail without confirmation. */
 const OPENCODE_WRITE_SEGMENTS = ["/.config/opencode/", "/.opencode/"]
 
-const PROTECTED_WRITE_FILES = new Set(["opencode.json", "opencode.jsonc"])
+/** The plugin's settings, recognized by name wherever they are (a directory known only once expanded included). */
+const PROTECTED_WRITE_FILES = new Set(["opencode.json", "opencode.jsonc", GUARD_FILE])
 
 export interface WritePathContext {
   /** Working directory for resolving relative paths. */
@@ -124,12 +127,21 @@ export interface WritePathContext {
   readonly cwds?: readonly string[]
   /** Absolute directories protected against writes (e.g. plugin directory, hot-reloaded). */
   readonly protectedDirs?: readonly string[]
+  /** The plugin's own directories among `protectedDirs` (they hold its settings); absent: all of them count. */
+  readonly pluginDirs?: readonly string[]
+  /**
+   * Rule policy of the call: only with `selfProtectionByModel` are real paths followed past an OpenCode location to
+   * find the plugin's settings (otherwise both stay with the user alike, and nothing more is looked up).
+   */
+  readonly active?: ActiveRules
   /**
    * Real paths of an absolute path (`real-path.ts`, built per tool call): protected location reached
    * through a symbolic link. Absent: lexical comparison only; `undefined` (unknown): same for that path;
    * `LIMIT_REACHED` (limit): `unchecked` kind, unless self-protection is already recognized.
    */
   readonly realPaths?: (absolute: string) => readonly string[] | undefined | typeof LIMIT_REACHED
+  /** Directories of the OpenCode service files (`CredentialContext`): writing one of these files holds its settings. */
+  readonly serviceDirs?: readonly string[]
 }
 
 const QUOTES = "\"'`"
@@ -249,7 +261,16 @@ export function isProtectedWritePath(raw: string, home?: string, context: WriteP
  */
 export type WriteKind = "opencode" | "unchecked" | "system"
 
-const KIND_RANK: Record<WriteKind, number> = { opencode: 3, unchecked: 2, system: 1 }
+/**
+ * Kind refined for self-protection: `settings` is an `opencode` location that holds the plugin's settings (any
+ * `opencode.json`, `opencode.jsonc` or `guard.json`, a configuration directory itself, the plugin directory, the OpenCode
+ * service file and its environment) or code OpenCode loads (the `plugin` and `plugins` directories of a configuration
+ * directory), or an `opencode` location whose real paths reached a limit (it may lead to them), never left to the
+ * decision model (user's decision); `protectedWriteKind` reports it as `opencode`.
+ */
+export type WriteClass = WriteKind | "settings"
+
+const KIND_RANK: Record<WriteClass, number> = { settings: 4, opencode: 3, unchecked: 2, system: 1 }
 
 /** Reason of the ask for the `unchecked` kind (`self-protection` rule): `subject` designates the write, path quoted or not. */
 export const uncheckedWriteReason = (subject: string, path?: string) =>
@@ -259,65 +280,145 @@ export const uncheckedWriteReason = (subject: string, path?: string) =>
  * Strictest kind: self-protection, then unchecked real path, then protected location, then nothing (explicit maximum,
  * not the first found).
  */
-export function strictestKind(...kinds: ReadonlyArray<WriteKind | undefined>): WriteKind | undefined {
-  let strictest: WriteKind | undefined
+export function strictestKind<K extends WriteClass>(...kinds: ReadonlyArray<K | undefined>): K | undefined {
+  let strictest: K | undefined
   for (const kind of kinds) if (kind !== undefined && (strictest === undefined || KIND_RANK[kind] > KIND_RANK[strictest])) strictest = kind
   return strictest
 }
 
 /**
  * Kind of path `p` (`normalizePath` form, or already-resolved absolute path) based on its names, prefixes, and segments, and
- * its absolute forms `absolutes` (protected directories).
+ * its absolute forms `absolutes` (protected directories); `settings` among the `opencode` ones.
  */
-function kindOf(p: string, absolutes: readonly string[], protectedDirs: readonly string[] | undefined): WriteKind | undefined {
+function kindOf(p: string, absolutes: readonly string[], context: WritePathContext): WriteClass | undefined {
   const base = basename(p)
-  if (PROTECTED_WRITE_FILES.has(base) || p === "/etc/opencode" || p.startsWith("/etc/opencode/")) return "opencode"
-  if (OPENCODE_WRITE_SEGMENTS.some((segment) => p.includes(segment) || p.endsWith(segment.slice(0, -1)))) return "opencode"
-  if (protectedDirs?.length && absolutes.some((absolute) => protectedDirs.some((dir) => absolute === dir || absolute.startsWith(`${dir}/`))))
-    return "opencode"
-  if (PROTECTED_WRITE_BASENAMES.has(base) || p.startsWith("/etc/")) return "system"
-  if (PROTECTED_WRITE_SEGMENTS.some((segment) => p.includes(segment) || p.endsWith(segment.slice(0, -1)))) return "system"
-  return undefined
+  const within = (dirs: readonly string[] | undefined) => !!dirs?.length && absolutes.some((absolute) => dirs.some((dir) => absolute === dir || absolute.startsWith(`${dir}/`)))
+  if (PROTECTED_WRITE_FILES.has(base) || within(context.pluginDirs ?? context.protectedDirs) || serviceFile(base, absolutes, context)) return "settings"
+  // A configuration directory itself (moved or removed with its settings).
+  const directory =
+    p === "/etc/opencode" || OPENCODE_WRITE_SEGMENTS.some((segment) => p.endsWith(segment.slice(0, -1))) || absolutes.some((absolute) => context.protectedDirs?.includes(absolute))
+  if (directory || p.startsWith("/etc/opencode/") || OPENCODE_WRITE_SEGMENTS.some((segment) => p.includes(segment)) || within(context.protectedDirs))
+    return directory || NON_LITERAL_NAME.test(base) || pluginSource(p, absolutes, context) ? "settings" : "opencode"
+  return systemLocation(p, base) ? "system" : undefined
 }
+
+/** Protected location of the `system` kind (startup files, `/etc`, `~/.ssh`, git hooks…), OpenCode's configuration included. */
+function systemLocation(p: string, base = basename(p)): boolean {
+  return PROTECTED_WRITE_BASENAMES.has(base) || p.startsWith("/etc/") || PROTECTED_WRITE_SEGMENTS.some((segment) => p.includes(segment) || p.endsWith(segment.slice(0, -1)))
+}
+
+/** The OpenCode service file (`service.json`, a variant or a backup copy) under a service directory, in one of the `absolutes`. */
+function serviceFile(base: string, absolutes: readonly string[], context: WritePathContext): boolean {
+  const dirs = context.serviceDirs
+  if (!dirs?.length || ![base, ...backupStems(base)].some((name) => SERVICE_BASENAME.test(name))) return false
+  return absolutes.some((absolute) => dirs.some((dir) => absolute.startsWith(`${dir}/`)))
+}
+
+/** A final name the shell or a program expands (pattern, variable, quotes): it may be any file of its directory. */
+const NON_LITERAL_NAME = /[*?[\]{}$`"'\\]/
+
+/** First name under a configuration directory (`/etc/opencode`, `~/.config/opencode`, a `.opencode`, nested ones included). */
+const CONFIG_CHILD = /(?:^\/etc\/opencode|\/\.config\/opencode|\/\.opencode)(?=\/([^/]+))/g
+
+/** `plugin` or `plugins`, whose code OpenCode loads, or a name that may expand to them (`NON_LITERAL_NAME`). */
+const PLUGIN_SOURCE_NAME = /^plugins?$|[*?[\]{}$`"'\\]/
+
+/**
+ * Path at or under the `plugin` or `plugins` directory of a configuration directory: named in `p`, or under a protected
+ * directory (OpenCode's global configuration directory resolved from the environment) in one of the `absolutes`.
+ */
+function pluginSource(p: string, absolutes: readonly string[], context: WritePathContext): boolean {
+  for (const match of p.matchAll(CONFIG_CHILD)) if (PLUGIN_SOURCE_NAME.test(match[1]!)) return true
+  return absolutes.some((absolute) =>
+    (context.protectedDirs ?? []).some((dir) => absolute.startsWith(`${dir}/`) && PLUGIN_SOURCE_NAME.test(absolute.slice(dir.length + 1).split("/")[0]!)),
+  )
+}
+
+/** `settings` reported as `opencode`. */
+const asKind = (kind: WriteClass | undefined): WriteKind | undefined => (kind === "settings" ? "opencode" : kind)
 
 /**
  * Kind of a protected write location: `opencode` (OpenCode configuration, plugin directory: self-protection,
  * always active) or `system` (startup files, `~/.ssh/`, git hooks, `/etc`…: `dangerousCommands` switch).
  * Forms classified: the written form, the form resolved lexically from each base directory and, with `realPaths`,
  * the real paths that differ from it. The strictest wins (`strictestKind`); a form whose real paths reached a limit
- * counts as `unchecked`.
+ * counts as `unchecked`, and an `opencode` location then as `settings`.
  */
 export function protectedWriteKind(raw: string, home?: string, context: WritePathContext = {}): WriteKind | undefined {
-  const expanded = strip(raw).replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, home ?? "~")
-  const bases = isAbsolute(expanded) ? ["/"] : context.cwds?.length ? context.cwds : context.cwd ? [context.cwd] : []
-  const lexical = bases.map((base) => resolve(base, expanded))
+  return asKind(protectedWriteClass(raw, home, context))
+}
+
+/** Strictest class reached: `settings`, or `opencode` when the call's policy does not tell them apart. */
+const reached = (kind: WriteClass | undefined, context: WritePathContext) => kind === "settings" || (kind === "opencode" && !context.active?.selfProtectionByModel)
+
+/**
+ * `protectedWriteKind` with `settings`: with `selfProtectionByModel`, real paths are followed until a form holds the
+ * plugin's settings (a link from another OpenCode location to them counts).
+ */
+export function protectedWriteClass(raw: string, home?: string, context: WritePathContext = {}): WriteClass | undefined {
+  const { lexical, linked } = writeForms(raw, home, context)
   // Resolved form classified by all families, before real paths: it is the path written by OpenCode
   // tools and, without a link, the kernel (`//`, `.`, `..`, relative path going up, base directory located in
   // the protected location). It remains classified when real paths are unknown (limit, loop).
-  let kind = strictestKind(
-    kindOf(normalizePath(raw, home), lexical, context.protectedDirs),
-    ...lexical.map((form) => kindOf(form, [form], context.protectedDirs)),
-  )
-  if (kind === "opencode" || !context.realPaths) return kind
-  // Raw form (the shell lets the kernel follow a `..` placed after a link) and normalized form (OpenCode tools
-  // normalize before writing).
-  for (const [index, base] of bases.entries()) {
-    for (const form of [`${base}/${expanded}`, lexical[index]!]) {
+  let kind = strictestKind(kindOf(normalizePath(raw, home), lexical, context), ...lexical.map((form) => kindOf(form, [form], context)))
+  if (reached(kind, context) || !context.realPaths) return kind
+  let limited = false
+  for (const [index, forms] of linked.entries()) {
+    for (const form of forms) {
       const reals = context.realPaths(form)
       if (reals === LIMIT_REACHED) {
+        limited = true
         kind = strictestKind(kind, "unchecked")
         continue
       }
       for (const real of reals ?? []) {
         // Identical to the resolved form: already classified.
         if (real === lexical[index]) continue
-        kind = strictestKind(kind, kindOf(real, [real], context.protectedDirs))
-        if (kind === "opencode") return kind
+        kind = strictestKind(kind, kindOf(real, [real], context))
+        if (reached(kind, context)) return kind
       }
     }
   }
-  return kind
+  return limitedClass(kind, limited)
 }
+
+/**
+ * Forms of a written path resolved from each base directory: `lexical`, and for each the forms whose real paths count,
+ * raw (the shell lets the kernel follow a `..` placed after a link) and normalized (OpenCode tools normalize before
+ * writing).
+ */
+function writeForms(raw: string, home: string | undefined, context: WritePathContext) {
+  const expanded = strip(raw).replace(/^(~|\$HOME|\$\{HOME\})(?=\/|$)/, home ?? "~")
+  const bases = isAbsolute(expanded) ? ["/"] : context.cwds?.length ? context.cwds : context.cwd ? [context.cwd] : []
+  const lexical = bases.map((base) => resolve(base, expanded))
+  return { lexical, linked: bases.map((base, index) => [`${base}/${expanded}`, lexical[index]!]) }
+}
+
+/**
+ * Some form of the path, written, lexical or real, in a `system` location (`protected-write`), whatever the strictest
+ * class: `protectedWriteClass` stops at the plugin's settings and ranks OpenCode's configuration first. A limit reached
+ * while following real paths finds nothing there (its own ask remains).
+ */
+export function systemWrite(raw: string, home?: string, context: WritePathContext = {}): boolean {
+  const { lexical, linked } = writeForms(raw, home, context)
+  if (systemLocation(normalizePath(raw, home)) || lexical.some((form) => systemLocation(form))) return true
+  return linked.some((forms) => forms.some((form) => systemReal(form, context)))
+}
+
+/** `systemWrite` for the exact form of OpenCode's tools (`exactWriteClass`). */
+export const exactSystemWrite = (absolute: string, context: WritePathContext = {}): boolean => systemLocation(absolute) || systemReal(absolute, context)
+
+/** A real path of `form` in a `system` location. */
+function systemReal(form: string, context: WritePathContext): boolean {
+  const reals = context.realPaths?.(form)
+  return reals !== LIMIT_REACHED && (reals ?? []).some((real) => systemLocation(real))
+}
+
+/**
+ * Class once a limit was reached while following real paths: an `opencode` location may lead to the plugin's settings
+ * (a link to them), so it counts as `settings` (only `selfProtectionByModel` follows real paths past an `opencode` one).
+ */
+const limitedClass = (kind: WriteClass | undefined, limited: boolean): WriteClass | undefined => (limited && kind === "opencode" ? "settings" : kind)
 
 /**
  * Kind of an absolute path as written by OpenCode's `edit`, `write`, and `patch` tools (exact form, computed
@@ -325,14 +426,19 @@ export function protectedWriteKind(raw: string, home?: string, context: WritePat
  * `$HOME` (for OpenCode, a name ending in a space or a quote is a real name), then its real paths.
  */
 export function exactWriteKind(absolute: string, context: WritePathContext = {}): WriteKind | undefined {
-  let kind = kindOf(absolute, [absolute], context.protectedDirs)
-  if (kind === "opencode" || !context.realPaths) return kind
+  return asKind(exactWriteClass(absolute, context))
+}
+
+/** `exactWriteKind` with `settings` (like `protectedWriteClass`). */
+export function exactWriteClass(absolute: string, context: WritePathContext = {}): WriteClass | undefined {
+  let kind = kindOf(absolute, [absolute], context)
+  if (reached(kind, context) || !context.realPaths) return kind
   const reals = context.realPaths(absolute)
-  if (reals === LIMIT_REACHED) return "unchecked"
+  if (reals === LIMIT_REACHED) return limitedClass(strictestKind(kind, "unchecked"), true)
   for (const real of reals ?? []) {
     if (real === absolute) continue
-    kind = strictestKind(kind, kindOf(real, [real], context.protectedDirs))
-    if (kind === "opencode") return kind
+    kind = strictestKind(kind, kindOf(real, [real], context))
+    if (reached(kind, context)) return kind
   }
   return kind
 }

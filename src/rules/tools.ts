@@ -4,16 +4,20 @@ import { patchTargets } from "../patch.ts"
 import { resolveLike } from "../scripts.ts"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes } from "./code-network.ts"
-import { ruleEnabled, type ActiveRules } from "./features.ts"
-import { credentialFile, exactWriteKind, protectedWriteKind, strictestKind, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
+import { entrusted, overridden, ruleEnabled, type ActiveRules } from "./features.ts"
+import { credentialFile, exactSystemWrite, exactWriteClass, protectedWriteClass, strictestKind, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
 import { shellFinding } from "./shell.ts"
-import { INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
+import { decidable, INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
 
 export interface ToolRuleContext extends WritePathContext, CredentialContext {
   readonly redactor: Redactor
   readonly home?: string
   readonly custom?: readonly CustomRule[]
-  /** `dangerousCommands` / `sensitiveFiles` switches: a disabled rule is not evaluated; absent = all. */
+  /**
+   * Rule policy (`dangerousCommands` / `sensitiveFiles` switches, `ruleOverrides`, `localAsks`): a disabled rule is not
+   * evaluated, the verdict of the others is set on each finding where it is built (an ask left to the decision model is
+   * marked there, only when the check was carried out to the end); absent = all, unchanged.
+   */
   readonly active?: ActiveRules
   /** Cause of a check that threw (log); absent: nothing is logged, the ask remains. */
   readonly report?: (message: string, error: unknown) => void
@@ -72,12 +76,12 @@ function record(input: unknown): Record<string, unknown> {
   return input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}
 }
 
-/** Credential file; content not checked (limit): ask from the same rule, with its own reason. */
+/** Credential file; content not checked (limit): ask from the same rule, with its own reason, never left to the model. */
 function secretRead(path: string, ctx: ToolRuleContext): Finding | undefined {
   if (!path || !ruleEnabled("secret-file-read", ctx.active)) return undefined
   const found = credentialFile(path, ctx)
-  if (found === true) return { verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }
-  return found === LIMIT_REACHED ? { verdict: "ask", rule: "secret-file-read", reason: uncheckedCredentialReason(path) } : undefined
+  if (found === true) return entrusted(overridden({ verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }, ctx.active), ctx.active)
+  return found === LIMIT_REACHED ? overridden({ verdict: "ask", rule: "secret-file-read", reason: uncheckedCredentialReason(path) }, ctx.active) : undefined
 }
 
 /**
@@ -93,19 +97,35 @@ function openCodeWritePath(path: string, ctx: ToolRuleContext): string | undefin
 
 /**
  * OpenCode configuration and plugin directory: self-protection (always active), like an unchecked real path (limit);
- * other protected locations. `edit`, `write`, and `patch` tools: written form (`protectedWriteKind`) and OpenCode exact
- * form, which keeps whitespace and leading/trailing quotes (`exactWriteKind`); the strictest wins.
+ * other protected locations. `edit`, `write`, and `patch` tools: written form (`protectedWriteClass`) and OpenCode exact
+ * form, which keeps whitespace and leading/trailing quotes (`exactWriteClass`); the strictest wins. A location that
+ * holds the plugin's settings is never left to the decision model (user's decision).
  */
 function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined {
   if (!path) return undefined
   const exact = openCodeWritePath(path, ctx)
-  const kind = strictestKind(protectedWriteKind(path, ctx.home, ctx), exact === undefined ? undefined : exactWriteKind(exact, ctx))
-  if (kind === "opencode")
-    return { verdict: "ask", rule: "self-protection", reason: `write to OpenCode's configuration or to the guard plugin (${path})` }
-  if (kind === "unchecked") return { verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("write to a location", path) }
-  if (kind === "system" && ruleEnabled("protected-write", ctx.active))
-    return { verdict: "ask", rule: "protected-write", reason: `write to a protected location (${path})` }
+  const kind = strictestKind(protectedWriteClass(path, ctx.home, ctx), exact === undefined ? undefined : exactWriteClass(exact, ctx))
+  const system = () => entrusted(overridden({ verdict: "ask", rule: "protected-write", reason: `write to a protected location (${path})` }, ctx.active), ctx.active)
+  const anySystem = () => systemWrite(path, ctx.home, ctx) || (exact !== undefined && exactSystemWrite(exact, ctx))
+  if (kind === "settings" || kind === "opencode") {
+    const finding = overridden({ verdict: "ask", rule: "self-protection", reason: `write to OpenCode's configuration or to the guard plugin (${path})` }, ctx.active)
+    return withSystemForm(kind === "settings" ? finding : entrusted(finding, ctx.active), system, anySystem, ctx)
+  }
+  if (kind === "unchecked")
+    return withSystemForm(overridden({ verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("write to a location", path) }, ctx.active), system, anySystem, ctx)
+  if (kind === "system" && ruleEnabled("protected-write", ctx.active)) return system()
   return undefined
+}
+
+/**
+ * Self-protection finding `own`, or the `protected-write` one when it is stronger (rule set to `deny`, or an ask the user
+ * confirms against one left to the model) and some form of the target is in such a location (`systemWrite`), looked up
+ * only then: the strictest class hides it.
+ */
+function withSystemForm(own: Finding, system: () => Finding | undefined, anySystem: () => boolean, ctx: ToolRuleContext): Finding {
+  if (!ruleEnabled("protected-write", ctx.active)) return own
+  const stronger = system()
+  return stronger && mostSevere([own, stronger]) === stronger && anySystem() ? stronger : own
 }
 
 /**
@@ -113,23 +133,30 @@ function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined
  * exact form: each server resolves its paths in its own way (written form and resolved form of `protectedWriteKind`).
  */
 function protectedArgument(path: string, ctx: ToolRuleContext): Finding | undefined {
-  const kind = protectedWriteKind(path, ctx.home, ctx)
-  if (kind === "opencode")
-    return { verdict: "ask", rule: "self-protection", reason: `a tool argument designates OpenCode's configuration or the guard plugin (${path})` }
-  if (kind === "unchecked") return { verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("a tool argument designates a location", path) }
-  if (kind === "system" && ruleEnabled("protected-write", ctx.active))
-    return { verdict: "ask", rule: "protected-write", reason: `a tool argument designates a protected location (${path})` }
+  const kind = protectedWriteClass(path, ctx.home, ctx)
+  const system = () => entrusted(overridden({ verdict: "ask", rule: "protected-write", reason: `a tool argument designates a protected location (${path})` }, ctx.active), ctx.active)
+  const anySystem = () => systemWrite(path, ctx.home, ctx)
+  if (kind === "settings" || kind === "opencode") {
+    const finding = overridden({ verdict: "ask", rule: "self-protection", reason: `a tool argument designates OpenCode's configuration or the guard plugin (${path})` }, ctx.active)
+    return withSystemForm(kind === "settings" ? finding : entrusted(finding, ctx.active), system, anySystem, ctx)
+  }
+  if (kind === "unchecked")
+    return withSystemForm(overridden({ verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("a tool argument designates a location", path) }, ctx.active), system, anySystem, ctx)
+  if (kind === "system" && ruleEnabled("protected-write", ctx.active)) return system()
   return undefined
 }
 
 /**
- * Protected-location findings from several paths of the same call (patch targets, MCP arguments): each is
- * replaced by the strictest of them, self-protection before a simple protected location, in the same place. Only the
- * displayed rule changes, never the verdict (they are all asks).
+ * Protected-location findings from several paths of the same call (patch targets, MCP arguments): each ask is
+ * replaced by the strictest of them, an ask the user confirms before one left to the decision model, then
+ * self-protection before a simple protected location, in the same place. Only the displayed rule changes, never the
+ * verdict: a deny (rule set to `deny`) stays in its place.
  */
 function strictestProtected(findings: ReadonlyArray<Finding | undefined>): Array<Finding | undefined> {
-  const strictest = findings.find((finding) => finding?.rule === "self-protection") ?? findings.find((finding) => finding !== undefined)
-  return findings.map((finding) => finding && strictest)
+  const confirmed = findings.filter((finding) => finding !== undefined && !decidable(finding))
+  const pool = confirmed.length ? confirmed : findings
+  const strictest = pool.find((finding) => finding?.rule === "self-protection") ?? pool.find((finding) => finding !== undefined)
+  return findings.map((finding) => (finding?.verdict === "ask" ? strictest : finding))
 }
 
 /** Last word of a key name that designates a path: `filePath`, `outputDirPath`, `file_paths` yes, `fileType` no. */
@@ -233,7 +260,7 @@ const placeholder = (text: string): Finding | undefined =>
 
 const exfiltration = (value: unknown, ctx: ToolRuleContext, what: string): Finding | undefined =>
   ruleEnabled("secret-network", ctx.active) && ctx.redactor.containsSecret(value)
-    ? { verdict: "deny", rule: "secret-network", reason: `secret found in ${what} (exfiltration)` }
+    ? overridden({ verdict: "deny", rule: "secret-network", reason: `secret found in ${what} (exfiltration)` }, ctx.active)
     : undefined
 
 function customFindings(tool: string, input: unknown, ctx: ToolRuleContext): Finding[] {
@@ -367,10 +394,10 @@ function executeFinding(raw: string, ctx: ToolRuleContext, custom: readonly Find
     // Raw AND decoded text: a known secret may itself contain a literal `\u…` sequence.
     checked("the secret check", ctx, () => exfiltration(raw, ctx, what) ?? exfiltration(code, ctx, what)),
     fetchRule && tools
-      ? { verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch) and calling tools" }
+      ? entrusted(overridden({ verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch) and calling tools" }, ctx.active), ctx.active)
       : undefined,
     fetchRule && local
-      ? { verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch) to a local or private address" }
+      ? entrusted(overridden({ verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch) to a local or private address" }, ctx.active), ctx.active)
       : undefined,
     ...custom,
   ])
@@ -379,7 +406,7 @@ function executeFinding(raw: string, ctx: ToolRuleContext, custom: readonly Find
   return (
     found ??
     (fetchRule
-      ? { verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch)", modelDecides: "without tool calls or local addresses" }
+      ? overridden({ verdict: "ask", rule: "codemode-fetch", reason: "CodeMode code making network requests (fetch)", modelDecides: "without tool calls or local addresses" }, ctx.active)
       : undefined)
   )
 }

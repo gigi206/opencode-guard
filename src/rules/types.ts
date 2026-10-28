@@ -32,12 +32,16 @@ export const INTERNAL_ERROR_RULE = "internal-error"
  */
 export const LIMIT_REACHED: unique symbol = Symbol("limit reached")
 
+/** Ask that the decision model can decide (`dataOnly`, `modelDecides`): weaker than an ask the user confirms. */
+export const decidable = (finding: Finding): boolean => finding.verdict === "ask" && (finding.dataOnly === true || finding.modelDecides !== undefined)
+
+/** Deny, then ask without a mark, then ask that the model can decide; at equal strength, the first one. */
 export function mostSevere(findings: ReadonlyArray<Finding | undefined>): Finding | undefined {
   let best: Finding | undefined
   for (const finding of findings) {
     if (!finding) continue
     if (finding.verdict === "deny") return finding
-    best ??= finding
+    if (!best || (decidable(best) && !decidable(finding))) best = finding
   }
   return best
 }

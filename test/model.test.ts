@@ -644,7 +644,9 @@ describe("session ses_ec361019 (audit by another AI): decision model, client, co
 })
 
 describe("lot 7: 'heredoc data only' ask decided by the model", () => {
-  const { config } = parseConfig({ decision: { baseURL: "https://decision.local/v1", model: "nox-4b" } })
+  // The same decision model declared by the global configuration: it may allow.
+  const options = { decision: { baseURL: "https://decision.local/v1", model: "nox-4b" } }
+  const { config } = parseConfig(options, {}, () => [{ label: "global", options }])
   const heredoc = { command: "cat > notes.md <<'EOF'\nsudo apt install x\nEOF" }
   const decide = (model: Parameters<typeof createDecider>[0]["model"], input: unknown = heredoc) =>
     createDecider({ config, redactor: createRedactor(), model }).decide({ tool: "shell", input })
@@ -945,7 +947,9 @@ describe("lot 27: model client with a real local server, configuration", () => {
 })
 
 describe("lot 36: CodeMode script that reads the web without a tool, decided by the model if it judged everything", () => {
-  const { config } = parseConfig({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" } })
+  // The same decision model declared by the global configuration: it may allow.
+  const declared = (options: Record<string, unknown>) => parseConfig(options, {}, () => [{ label: "global", options }])
+  const { config } = declared({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" } })
   const read = { code: "const r = await fetch('https://example.com/data.json'); return r.status" }
   const decide = (model: Parameters<typeof createDecider>[0]["model"], input: unknown = read, cfg = config) =>
     createDecider({ config: cfg, redactor: createRedactor(), model }).decide({ tool: "execute", input })
@@ -968,7 +972,7 @@ describe("lot 36: CodeMode script that reads the web without a tool, decided by 
     assert.equal(disabled.source, "local")
   })
   it("code truncated for the model → local ask with its opinion", async () => {
-    const { config: small } = parseConfig({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
+    const { config: small } = declared({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
     const long = { code: `${read.code}\n${"// commentaire de remplissage\n".repeat(40)}` }
     const result = await decide(async () => answers(0.1), long, small)
     assert.equal(result.verdict, "ask")
@@ -976,7 +980,7 @@ describe("lot 36: CodeMode script that reads the web without a tool, decided by 
     assert.match(result.reason, /opinion: allow/)
   })
   it("truncated code submitted twice (cache) → still an ask", async () => {
-    const { config: small } = parseConfig({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
+    const { config: small } = declared({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
     const long = { code: `${read.code}\n${"// commentaire de remplissage\n".repeat(40)}` }
     let calls = 0
     const decider = createDecider({ config: small, redactor: createRedactor(), model: async () => (calls++, answers(0.1)) })
@@ -984,7 +988,7 @@ describe("lot 36: CodeMode script that reads the web without a tool, decided by 
     assert.equal(calls, 1)
   })
   it("reason for an undecided ask: code too long, model unreachable", async () => {
-    const { config: small } = parseConfig({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
+    const { config: small } = declared({ decision: { baseURL: "https://decision.example/v1", model: "nox-4b" }, maxStateChars: 200 })
     const long = { code: `${read.code}\n${"// commentaire de remplissage\n".repeat(40)}` }
     assert.match((await decide(async () => answers(0.1), long, small)).reason, /too long for the decision model to decide/)
     const down = await decide(async () => {

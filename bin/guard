@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// Command line of the guard plugin (docs/configuration.md, "The guard command"). Node strips the types of the
+// TypeScript sources it imports: no build step, no dependency.
+import { main } from "../src/cli/main.ts"
+import { systemConfigDirectory } from "../src/index.ts"
+
+process.exitCode = main(process.argv.slice(2), {
+  env: process.env,
+  cwd: process.cwd(),
+  systemDir: systemConfigDirectory(),
+  out: (line) => process.stdout.write(`${line}\n`),
+  err: (line) => process.stderr.write(`${line}\n`),
+})

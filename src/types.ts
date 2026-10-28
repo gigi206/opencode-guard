@@ -121,7 +121,7 @@ export interface GuardContext {
     get(input: { agentID: string; location?: { directory?: string } }): Promise<{ readonly data: { readonly mode: string } }>
   }
   readonly session: {
-    get(input: { sessionID: string }): Promise<{ readonly agent?: string }>
+    get(input: { sessionID: string }): Promise<{ readonly agent?: string; readonly parentID?: string }>
     hook(name: "prompt", callback: Hook<PromptEvent>): Promise<unknown>
     hook(name: "http.request", callback: Hook<HttpRequestEvent>): Promise<unknown>
     hook(name: "experimental.ws.send", callback: Hook<WsSendEvent>): Promise<unknown>
@@ -144,6 +144,11 @@ const ROTATE_CHECK_EVERY = 100
  * read by dev/tools/decision-log-stats.mjs).
  */
 export const MAX_LOG_LINE = 8192
+/**
+ * Never written to the log nor printed to a terminal: C0 and C1 controls, DEL, line and paragraph separators, and the
+ * bidirectional controls (they reorder what follows on screen).
+ */
+export const CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]+/g
 const LINE_HEAD = 6000
 const LINE_TAIL = 2000
 /** Append, create if needed, never through a final symbolic link (placed before startup or after). */
@@ -214,7 +219,7 @@ export function createLogger(
       text = "(log message withheld: redaction failed)"
     }
     // One line per entry: reasons mention paths chosen by the model and server responses.
-    text = text.replace(/[\x00-\x1f\x7f\u2028\u2029]+/g, " ")
+    text = text.replace(CONTROL_CHARACTERS, " ")
     // Cut after redaction: a secret straddling the cut has already been replaced.
     if (text.length <= MAX_LOG_LINE) return text
     return `${text.slice(0, LINE_HEAD)} …[${text.length - LINE_HEAD - LINE_TAIL} characters omitted]… ${text.slice(-LINE_TAIL)}`
