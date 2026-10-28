@@ -107,4 +107,25 @@ describe("guard show and guard last in a terminal", () => {
     }
     assert.deepEqual(plain(run({ width: 70, color: true }, "last").out), run({ width: 70, color: false }, "last").out)
   })
+
+  it("PL-3: last: the model's opinion on its own dimmed line, the duration of the model calls on the entry's line, the whole width", () => {
+    const run = world({
+      log: [
+        "2026-10-29T08:00:00.000Z INFO shell → ask (local, rule in-place-edit): in-place file edit: the original content is overwritten — nox-4b opinion: allow (risk 0.95/3, highest: data destruction 0.29) [model 540 ms]",
+        "2026-10-29T08:01:00.000Z INFO shell → ask (model): nox-4b: risk 1.80/3, highest: data destruction 0.81 [model 5100 ms, 2 attempts]",
+      ],
+    })
+    const out = run({ width: 160, color: false }, "last").out
+    const column = 4 + "08:00:00Z".length + 2
+    const row = out.findIndex((line) => line.includes("in-place-edit"))
+    assert.match(out[row]!, /^ {4}08:00:00Z {2}ask {3}in-place-edit {2}shell {2}model 540 ms$/)
+    assert.equal(out[row + 1], `${" ".repeat(column)}in-place file edit: the original content is overwritten`)
+    assert.equal(out[row + 2], `${" ".repeat(column)}nox-4b opinion: allow (risk 0.95/3, highest: data destruction 0.29)`)
+    const model = out.findIndex((line) => line.includes("(model)"))
+    assert.match(out[model]!, /shell {2}model 5100 ms, 2 attempts$/)
+    assert.equal(out[model + 1], `${" ".repeat(column)}nox-4b: risk 1.80/3, highest: data destruction 0.81`)
+    const colored = run({ width: 160, color: true }, "last").out
+    assert.ok(colored.includes(`${" ".repeat(column)}\x1b[2mnox-4b opinion: allow (risk 0.95/3, highest: data destruction 0.29)\x1b[22m`))
+    assert.deepEqual(plain(colored), out)
+  })
 })

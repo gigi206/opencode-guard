@@ -95,9 +95,15 @@ export function last(io: CliIo, count: number): void {
   for (const entry of shown) io.out(flat(entry))
 }
 
+/** The duration of the model calls that ends a decision line (`[model 540 ms]`, `, 2 attempts` after a retry). */
+const TIMING = / \[(model \d+ ms(?:, \d+ attempts)?)\]$/
+/** The model's opinion added to a local confirmation: `<reason> — <model> opinion: …`. */
+const OPINION = / — (\S+ opinion: .*)$/
+
 /**
- * `guard last` in a terminal: by day, each entry on a line (time, verdict, rule, tool), its reason wrapped below it.
- * The time is the log's (UTC), without its fraction of a second.
+ * `guard last` in a terminal: by day, each entry on a line (time, verdict, rule, tool, duration of the model calls), its
+ * reason wrapped below it, then the model's opinion, dimmed. The time is the log's (UTC), without its fraction of a
+ * second. The reason is split once redacted.
  */
 function prettyLast(pretty: Pretty, file: string, entries: readonly Decision[]): void {
   title(pretty, "Latest asks and denials", `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`, "log")
@@ -117,7 +123,11 @@ function prettyLast(pretty: Pretty, file: string, entries: readonly Decision[]):
       heading(pretty, day || "undated")
     }
     const cells: Segment[] = [["    "], [row.time.padEnd(time), "dim"], ["  "], [row.verdict.padEnd(4), row.verdict === "deny" ? "deny" : "ask"], ["  "], [row.rule.padEnd(rule), row.byRule ? "rule" : "dim"], ["  "]]
-    pretty.line([...cells, [row.subject, "dim"]])
-    for (const line of rowLines(pretty, [[" ".repeat(column)]], column, row.reason)) pretty.line(line)
+    const timing = TIMING.exec(row.reason)
+    const reason = timing ? row.reason.slice(0, timing.index) : row.reason
+    const opinion = OPINION.exec(reason)
+    pretty.line([...cells, [row.subject, "dim"], ...(timing ? ([[`  ${timing[1]}`, "dim"]] as Segment[]) : [])])
+    for (const line of rowLines(pretty, [[" ".repeat(column)]], column, opinion ? reason.slice(0, opinion.index) : reason)) pretty.line(line)
+    if (opinion) for (const line of rowLines(pretty, [[" ".repeat(column)]], column, opinion[1]!, "dim")) pretty.line(line)
   }
 }

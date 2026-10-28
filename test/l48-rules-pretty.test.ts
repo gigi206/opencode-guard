@@ -130,7 +130,7 @@ describe("guard rules in a terminal", () => {
     }
   })
 
-  it("PR-7: the launcher's decision: a terminal only on a TTY, colors unless NO_COLOR or TERM=dumb, width kept from 60 to 120", () => {
+  it("PR-7: the launcher's decision: a terminal only on a TTY, colors unless NO_COLOR or TERM=dumb, its whole width (at least 60)", () => {
     assert.equal(terminalOf({}, false, 100), undefined)
     assert.equal(terminalOf({}, undefined, 100), undefined)
     assert.deepEqual(terminalOf({}, true, 100), { width: 100, color: true })
@@ -139,7 +139,7 @@ describe("guard rules in a terminal", () => {
     assert.deepEqual(terminalOf({ TERM: "dumb" }, true, 100), { width: 100, color: false })
     assert.equal(terminalOf({}, true, undefined)!.width, 100)
     assert.equal(terminalOf({}, true, 20)!.width, 60)
-    assert.equal(terminalOf({}, true, 500)!.width, 120)
+    assert.equal(terminalOf({}, true, 500)!.width, 500)
     assert.equal(terminalOf({}, true, 0)!.width, 100)
   })
 })

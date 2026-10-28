@@ -36,17 +36,16 @@ const STYLES: Readonly<Record<Style, readonly [string, string]>> = {
 export const ESCAPES: readonly string[] = [...new Set(Object.values(STYLES).flat())]
 
 const MIN_WIDTH = 60
-const MAX_WIDTH = 120
 const DEFAULT_WIDTH = 100
 
 /**
- * The launcher's decision: a terminal only when the standard output is one, its width kept between 60 and 120 columns
- * (100 when unknown), colors unless `NO_COLOR` is set and not empty or `TERM` is `dumb`.
+ * The launcher's decision: a terminal only when the standard output is one, its whole width (at least 60 columns, 100
+ * when unknown), colors unless `NO_COLOR` is set and not empty or `TERM` is `dumb`.
  */
 export function terminalOf(env: Record<string, string | undefined>, isTTY: boolean | undefined, columns: number | undefined): Terminal | undefined {
   if (!isTTY) return undefined
   const width = columns !== undefined && Number.isFinite(columns) && columns > 0 ? columns : DEFAULT_WIDTH
-  return { width: Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.floor(width))), color: !env.NO_COLOR && env.TERM !== "dumb" }
+  return { width: Math.max(MIN_WIDTH, Math.floor(width)), color: !env.NO_COLOR && env.TERM !== "dumb" }
 }
 
 /** Lines of at most `width` characters, cut at spaces only: a longer word (a placeholder, a path) stays whole. */
