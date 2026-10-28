@@ -8,7 +8,7 @@ export interface Terminal {
   readonly color: boolean
 }
 
-export type Style = "builtins" | "builtinsLine" | "custom" | "customLine" | "settings" | "settingsLine" | "log" | "logLine" | "group" | "rule" | "deny" | "ask" | "model" | "good" | "dim" | "warn"
+export type Style = "builtins" | "builtinsLine" | "custom" | "customLine" | "settings" | "settingsLine" | "log" | "logLine" | "group" | "rule" | "deny" | "ask" | "model" | "good" | "bad" | "dim" | "warn"
 /** Text and its style; the text is already redacted and free of control characters. */
 export type Segment = readonly [text: string, style?: Style]
 
@@ -25,6 +25,7 @@ const STYLES: Readonly<Record<Style, readonly [string, string]>> = {
   logLine: ["\x1b[36m", "\x1b[39m"],
   good: ["\x1b[32m", "\x1b[39m"],
   model: ["\x1b[35m", "\x1b[39m"],
+  bad: ["\x1b[31m", "\x1b[39m"],
   group: ["\x1b[1;36m", "\x1b[22;39m"],
   rule: ["\x1b[1m", "\x1b[22m"],
   deny: ["\x1b[1;31m", "\x1b[22;39m"],

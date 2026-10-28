@@ -83,14 +83,20 @@ function prettyShow(
   for (const line of rowLines(pretty, [["    "]], 4, `trustedProjects: ${pretty.clean(data.listed)}`, "dim")) pretty.line(line)
   pretty.line([])
   heading(pretty, "Settings in force")
-  const rows = data.settings.map((row) => ({ key: pretty.clean(row.key), value: pretty.clean(String(row.value)), origin: pretty.clean(row.origin) }))
+  const rows = data.settings.map((row) => ({ key: pretty.clean(row.key), value: pretty.clean(String(row.value)), origin: pretty.clean(row.origin), relaxes: relaxes(row.key, String(row.value)) }))
   const [key, value] = [Math.max(0, ...rows.map((row) => row.key.length)), Math.max(0, ...rows.map((row) => row.value.length))]
+  // A column for the `relaxes` mark, only when a setting relaxes a protection.
+  const mark = rows.some((row) => row.relaxes) ? RELAXES.length + 2 : 0
   for (const row of rows) {
-    const cells: Segment[] = [["    "], [row.key.padEnd(key), "rule"], ["  "], [row.value.padEnd(value), valueStyle(row.key, row.value)], ["  "]]
-    for (const line of rowLines(pretty, cells, 4 + key + 2 + value + 2, row.origin, "dim")) pretty.line(line)
+    const cells: Segment[] = [["    "], [row.key.padEnd(key), "rule"], ["  "], [row.value.padEnd(value), valueStyle(row.value)], ["  "]]
+    if (mark) cells.push(row.relaxes ? [RELAXES, "warn"] : [" ".repeat(RELAXES.length)], ["  "])
+    for (const line of rowLines(pretty, cells, 4 + key + 2 + value + 2 + mark, row.origin, "dim")) pretty.line(line)
   }
-  if (pretty.color && rows.length)
-    pretty.line([["    "], ["green", "good"], [" keeps a protection, ", "dim"], ["yellow", "warn"], [" relaxes one; rule settings: ", "dim"], ["deny", "deny"], [", ", "dim"], ["ask", "ask"], [", ", "dim"], ["model", "model"], [", ", "dim"], ["off", "dim"]])
+  if (pretty.color && rows.length) {
+    const legend: Segment[] = [["    "]]
+    for (const [word, style] of VALUE_STYLES) legend.push([word, style], [" "])
+    pretty.line([...legend, ...(mark ? ([["· ", "dim"], [RELAXES, "warn"], [": the setting relaxes a protection", "dim"]] as Segment[]) : [])])
+  }
   if (data.warnings.length) {
     pretty.line([])
     heading(pretty, "Set aside", "", "warn")
@@ -98,17 +104,29 @@ function prettyShow(
   }
 }
 
+/** One color per value (a rule's setting in the colors of `guard rules`), in the legend's order. */
+const VALUE_STYLES: ReadonlyArray<readonly [string, Style]> = [
+  ["true", "good"],
+  ["false", "bad"],
+  ["deny", "deny"],
+  ["ask", "ask"],
+  ["model", "model"],
+  ["off", "dim"],
+]
+const valueStyle = (value: string): Style | undefined => VALUE_STYLES.find(([word]) => word === value)?.[1]
+
 /** Switches whose `true` keeps a protection on (`policy` switches of `config.ts`). */
 const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "decisionModel"])
+const RELAXES = "relaxes"
 
 /**
- * A setting's value by its effect: green keeps a protection (a protective switch on, the confirmations kept with you),
- * yellow relaxes one; a rule's setting in the colors of `guard rules` (deny red, ask yellow, model magenta, off dimmed).
+ * Does the setting relax a protection: a protective switch off, self-protection or local confirmations left to the
+ * decision model, a rule turned off or left to the model?
  */
-function valueStyle(key: string, value: string): Style | undefined {
-  if (key.startsWith("ruleOverrides.")) return value === "deny" ? "deny" : value === "ask" ? "ask" : value === "model" ? "model" : "dim"
-  if (PROTECTIVE.has(key)) return value === "true" ? "good" : value === "false" ? "warn" : undefined
-  if (key === "selfProtectionByModel") return value === "false" ? "good" : value === "true" ? "warn" : undefined
-  if (key === "localAsks") return value === "ask" ? "good" : value === "model" ? "warn" : undefined
-  return undefined
+function relaxes(key: string, value: string): boolean {
+  if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
+  if (PROTECTIVE.has(key)) return value === "false"
+  if (key === "selfProtectionByModel") return value === "true"
+  if (key === "localAsks") return value === "model"
+  return false
 }

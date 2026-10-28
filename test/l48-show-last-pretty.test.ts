@@ -62,19 +62,33 @@ describe("guard show and guard last in a terminal", () => {
   it("PS-2: show in color: the same text once the known codes and the legend are removed; values colored by their effect", () => {
     const run = world({ global: { localAsks: "model" }, guard: { ruleOverrides: { eval: "deny", rm: "model", kill: "off" }, sensitiveFiles: false, trustedProjects: ["*"] } })
     const colored = run({ width: 100, color: true }, "show").out
-    const legend = colored.findIndex((line) => plain([line])[0]!.startsWith("    green keeps a protection, yellow relaxes one"))
+    const legend = colored.findIndex((line) => plain([line])[0]!.startsWith("    true false deny ask model off · relaxes: the setting relaxes a protection"))
     assert.ok(legend > 0, "a legend with colors")
     assert.deepEqual(plain(colored.filter((_, index) => index !== legend)), run({ width: 100, color: false }, "show").out)
     assert.ok(colored[0]!.startsWith("\x1b[1;97;42m Settings "))
     assert.ok(colored.includes("    \x1b[32mtrusted\x1b[39m"))
     const value = (key: string) => colored.find((line) => plain([line])[0]!.startsWith(`    ${key} `))!
-    assert.match(value("dangerousCommands"), /\x1b\[32mtrue /, "a protective switch on: green")
-    assert.match(value("sensitiveFiles"), /\x1b\[33mfalse/, "a protective switch off: yellow")
-    assert.match(value("selfProtectionByModel"), /\x1b\[32mfalse/, "self-protection kept with you: green")
-    assert.match(value("localAsks"), /\x1b\[33mmodel/, "confirmations left to the model: yellow")
+    // One color per value; the mark says which settings relax a protection.
+    const relaxed = (key: string) => plain([value(key)])[0]!.includes(" relaxes ")
+    assert.match(value("dangerousCommands"), /\x1b\[32mtrue /)
+    assert.ok(!relaxed("dangerousCommands"))
+    assert.match(value("sensitiveFiles"), /\x1b\[31mfalse/)
+    assert.ok(relaxed("sensitiveFiles"))
+    assert.match(value("selfProtectionByModel"), /\x1b\[31mfalse/)
+    assert.ok(!relaxed("selfProtectionByModel"))
+    assert.match(value("localAsks"), /\x1b\[35mmodel/)
+    assert.ok(relaxed("localAsks"))
     assert.match(value("ruleOverrides.eval"), /\x1b\[1;31mdeny/)
+    assert.ok(!relaxed("ruleOverrides.eval"))
     assert.match(value("ruleOverrides.rm"), /\x1b\[35mmodel/)
+    assert.ok(relaxed("ruleOverrides.rm"))
     assert.match(value("ruleOverrides.kill"), /\x1b\[2moff/)
+    assert.ok(relaxed("ruleOverrides.kill"))
+    // Nothing relaxed: no mark column, the legend without it; true, false and ask in three colors.
+    const strict = world({})({ width: 100, color: true }, "show").out
+    assert.ok(!plain(strict).some((line) => line.includes(" relaxes")))
+    const colors = ["dangerousCommands", "selfProtectionByModel", "localAsks"].map((key) => /\x1b\[([0-9;]+)m(?:true|false|ask)/.exec(strict.find((line) => plain([line])[0]!.startsWith(`    ${key} `))!)![1])
+    assert.equal(new Set(colors).size, 3)
   })
 
   it("PS-3: show: a value shaped like a secret, written by mistake in a guard.json, is redacted, in color too", () => {
