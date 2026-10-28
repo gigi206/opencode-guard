@@ -48,7 +48,8 @@ describe("guard rules in a terminal", () => {
     const { code, out } = world()({ width: 80, color: false }, "rules", "--builtins")
     assert.equal(code, 0)
     assert.ok(out.every((line) => !line.includes("\x1b")))
-    assert.equal(out[0], `Built-in rules  ${RULE_FEATURES.size}`)
+    assert.equal(out[0], ` Built-in rules   ${RULE_FEATURES.size} rules`)
+    assert.equal(out[1], "─".repeat(80))
     const groups = out.flatMap((line, index) => (/^ {2}\S/.test(line) ? [index] : []))
     assert.deepEqual(groups.map((index) => out[index]!.trim().split("  ")[0]), ["always active", "sensitiveFiles", "dangerousCommands"])
     for (const index of groups) assert.equal(out[index - 1], "", "a blank line before each group")
@@ -68,6 +69,14 @@ describe("guard rules in a terminal", () => {
     assert.ok(colored.some((line) => line.includes("\x1b[")))
     assert.deepEqual(plain(colored), run({ width: 80, color: false }, "rules", "--builtins").out)
     assert.ok(colored.find((line) => line.includes("rm-critical"))!.includes("\x1b[1;31mdeny"))
+    // Each block its own banner and separator color, both sections printed with two blank lines between them.
+    const both = run({ width: 80, color: true }, "rules").out
+    const banners = both.filter((line) => line.includes(" Built-in rules ") || line.includes(" Your rules "))
+    assert.deepEqual(banners.map((line) => line.slice(0, line.indexOf(" "))), ["\x1b[1;97;44m", "\x1b[1;97;45m"])
+    assert.ok(both.includes(`\x1b[34m${"─".repeat(80)}\x1b[39m`))
+    assert.ok(both.includes(`\x1b[35m${"─".repeat(80)}\x1b[39m`))
+    const custom = plain(both).indexOf(" Your rules   rules option")
+    assert.deepEqual(plain(both).slice(custom - 2, custom), ["", ""])
     assert.ok(plain(colored).every((line) => !line.includes("\x1b")))
   })
 
@@ -81,7 +90,8 @@ describe("guard rules in a terminal", () => {
     })
     const { code, out } = run({ width: 60, color: false }, "rules", "--custom")
     assert.equal(code, 0)
-    assert.equal(out[0], "Your rules  2, rules option of the global configuration")
+    // The title's detail does not fit next to the banner: it goes below it, then the separator line.
+    assert.deepEqual(out.slice(0, 3), [" Your rules ", " 2 rules, from the rules option of the global configuration", "─".repeat(60)])
     const row = out.findIndex((line) => line.startsWith("    no-prod"))
     assert.match(out[row]!, /^ {4}no-prod {2}deny {2}shell {2}production /)
     const column = out[row]!.indexOf("production")
@@ -95,7 +105,7 @@ describe("guard rules in a terminal", () => {
     for (const line of out) assert.ok(line.length <= 60 || !line.trim().includes(" "), `too long: ${line}`)
     // Not declared: said in words.
     const none = world()({ width: 60, color: true }, "rules", "--custom").out
-    assert.equal(plain(none)[0], "Your rules")
+    assert.equal(plain(none)[0], " Your rules   rules option")
     assert.ok(plain(none).join(" ").includes("none read, the plugin is not declared"))
   })
 

@@ -85,7 +85,7 @@ function run(command: string, args: readonly string[], io: CliIo): void {
       // In a terminal: grouped and aligned sections, colored unless the launcher says otherwise.
       if (io.pretty) {
         if (builtins) prettyBuiltins(io.pretty)
-        if (builtins && custom) io.pretty.line([])
+        if (builtins && custom) for (let blank = 0; blank < 2; blank++) io.pretty.line([])
         if (custom) prettyCustom(io, io.pretty)
         return
       }

@@ -8,12 +8,22 @@ export interface Terminal {
   readonly color: boolean
 }
 
-export type Style = "title" | "group" | "rule" | "deny" | "ask" | "dim" | "warn"
+export type Style = "builtins" | "builtinsLine" | "custom" | "customLine" | "settings" | "settingsLine" | "log" | "logLine" | "group" | "rule" | "deny" | "ask" | "good" | "dim" | "warn"
 /** Text and its style; the text is already redacted and free of control characters. */
 export type Segment = readonly [text: string, style?: Style]
 
 const STYLES: Readonly<Record<Style, readonly [string, string]>> = {
-  title: ["\x1b[1m", "\x1b[22m"],
+  // A banner per block (bold white on a color: rules blue, yours magenta, settings green, log cyan) and its separator
+  // line in the same color.
+  builtins: ["\x1b[1;97;44m", "\x1b[22;39;49m"],
+  builtinsLine: ["\x1b[34m", "\x1b[39m"],
+  custom: ["\x1b[1;97;45m", "\x1b[22;39;49m"],
+  customLine: ["\x1b[35m", "\x1b[39m"],
+  settings: ["\x1b[1;97;42m", "\x1b[22;39;49m"],
+  settingsLine: ["\x1b[32m", "\x1b[39m"],
+  log: ["\x1b[1;97;46m", "\x1b[22;39;49m"],
+  logLine: ["\x1b[36m", "\x1b[39m"],
+  good: ["\x1b[32m", "\x1b[39m"],
   group: ["\x1b[1;36m", "\x1b[22;39m"],
   rule: ["\x1b[1m", "\x1b[22m"],
   deny: ["\x1b[1;31m", "\x1b[22;39m"],

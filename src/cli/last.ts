@@ -5,7 +5,9 @@ import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs"
 import { defaultLogFile, parseConfig } from "../config.ts"
 import { checkedLogFile } from "../index.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
-import { CliError, PLUGIN_DIR, readSources, realOrUndefined, type CliIo } from "./context.ts"
+import { CliError, PLUGIN_DIR, readSources, realOrUndefined, type CliIo, type Pretty } from "./context.ts"
+import { heading, rowLines, title } from "./pretty.ts"
+import type { Segment } from "./style.ts"
 
 export const DEFAULT_LAST = 20
 export const MAX_LAST = 200
@@ -44,15 +46,26 @@ function tail(path: string): string[] | undefined {
   }
 }
 
-const decisions = (lines: readonly string[]) =>
+interface Decision {
+  readonly time: string
+  readonly verdict: string
+  readonly rule: string
+  /** Where the verdict comes from (`local`, `model`, `cache`…): shown in a terminal when no rule gave it. */
+  readonly source: string
+  readonly subject: string
+  readonly reason: string
+}
+
+const decisions = (lines: readonly string[]): Decision[] =>
   lines.flatMap((line) => {
     const match = DECISION.exec(line)
     if (!match) return []
     const [, time, subject, verdict, source, reason] = match
-    const rule = /(?:^|, )rule ([^,]+)/.exec(source!)?.[1] ?? "-"
-    // Control characters are never printed to the terminal.
-    return [`${time}  ${verdict}  ${rule}  ${subject}: ${reason}`.replace(CONTROL_CHARACTERS, " ")]
+    return [{ time: time!, verdict: verdict!, rule: /(?:^|, )rule ([^,]+)/.exec(source!)?.[1] ?? "-", source: source!.split(",")[0]!.trim(), subject: subject!, reason: reason! }]
   })
+
+// Control characters are never printed to the terminal.
+const flat = (entry: Decision) => `${entry.time}  ${entry.verdict}  ${entry.rule}  ${entry.subject}: ${entry.reason}`.replace(CONTROL_CHARACTERS, " ")
 
 export function last(io: CliIo, count: number): void {
   const sources = readSources(io)
@@ -76,6 +89,35 @@ export function last(io: CliIo, count: number): void {
     io.out(`No ask or deny in ${file}`)
     return
   }
+  const shown = found.slice(-count)
+  if (io.pretty) return prettyLast(io.pretty, file, shown)
   io.out(`Latest asks and denials (${file}):`)
-  for (const line of found.slice(-count)) io.out(line)
+  for (const entry of shown) io.out(flat(entry))
+}
+
+/**
+ * `guard last` in a terminal: by day, each entry on a line (time, verdict, rule, tool), its reason wrapped below it.
+ * The time is the log's (UTC), without its fraction of a second.
+ */
+function prettyLast(pretty: Pretty, file: string, entries: readonly Decision[]): void {
+  title(pretty, "Latest asks and denials", `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`, "log")
+  for (const line of rowLines(pretty, [["  "]], 2, `from ${pretty.clean(file)}`, "dim")) pretty.line(line)
+  const rows = entries.map((entry) => {
+    const [, day = "", time = entry.time] = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(entry.time) ?? []
+    const rule = entry.rule === "-" ? `(${entry.source})` : entry.rule
+    return { day: pretty.clean(day), time: pretty.clean(time === entry.time ? entry.time : `${time}Z`), verdict: entry.verdict, rule: pretty.clean(rule), byRule: entry.rule !== "-", subject: pretty.clean(entry.subject), reason: pretty.clean(entry.reason) }
+  })
+  const [time, rule] = [Math.max(0, ...rows.map((row) => row.time.length)), Math.max(0, ...rows.map((row) => row.rule.length))]
+  const column = 4 + time + 2
+  let day: string | undefined
+  for (const row of rows) {
+    if (row.day !== day) {
+      day = row.day
+      pretty.line([])
+      heading(pretty, day || "undated")
+    }
+    const cells: Segment[] = [["    "], [row.time.padEnd(time), "dim"], ["  "], [row.verdict.padEnd(4), row.verdict === "deny" ? "deny" : "ask"], ["  "], [row.rule.padEnd(rule), row.byRule ? "rule" : "dim"], ["  "]]
+    pretty.line([...cells, [row.subject, "dim"]])
+    for (const line of rowLines(pretty, [[" ".repeat(column)]], column, row.reason)) pretty.line(line)
+  }
 }

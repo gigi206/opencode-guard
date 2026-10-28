@@ -4,7 +4,8 @@
 import { parseConfig } from "../config.ts"
 import { RULE_FEATURES } from "../rules/features.ts"
 import { readSources, type CliIo, type Pretty } from "./context.ts"
-import { wrap, type Segment } from "./style.ts"
+import { rowLines, title } from "./pretty.ts"
+import { type Segment } from "./style.ts"
 
 /** Rule → its own verdict and what it checks. */
 export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "ask"; readonly description: string }> = new Map(
@@ -152,21 +153,14 @@ const GROUPS: Readonly<Record<string, string>> = {
 }
 const verdictStyle = (verdict: string) => (verdict === "deny" ? "deny" : "ask")
 
-/**
- * Lines of a table row: the fixed cells, then `text` wrapped to the terminal's width from its column, continuation lines
- * aligned on it. Every cell is already cleaned: widths and cuts are those of the printed text.
- */
-function rowLines(pretty: Pretty, cells: readonly Segment[], column: number, text: string, style?: Segment[1]): Segment[][] {
-  const [first = "", ...rest] = wrap(text, Math.max(20, pretty.width - column))
-  return [[...cells, [first, style]], ...rest.map((line): Segment[] => [[" ".repeat(column)], [line, style]])]
-}
+const count = (n: number) => `${n} ${n === 1 ? "rule" : "rules"}`
 
 /** The built-in rules for a terminal: by group (the option that turns it off), aligned, descriptions wrapped. */
 export function prettyBuiltins(pretty: Pretty): void {
   const rules = [...RULE_FEATURES].map(([rule, group]) => ({ rule: pretty.clean(rule), group, verdict: RULE_SUMMARIES.get(rule)?.verdict ?? "-", description: pretty.clean(RULE_SUMMARIES.get(rule)?.description ?? "") }))
   const id = Math.max(...rules.map((row) => row.rule.length))
   const column = 4 + id + 2 + 4 + 2
-  pretty.line([["Built-in rules", "title"], [`  ${rules.length}`, "dim"]])
+  title(pretty, "Built-in rules", count(rules.length), "builtins")
   for (const group of new Set(rules.map((row) => row.group))) {
     pretty.line([])
     const members = rules.filter((row) => row.group === group)
@@ -180,7 +174,7 @@ export function prettyBuiltins(pretty: Pretty): void {
 export function prettyCustom(io: CliIo, pretty: Pretty): void {
   const rules = customRules(io)
   if ("unread" in rules) {
-    pretty.line([["Your rules", "title"]])
+    title(pretty, "Your rules", "rules option", "custom")
     pretty.line([])
     for (const line of rowLines(pretty, [["  "]], 2, pretty.clean(rules.unread), "warn")) pretty.line(line)
     return
@@ -188,7 +182,7 @@ export function prettyCustom(io: CliIo, pretty: Pretty): void {
   const rows = rules.rows.map((row) => ({ id: pretty.clean(row.id), verdict: row.verdict, tools: pretty.clean(row.tools), reason: pretty.clean(row.reason), pattern: pretty.clean(row.pattern), builtin: row.builtin }))
   const [id, tools] = [Math.max(0, ...rows.map((row) => row.id.length)), Math.max(0, ...rows.map((row) => row.tools.length))]
   const column = 4 + id + 2 + 4 + 2 + tools + 2
-  pretty.line([["Your rules", "title"], [`  ${rows.length}, rules option of the ${pretty.clean(rules.origin)}`, "dim"]])
+  title(pretty, "Your rules", `${count(rows.length)}, from the rules option of the ${pretty.clean(rules.origin)}`, "custom")
   pretty.line([])
   if (!rows.length) pretty.line([["    "], ["none", "dim"]])
   for (const row of rows) {
