@@ -3,7 +3,8 @@
 // user's own rules (`rules` option), read and set aside exactly as the plugin does.
 import { parseConfig } from "../config.ts"
 import { RULE_FEATURES } from "../rules/features.ts"
-import { readSources, type CliIo } from "./context.ts"
+import { readSources, type CliIo, type Pretty } from "./context.ts"
+import { wrap, type Segment } from "./style.ts"
 
 /** Rule → its own verdict and what it checks. */
 export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "ask"; readonly description: string }> = new Map(
@@ -85,39 +86,122 @@ export function ruleLines(): string[] {
 
 /** The plugin's warnings about its `rules` option: each one starts with the option's name. */
 const RULES_WARNING = /^(?:invalid )?rules\b/
+const NOT_SHOWN =
+  "Not shown: a project's opencode.json can replace this whole list, and its rules then apply in that project; guard last names the rule behind each ask or denial."
+
+/** The user's own rules as the plugin reads them, or why none could be read. */
+type CustomRules =
+  | {
+      readonly origin: string
+      readonly rows: ReadonlyArray<{ readonly id: string; readonly verdict: string; readonly tools: string; readonly reason: string; readonly pattern: string; readonly builtin: boolean }>
+      readonly setAside: readonly string[]
+    }
+  | { readonly unread: string }
 
 /**
- * The user's own rules, as the plugin reads them from the options it gets without a project's opencode.json (the system
- * entry, loaded last, else the global one): identifier, verdict, tools, reason and pattern, then the rules set aside with
- * the plugin's warning. A section of its own, with a header; a configuration that cannot be read is said in words.
+ * From the options the plugin gets without a project's opencode.json (the system entry, loaded last, else the global
+ * one), read by the plugin's own `parseConfig`: the rules it applies and the warnings of those it sets aside.
  */
-export function customRuleLines(io: CliIo): string[] {
+function customRules(io: CliIo): CustomRules {
   try {
     const sources = readSources(io)
     const from = (label: string) => sources.declarations.find((entry) => entry.label === label)
     const origin = from("system")?.options ? "system configuration, which replaces the global entry" : from("global")?.options ? "global configuration" : undefined
     if (!origin) {
       const reasons = sources.declarations.map((entry) => `${entry.label} configuration: ${entry.reason ?? "not read"}`)
-      return [`Your rules: none read, the plugin is not declared (${reasons.join("; ")})`]
+      return { unread: `none read, the plugin is not declared (${reasons.join("; ")})` }
     }
     const { config, warnings } = parseConfig(sources.options, io.env)
-    const rows = config.rules.map((rule) => [
-      rule.id,
-      rule.verdict,
-      rule.tools.join(","),
-      rule.reason,
-      `/${rule.pattern.source}/${rule.pattern.flags}${RULE_FEATURES.has(rule.id) ? "  (same identifier as a built-in rule)" : ""}`,
-    ])
-    const width = (column: number) => Math.max(0, ...rows.map((row) => row[column]!.length))
-    const [id, verdict, tools, reason] = [width(0), width(1), width(2), width(3)]
-    const setAside = warnings.filter((warning) => RULES_WARNING.test(warning))
-    return [
-      `Your rules (rules option of the ${origin}):`,
-      ...(rows.length ? rows.map((row) => `  ${row[0]!.padEnd(id)}  ${row[1]!.padEnd(verdict)}  ${row[2]!.padEnd(tools)}  ${row[3]!.padEnd(reason)}  ${row[4]}`) : ["  none"]),
-      ...(setAside.length ? ["  Set aside:", ...setAside.map((warning) => `    ${warning}`)] : []),
-      "  Not shown: a project's opencode.json can replace this whole list, and its rules then apply in that project; guard last names the rule behind each ask or denial.",
-    ]
+    return {
+      origin,
+      rows: config.rules.map((rule) => ({
+        id: rule.id,
+        verdict: rule.verdict,
+        tools: rule.tools.join(","),
+        reason: rule.reason,
+        pattern: `/${rule.pattern.source}/${rule.pattern.flags}`,
+        builtin: RULE_FEATURES.has(rule.id),
+      })),
+      setAside: warnings.filter((warning) => RULES_WARNING.test(warning)),
+    }
   } catch (error) {
-    return [`Your rules: the configuration could not be read (${error instanceof Error ? error.message : String(error)})`]
+    return { unread: `the configuration could not be read (${error instanceof Error ? error.message : String(error)})` }
   }
+}
+
+/** The user's own rules, one line each (output that is not a terminal): a section of its own, with a header. */
+export function customRuleLines(io: CliIo): string[] {
+  const rules = customRules(io)
+  if ("unread" in rules) return [`Your rules: ${rules.unread}`]
+  const rows = rules.rows.map((row) => [row.id, row.verdict, row.tools, row.reason, `${row.pattern}${row.builtin ? "  (same identifier as a built-in rule)" : ""}`])
+  const width = (column: number) => Math.max(0, ...rows.map((row) => row[column]!.length))
+  const [id, verdict, tools, reason] = [width(0), width(1), width(2), width(3)]
+  return [
+    `Your rules (rules option of the ${rules.origin}):`,
+    ...(rows.length ? rows.map((row) => `  ${row[0]!.padEnd(id)}  ${row[1]!.padEnd(verdict)}  ${row[2]!.padEnd(tools)}  ${row[3]!.padEnd(reason)}  ${row[4]}`) : ["  none"]),
+    ...(rules.setAside.length ? ["  Set aside:", ...rules.setAside.map((warning) => `    ${warning}`)] : []),
+    `  ${NOT_SHOWN}`,
+  ]
+}
+
+/** What `false` turns off, after the group's name (the option to set). */
+const GROUPS: Readonly<Record<string, string>> = {
+  always: "cannot be turned off",
+  sensitiveFiles: "credential files and secrets leaving the machine",
+  dangerousCommands: "dangerous actions",
+}
+const verdictStyle = (verdict: string) => (verdict === "deny" ? "deny" : "ask")
+
+/**
+ * Lines of a table row: the fixed cells, then `text` wrapped to the terminal's width from its column, continuation lines
+ * aligned on it. Every cell is already cleaned: widths and cuts are those of the printed text.
+ */
+function rowLines(pretty: Pretty, cells: readonly Segment[], column: number, text: string, style?: Segment[1]): Segment[][] {
+  const [first = "", ...rest] = wrap(text, Math.max(20, pretty.width - column))
+  return [[...cells, [first, style]], ...rest.map((line): Segment[] => [[" ".repeat(column)], [line, style]])]
+}
+
+/** The built-in rules for a terminal: by group (the option that turns it off), aligned, descriptions wrapped. */
+export function prettyBuiltins(pretty: Pretty): void {
+  const rules = [...RULE_FEATURES].map(([rule, group]) => ({ rule: pretty.clean(rule), group, verdict: RULE_SUMMARIES.get(rule)?.verdict ?? "-", description: pretty.clean(RULE_SUMMARIES.get(rule)?.description ?? "") }))
+  const id = Math.max(...rules.map((row) => row.rule.length))
+  const column = 4 + id + 2 + 4 + 2
+  pretty.line([["Built-in rules", "title"], [`  ${rules.length}`, "dim"]])
+  for (const group of new Set(rules.map((row) => row.group))) {
+    pretty.line([])
+    const members = rules.filter((row) => row.group === group)
+    pretty.line([["  "], [group === "always" ? "always active" : group, "group"], [`  ${GROUPS[group] ?? ""} (${members.length})`, "dim"]])
+    for (const row of members)
+      for (const line of rowLines(pretty, [["    "], [row.rule.padEnd(id), "rule"], ["  "], [row.verdict.padEnd(4), verdictStyle(row.verdict)], ["  "]], column, row.description)) pretty.line(line)
+  }
+}
+
+/** The user's own rules for a terminal: aligned, reasons wrapped, each pattern alone on the next line, unchanged. */
+export function prettyCustom(io: CliIo, pretty: Pretty): void {
+  const rules = customRules(io)
+  if ("unread" in rules) {
+    pretty.line([["Your rules", "title"]])
+    pretty.line([])
+    for (const line of rowLines(pretty, [["  "]], 2, pretty.clean(rules.unread), "warn")) pretty.line(line)
+    return
+  }
+  const rows = rules.rows.map((row) => ({ id: pretty.clean(row.id), verdict: row.verdict, tools: pretty.clean(row.tools), reason: pretty.clean(row.reason), pattern: pretty.clean(row.pattern), builtin: row.builtin }))
+  const [id, tools] = [Math.max(0, ...rows.map((row) => row.id.length)), Math.max(0, ...rows.map((row) => row.tools.length))]
+  const column = 4 + id + 2 + 4 + 2 + tools + 2
+  pretty.line([["Your rules", "title"], [`  ${rows.length}, rules option of the ${pretty.clean(rules.origin)}`, "dim"]])
+  pretty.line([])
+  if (!rows.length) pretty.line([["    "], ["none", "dim"]])
+  for (const row of rows) {
+    const cells: Segment[] = [["    "], [row.id.padEnd(id), "rule"], ["  "], [row.verdict.padEnd(4), verdictStyle(row.verdict)], ["  "], [row.tools.padEnd(tools)], ["  "]]
+    for (const line of rowLines(pretty, cells, column, row.reason)) pretty.line(line)
+    pretty.line([[" ".repeat(column)], [row.pattern, "dim"]])
+    if (row.builtin) pretty.line([[" ".repeat(column)], ["same identifier as a built-in rule", "warn"]])
+  }
+  if (rules.setAside.length) {
+    pretty.line([])
+    pretty.line([["  "], ["Set aside", "warn"]])
+    for (const warning of rules.setAside) for (const line of rowLines(pretty, [["    "]], 4, pretty.clean(warning), "warn")) pretty.line(line)
+  }
+  pretty.line([])
+  for (const line of rowLines(pretty, [["  "]], 2, NOT_SHOWN, "dim")) pretty.line(line)
 }

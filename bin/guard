@@ -2,7 +2,10 @@
 // Command line of the guard plugin (docs/configuration.md, "The guard command"). Node strips the types of the
 // TypeScript sources it imports: no build step, no dependency.
 import { main } from "../src/cli/main.ts"
+import { terminalOf } from "../src/cli/style.ts"
 import { systemConfigDirectory } from "../src/index.ts"
+
+const terminal = terminalOf(process.env, process.stdout.isTTY, process.stdout.columns)
 
 process.exitCode = main(process.argv.slice(2), {
   env: process.env,
@@ -10,4 +13,5 @@ process.exitCode = main(process.argv.slice(2), {
   systemDir: systemConfigDirectory(),
   out: (line) => process.stdout.write(`${line}\n`),
   err: (line) => process.stderr.write(`${line}\n`),
+  ...(terminal ? { terminal } : {}),
 })

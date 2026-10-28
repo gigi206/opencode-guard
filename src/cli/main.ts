@@ -3,10 +3,11 @@
 // self-protection ask of the plugin (`guard-cli`), the only thing that stops the agent.
 import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
-import { CliError, outputRedactor, type CliIo } from "./context.ts"
+import { CliError, outputRedactor, type CliIo, type Pretty } from "./context.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
-import { customRuleLines, ruleLines } from "./rules.ts"
+import { customRuleLines, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
+import { paint } from "./style.ts"
 import { directoryOf, resetRule, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
 
 export const USAGE = `Usage: guard <command> [arguments]
@@ -80,10 +81,18 @@ function run(command: string, args: readonly string[], io: CliIo): void {
     case "rules": {
       const parsed = parse(args, ["builtins", "custom"])
       expect(parsed, 0, 0, "")
+      const [builtins, custom] = parsed.builtins === parsed.custom ? [true, true] : [Boolean(parsed.builtins), Boolean(parsed.custom)]
+      // In a terminal: grouped and aligned sections, colored unless the launcher says otherwise.
+      if (io.pretty) {
+        if (builtins) prettyBuiltins(io.pretty)
+        if (builtins && custom) io.pretty.line([])
+        if (custom) prettyCustom(io, io.pretty)
+        return
+      }
       // `--builtins` alone: the registry only, as before (no header, no configuration needed); neither or both: the two
       // sections.
-      if (parsed.builtins && !parsed.custom) for (const line of ruleLines()) io.out(line)
-      else if (parsed.custom && !parsed.builtins) for (const line of customRuleLines(io)) io.out(line)
+      if (!custom) for (const line of ruleLines()) io.out(line)
+      else if (!builtins) for (const line of customRuleLines(io)) io.out(line)
       else {
         io.out("Built-in rules:")
         for (const line of ruleLines()) io.out(`  ${line}`)
@@ -122,16 +131,36 @@ function run(command: string, args: readonly string[], io: CliIo): void {
  */
 function redacted(io: CliIo): CliIo {
   let redactor: Redactor | undefined
+  const clean = (text: string) => {
+    redactor ??= outputRedactor(io)
+    return redactor.redactString(text).value.replace(CONTROL_CHARACTERS, " ")
+  }
   const redact = (line: string) => {
     try {
-      redactor ??= outputRedactor(io)
-      return redactor.redactString(line).value.replace(CONTROL_CHARACTERS, " ")
+      return clean(line)
     } catch {
-      return "(line withheld: redaction failed)"
+      return WITHHELD
     }
   }
-  return { ...io, out: (line) => io.out(redact(line)), err: (line) => io.err(redact(line)) }
+  const terminal = io.terminal
+  // Colors come last, from `style.ts` only: a line is painted only if its text is already what the redaction prints.
+  const pretty: Pretty | undefined = terminal && {
+    width: terminal.width,
+    clean: redact,
+    line: (segments) => {
+      try {
+        const plain = segments.map(([text]) => text).join("")
+        const unchanged = clean(plain) === plain && segments.every(([text]) => clean(text) === text)
+        io.out(unchanged ? paint(segments, terminal.color) : clean(plain))
+      } catch {
+        io.out(WITHHELD)
+      }
+    },
+  }
+  return { ...io, out: (line) => io.out(redact(line)), err: (line) => io.err(redact(line)), ...(pretty ? { pretty } : {}) }
 }
+
+const WITHHELD = "(line withheld: redaction failed)"
 
 /** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error. */
 export function main(argv: readonly string[], terminal: CliIo): number {

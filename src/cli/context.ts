@@ -9,6 +9,7 @@ import { parseConfig, resolveVersion, type GuardFile, type PluginDeclaration, ty
 import { knownSecrets } from "../index.ts"
 import { declaredPluginOptions, globalConfigDirectory } from "../output-check.ts"
 import { createRedactor, type Redactor } from "../secrets/redact.ts"
+import type { Segment, Terminal } from "./style.ts"
 
 export interface CliIo {
   /** Environment of the terminal, given explicitly (never `process.env` by default). */
@@ -18,6 +19,18 @@ export interface CliIo {
   readonly systemDir: string
   readonly out: (line: string) => void
   readonly err: (line: string) => void
+  /** The terminal, when the standard output is one (`terminalOf`, decided by the launcher): grouped, colored layout. */
+  readonly terminal?: Terminal
+  /** Set by `main` around the redaction, for a terminal only. */
+  readonly pretty?: Pretty
+}
+
+/** Layout for a terminal: each field cleaned (redacted, control characters removed) before it is wrapped, then painted. */
+export interface Pretty {
+  readonly width: number
+  readonly clean: (text: string) => string
+  /** One line: painted only if the redaction leaves each segment and the whole line unchanged, otherwise printed plain. */
+  readonly line: (segments: readonly Segment[]) => void
 }
 
 /** The plugin's directory (this file is in `src/cli/`). */
