@@ -28,6 +28,8 @@ export interface CliIo {
 /** Layout for a terminal: each field cleaned (redacted, control characters removed) before it is wrapped, then painted. */
 export interface Pretty {
   readonly width: number
+  /** Colors wanted: a legend is printed only then. */
+  readonly color: boolean
   readonly clean: (text: string) => string
   /** One line: painted only if the redaction leaves each segment and the whole line unchanged, otherwise printed plain. */
   readonly line: (segments: readonly Segment[]) => void

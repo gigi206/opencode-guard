@@ -146,6 +146,7 @@ function redacted(io: CliIo): CliIo {
   // Colors come last, from `style.ts` only: a line is painted only if its text is already what the redaction prints.
   const pretty: Pretty | undefined = terminal && {
     width: terminal.width,
+    color: terminal.color,
     clean: redact,
     line: (segments) => {
       try {

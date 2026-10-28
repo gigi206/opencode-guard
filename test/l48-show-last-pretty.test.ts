@@ -59,13 +59,22 @@ describe("guard show and guard last in a terminal", () => {
     assert.ok(fits(out, 80))
   })
 
-  it("PS-2: show in color: the same text once the known codes are removed; trusted in green, refusals in red", () => {
-    const run = world({ guard: { ruleOverrides: { eval: "deny" }, trustedProjects: ["*"] } })
-    const colored = run({ width: 80, color: true }, "show").out
-    assert.deepEqual(plain(colored), run({ width: 80, color: false }, "show").out)
+  it("PS-2: show in color: the same text once the known codes and the legend are removed; values colored by their effect", () => {
+    const run = world({ global: { localAsks: "model" }, guard: { ruleOverrides: { eval: "deny", rm: "model", kill: "off" }, sensitiveFiles: false, trustedProjects: ["*"] } })
+    const colored = run({ width: 100, color: true }, "show").out
+    const legend = colored.findIndex((line) => plain([line])[0]!.startsWith("    green keeps a protection, yellow relaxes one"))
+    assert.ok(legend > 0, "a legend with colors")
+    assert.deepEqual(plain(colored.filter((_, index) => index !== legend)), run({ width: 100, color: false }, "show").out)
     assert.ok(colored[0]!.startsWith("\x1b[1;97;42m Settings "))
     assert.ok(colored.includes("    \x1b[32mtrusted\x1b[39m"))
-    assert.ok(colored.some((line) => line.includes("\x1b[1;31mdeny")))
+    const value = (key: string) => colored.find((line) => plain([line])[0]!.startsWith(`    ${key} `))!
+    assert.match(value("dangerousCommands"), /\x1b\[32mtrue /, "a protective switch on: green")
+    assert.match(value("sensitiveFiles"), /\x1b\[33mfalse/, "a protective switch off: yellow")
+    assert.match(value("selfProtectionByModel"), /\x1b\[32mfalse/, "self-protection kept with you: green")
+    assert.match(value("localAsks"), /\x1b\[33mmodel/, "confirmations left to the model: yellow")
+    assert.match(value("ruleOverrides.eval"), /\x1b\[1;31mdeny/)
+    assert.match(value("ruleOverrides.rm"), /\x1b\[35mmodel/)
+    assert.match(value("ruleOverrides.kill"), /\x1b\[2moff/)
   })
 
   it("PS-3: show: a value shaped like a secret, written by mistake in a guard.json, is redacted, in color too", () => {

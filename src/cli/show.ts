@@ -86,9 +86,11 @@ function prettyShow(
   const rows = data.settings.map((row) => ({ key: pretty.clean(row.key), value: pretty.clean(String(row.value)), origin: pretty.clean(row.origin) }))
   const [key, value] = [Math.max(0, ...rows.map((row) => row.key.length)), Math.max(0, ...rows.map((row) => row.value.length))]
   for (const row of rows) {
-    const cells: Segment[] = [["    "], [row.key.padEnd(key), "rule"], ["  "], [row.value.padEnd(value), valueStyle(row.value)], ["  "]]
+    const cells: Segment[] = [["    "], [row.key.padEnd(key), "rule"], ["  "], [row.value.padEnd(value), valueStyle(row.key, row.value)], ["  "]]
     for (const line of rowLines(pretty, cells, 4 + key + 2 + value + 2, row.origin, "dim")) pretty.line(line)
   }
+  if (pretty.color && rows.length)
+    pretty.line([["    "], ["green", "good"], [" keeps a protection, ", "dim"], ["yellow", "warn"], [" relaxes one; rule settings: ", "dim"], ["deny", "deny"], [", ", "dim"], ["ask", "ask"], [", ", "dim"], ["model", "model"], [", ", "dim"], ["off", "dim"]])
   if (data.warnings.length) {
     pretty.line([])
     heading(pretty, "Set aside", "", "warn")
@@ -96,10 +98,17 @@ function prettyShow(
   }
 }
 
-/** A setting's value: refusals red, confirmations yellow, rules turned off or switches off dim. */
-function valueStyle(value: string): Style | undefined {
-  if (value === "deny") return "deny"
-  if (value === "ask") return "ask"
-  if (value === "off" || value === "false") return "dim"
+/** Switches whose `true` keeps a protection on (`policy` switches of `config.ts`). */
+const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "decisionModel"])
+
+/**
+ * A setting's value by its effect: green keeps a protection (a protective switch on, the confirmations kept with you),
+ * yellow relaxes one; a rule's setting in the colors of `guard rules` (deny red, ask yellow, model magenta, off dimmed).
+ */
+function valueStyle(key: string, value: string): Style | undefined {
+  if (key.startsWith("ruleOverrides.")) return value === "deny" ? "deny" : value === "ask" ? "ask" : value === "model" ? "model" : "dim"
+  if (PROTECTIVE.has(key)) return value === "true" ? "good" : value === "false" ? "warn" : undefined
+  if (key === "selfProtectionByModel") return value === "false" ? "good" : value === "true" ? "warn" : undefined
+  if (key === "localAsks") return value === "ask" ? "good" : value === "model" ? "warn" : undefined
   return undefined
 }
