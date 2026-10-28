@@ -114,7 +114,7 @@ All options live under `options` in the plugin entry.
 
 Full reference, defaults, environment substitutions and edge cases: [Configuration](docs/configuration.md). Model choices, thresholds and local serving: [Decision model](docs/decision-model.md).
 
-The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the rules, shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard allow <rule>`, `--agent`, `--project`, `guard trust`), applied without a restart.
+The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the built-in rules and your own, shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard allow <rule>`, `--agent`, `--project`, `guard trust`), applied without a restart.
 
 ## Logs
 

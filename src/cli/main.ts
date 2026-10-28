@@ -5,13 +5,13 @@ import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
 import { CliError, outputRedactor, type CliIo } from "./context.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
-import { ruleLines } from "./rules.ts"
+import { customRuleLines, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
 import { directoryOf, resetRule, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
 
 export const USAGE = `Usage: guard <command> [arguments]
 
-  rules                            built-in rules: identifier, group, own verdict, what they check
+  rules [--builtins|--custom]      built-in rules (identifier, group, own verdict, what they check), then yours
   show [--agent <name>]            policy settings in force for the current directory, and where they come from
   last [<count>]                   latest asks and denials of the plugin's log (default ${DEFAULT_LAST}, at most ${MAX_LAST})
   allow|off|ask|deny|model <rule>  set a built-in rule in the global guard.json ("allow" turns it off, like "off")
@@ -32,10 +32,12 @@ interface Parsed {
   agent?: string
   project?: string | true
   all?: boolean
+  builtins?: boolean
+  custom?: boolean
 }
 
 /** Options allowed by a command; `--project` takes the next argument as its directory unless it is an option. */
-function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "all">): Parsed {
+function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "all" | "builtins" | "custom">): Parsed {
   const parsed: Parsed = { positionals: [] }
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!
@@ -49,6 +51,8 @@ function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "projec
       parsed.project = inline ?? (next !== undefined && !next.startsWith("-") ? args[++index]! : true)
       if (parsed.project === "") throw new UsageError("--project needs a directory, or nothing")
     } else if (arg === "--all" && allowed.includes("all")) parsed.all = true
+    else if (arg === "--builtins" && allowed.includes("builtins")) parsed.builtins = true
+    else if (arg === "--custom" && allowed.includes("custom")) parsed.custom = true
     else if (arg.startsWith("-") && arg !== "-") throw new UsageError(`unknown option ${arg}`)
     else parsed.positionals.push(arg)
   }
@@ -73,10 +77,20 @@ function run(command: string, args: readonly string[], io: CliIo): void {
     return
   }
   switch (command) {
-    case "rules":
-      expect(parse(args, []), 0, 0, "")
-      for (const line of ruleLines()) io.out(line)
+    case "rules": {
+      const parsed = parse(args, ["builtins", "custom"])
+      expect(parsed, 0, 0, "")
+      // `--builtins` alone: the registry only, as before (no header, no configuration needed); neither or both: the two
+      // sections.
+      if (parsed.builtins && !parsed.custom) for (const line of ruleLines()) io.out(line)
+      else if (parsed.custom && !parsed.builtins) for (const line of customRuleLines(io)) io.out(line)
+      else {
+        io.out("Built-in rules:")
+        for (const line of ruleLines()) io.out(`  ${line}`)
+        for (const line of customRuleLines(io)) io.out(line)
+      }
       return
+    }
     case "show": {
       const parsed = parse(args, ["agent"])
       expect(parsed, 0, 0, "")

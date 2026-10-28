@@ -131,7 +131,7 @@ describe("lot 48 step D: the command line", () => {
     const help = run("help")
     assert.equal(help.status, 0, help.stderr)
     assert.match(help.stdout, /^Usage: guard <command>/)
-    const rules = run("rules")
+    const rules = run("rules", "--builtins")
     assert.equal(rules.status, 0, rules.stderr)
     assert.equal(rules.stderr, "")
     assert.equal(rules.stdout.trim().split("\n").length, RULE_FEATURES.size)
@@ -146,7 +146,7 @@ describe("lot 48 step D: the command line", () => {
 
   it("BIN-2: rules lists the registry in order with group, own verdict and description, as docs/rules.md does", async () => {
     const w = await world()
-    const r = w.run(["rules"])
+    const r = w.run(["rules", "--builtins"])
     assert.equal(r.code, 0)
     const lines = r.out.split("\n")
     assert.deepEqual(lines.map((line) => line.split(/\s+/)[0]), [...RULE_FEATURES.keys()])

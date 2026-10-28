@@ -211,7 +211,7 @@ The **policy settings** (`profile`, `ruleOverrides`, `localAsks`, `selfProtectio
 
 | Command | What it does |
 |---|---|
-| `guard rules` | lists the built-in rules in the plugin's order: identifier, group, own verdict, what they check |
+| `guard rules [--builtins\|--custom]` | lists the built-in rules in the plugin's order (identifier, group, own verdict, what they check), then your own `rules` as the plugin reads them (identifier, verdict, tools, reason, pattern) from the system configuration when it declares the plugin, otherwise from the global one, with the rules it sets aside and why; a project's `opencode.json` can replace that list, which the command does not see. `--builtins` or `--custom` keeps one of the two |
 | `guard allow <rule>`, `guard off <rule>`, `guard ask <rule>`, `guard deny <rule>`, `guard model <rule>` | sets the rule in `ruleOverrides` of the global `guard.json` (`allow` is written as is and read as `"off"`) |
 | `guard reset <rule>` | removes that setting (an object left empty is removed), and says if another source still sets the rule there |
 | `guard trust [<dir>\|--all]`, `guard untrust [<dir>\|--all]` | adds or removes the directory's real path in `trustedProjects` of the global `guard.json` (`--all`: `"*"`) |

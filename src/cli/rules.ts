@@ -1,6 +1,9 @@
 // `guard rules`: the built-in rules in the registry order (`rules/features.ts`), with their group, their own verdict
-// (before any setting) and what they check: the same text as the table of docs/rules.md (a test compares them).
+// (before any setting) and what they check: the same text as the table of docs/rules.md (a test compares them); then the
+// user's own rules (`rules` option), read and set aside exactly as the plugin does.
+import { parseConfig } from "../config.ts"
 import { RULE_FEATURES } from "../rules/features.ts"
+import { readSources, type CliIo } from "./context.ts"
 
 /** Rule → its own verdict and what it checks. */
 export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "ask"; readonly description: string }> = new Map(
@@ -78,4 +81,43 @@ export function ruleLines(): string[] {
   const width = (column: number) => Math.max(...rows.map((row) => row[column]!.length))
   const [rule, group, verdict] = [width(0), width(1), width(2)]
   return rows.map((row) => `${row[0]!.padEnd(rule)}  ${row[1]!.padEnd(group)}  ${row[2]!.padEnd(verdict)}  ${row[3]}`)
+}
+
+/** The plugin's warnings about its `rules` option: each one starts with the option's name. */
+const RULES_WARNING = /^(?:invalid )?rules\b/
+
+/**
+ * The user's own rules, as the plugin reads them from the options it gets without a project's opencode.json (the system
+ * entry, loaded last, else the global one): identifier, verdict, tools, reason and pattern, then the rules set aside with
+ * the plugin's warning. A section of its own, with a header; a configuration that cannot be read is said in words.
+ */
+export function customRuleLines(io: CliIo): string[] {
+  try {
+    const sources = readSources(io)
+    const from = (label: string) => sources.declarations.find((entry) => entry.label === label)
+    const origin = from("system")?.options ? "system configuration, which replaces the global entry" : from("global")?.options ? "global configuration" : undefined
+    if (!origin) {
+      const reasons = sources.declarations.map((entry) => `${entry.label} configuration: ${entry.reason ?? "not read"}`)
+      return [`Your rules: none read, the plugin is not declared (${reasons.join("; ")})`]
+    }
+    const { config, warnings } = parseConfig(sources.options, io.env)
+    const rows = config.rules.map((rule) => [
+      rule.id,
+      rule.verdict,
+      rule.tools.join(","),
+      rule.reason,
+      `/${rule.pattern.source}/${rule.pattern.flags}${RULE_FEATURES.has(rule.id) ? "  (same identifier as a built-in rule)" : ""}`,
+    ])
+    const width = (column: number) => Math.max(0, ...rows.map((row) => row[column]!.length))
+    const [id, verdict, tools, reason] = [width(0), width(1), width(2), width(3)]
+    const setAside = warnings.filter((warning) => RULES_WARNING.test(warning))
+    return [
+      `Your rules (rules option of the ${origin}):`,
+      ...(rows.length ? rows.map((row) => `  ${row[0]!.padEnd(id)}  ${row[1]!.padEnd(verdict)}  ${row[2]!.padEnd(tools)}  ${row[3]!.padEnd(reason)}  ${row[4]}`) : ["  none"]),
+      ...(setAside.length ? ["  Set aside:", ...setAside.map((warning) => `    ${warning}`)] : []),
+      "  Not shown: a project's opencode.json can replace this whole list, and its rules then apply in that project; guard last names the rule behind each ask or denial.",
+    ]
+  } catch (error) {
+    return [`Your rules: the configuration could not be read (${error instanceof Error ? error.message : String(error)})`]
+  }
 }
