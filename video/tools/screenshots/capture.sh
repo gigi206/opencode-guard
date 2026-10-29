@@ -61,7 +61,7 @@ cat >"$HOME/.config/opencode/opencode.json" <<EOF
   "plugins": [
     {
       "package": "$REPO",
-      "options": { "decision": { "baseURL": "https://ai-api.linagora.com/v1", "protocol": "chat", "model": "nox-4b", "apiKey": "{env:NOX_APIKEY}" } }
+      "options": { "decision": { "baseURL": "https://ai-api.linagora.com/v1", "protocol": "chat", "model": "nox-4b", "apiKey": "{env:NOX_API_KEY}" } }
     }
   ]
 }

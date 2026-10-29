@@ -242,7 +242,7 @@ export const INSTALL_SNIPPET: Line[] = [
   [['        "baseURL"', "model"], [": ", "dim"], ['"https://ai-api.linagora.com/v1"', "allow"], [",", "dim"]],
   [['        "protocol"', "model"], [": ", "dim"], ['"chat"', "allow"], [",", "dim"]],
   [['        "model"', "model"], [": ", "dim"], ['"nox-4b"', "allow"], [",", "dim"]],
-  [['        "apiKey"', "model"], [": ", "dim"], ['"{env:NOX_APIKEY}"', "allow"]],
+  [['        "apiKey"', "model"], [": ", "dim"], ['"{env:NOX_API_KEY}"', "allow"]],
   [["      }", "dim"]],
   [["    }", "dim"]],
   [["  }]", "dim"]],
