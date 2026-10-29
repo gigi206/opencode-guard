@@ -113,7 +113,6 @@ export const SELF_PROTECTION = {
 }
 
 export const REDACTION = {
-  before: "deploy with my key sk-ant-api03-Xq7Lm2Rk9Vt4Pz8Nw1Hb6Jc3Df5Gs0Ae",
   secret: "sk-ant-api03-Xq7Lm2Rk9Vt4Pz8Nw1Hb6Jc3Df5Gs0Ae",
   placeholder: "[[GUARD_REDACTED:anthropic_key]]",
 }
@@ -235,6 +234,8 @@ export interface Copy {
   askButtons: [string, string, string]
   blocked: string
   redactionTitle: string
+  /** Typed before the key in the prompt. */
+  redactionPrompt: string
   redactionSub: string
   redactionYou: string
   redactionProvider: string
@@ -273,6 +274,7 @@ export const COPY: Record<"en" | "fr", Copy> = {
     askButtons: ["Allow once", "Allow always", "Reject"],
     blocked: "Blocked",
     redactionTitle: "Secrets never leave in clear",
+    redactionPrompt: "deploy with my key",
     redactionSub: "Keys, tokens, passwords and private keys are masked in prompts, results and history.",
     redactionYou: "Your prompt",
     redactionProvider: "LLM provider",
@@ -313,6 +315,7 @@ export const COPY: Record<"en" | "fr", Copy> = {
     askButtons: ["Autoriser une fois", "Toujours autoriser", "Refuser"],
     blocked: "Blocked",
     redactionTitle: "Les secrets ne partent jamais en clair",
+    redactionPrompt: "déploie avec ma clé",
     redactionSub: "Clés, jetons, mots de passe et clés privées sont masqués dans les prompts, les résultats et l'historique.",
     redactionYou: "Votre prompt",
     redactionProvider: "Fournisseur LLM",

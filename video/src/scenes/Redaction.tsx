@@ -19,8 +19,9 @@ const Card: React.FC<{ label: string; children: React.ReactNode; color: string; 
 
 export const Redaction: React.FC<{ copy: Copy }> = ({ copy }) => {
   const frame = useCurrentFrame()
-  const prefix = REDACTION.before.slice(0, REDACTION.before.indexOf(REDACTION.secret))
-  const shown = typed(frame, REDACTION.before, TYPE_AT, 40)
+  const before = `${copy.redactionPrompt} ${REDACTION.secret}`
+  const prefix = `${copy.redactionPrompt} `
+  const shown = typed(frame, before, TYPE_AT, 40)
   const scan = interpolate(frame, [s(SCAN_AT), s(SCAN_AT + 0.7)], [0, 1], clamp)
   const scrambling = frame >= s(SCAN_AT) && frame < s(SCAN_AT + 0.7)
   const redacted = frame >= s(SCAN_AT + 0.7)
@@ -30,7 +31,7 @@ export const Redaction: React.FC<{ copy: Copy }> = ({ copy }) => {
     .join("")
   const travel = progress(frame, SEND_AT, 0.9)
   const received = progress(frame, SEND_AT + 0.8, 0.5)
-  const done = frame >= s(typedEnd(REDACTION.before, TYPE_AT, 40))
+  const done = frame >= s(typedEnd(before, TYPE_AT, 40))
 
   const secretPart = redacted ? (
     <span style={{ color: theme.redacted, background: `${theme.redacted}1A`, borderRadius: 6, padding: "0 4px", whiteSpace: "nowrap" }}>{REDACTION.placeholder}</span>
