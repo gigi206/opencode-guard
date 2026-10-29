@@ -8,15 +8,16 @@ import { Eyebrow, Words } from "../components/Title"
 type P = [number, number]
 
 // Layout (px, 1920×1080).
-const CALL: P = [270, 560]
-const LOCAL: P = [790, 560]
+const CALL: P = [240, 560]
+const LOCAL: P = [740, 560]
 const MODEL: P = [1290, 560]
-const LOCAL_OUT: P = [790, 830]
-const OUT: Record<"allow" | "ask" | "deny", P> = { allow: [1700, 410], ask: [1700, 560], deny: [1700, 710] }
+const NODE_W = 480
+const LOCAL_OUT: Record<"deny" | "ask", P> = { deny: [600, 830], ask: [900, 830] }
+const OUT: Record<"allow" | "ask" | "deny", P> = { allow: [1720, 410], ask: [1720, 560], deny: [1720, 710] }
 
 /** Packets: path, departure (s), travel time (s), and the verdict they end on. */
 const PACKETS: { path: P[]; start: number; duration: number; verdict: Verdict; local?: boolean }[] = [
-  { path: [CALL, LOCAL, LOCAL_OUT], start: 1.9, duration: 1.0, verdict: "deny", local: true },
+  { path: [CALL, LOCAL, LOCAL_OUT.deny], start: 1.9, duration: 1.0, verdict: "deny", local: true },
   { path: [CALL, LOCAL, MODEL, OUT.allow], start: 3.3, duration: 1.5, verdict: "allow" },
   { path: [CALL, LOCAL, MODEL, OUT.ask], start: 5.2, duration: 1.5, verdict: "ask" },
 ]
@@ -39,9 +40,9 @@ const Node: React.FC<{ at: P; w: number; h: number; title: string; sub: string; 
   const frame = useCurrentFrame()
   const p = pop(frame, start, 13)
   return (
-    <div style={{ position: "absolute", left: at[0] - w / 2, top: at[1] - h / 2, width: w, height: h, borderRadius: 22, border: `2px solid ${color}`, background: theme.card, boxShadow: `${cardShadow}, 0 0 50px ${color}22`, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 10, transform: `scale(${p})`, opacity: Math.min(1, p) }}>
-      <div style={{ fontFamily: theme.sans, fontWeight: 700, fontSize: 40, color: theme.text }}>{title}</div>
-      <div style={{ fontFamily: theme.mono, fontSize: 20, color: theme.muted }}>{sub}</div>
+    <div style={{ position: "absolute", left: at[0] - w / 2, top: at[1] - h / 2, width: w, height: h, borderRadius: 22, border: `2px solid ${color}`, background: theme.card, boxShadow: `${cardShadow}, 0 0 50px ${color}22`, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", gap: 10, padding: "0 20px", textAlign: "center", whiteSpace: "nowrap", transform: `scale(${p})`, opacity: Math.min(1, p) }}>
+      <div style={{ fontFamily: theme.sans, fontWeight: 700, fontSize: 38, color: theme.text }}>{title}</div>
+      <div style={{ fontFamily: theme.mono, fontSize: 19, color: theme.muted }}>{sub}</div>
       {extra}
     </div>
   )
@@ -52,12 +53,12 @@ export const Flow: React.FC<{ copy: Copy }> = ({ copy }) => {
   const lines = progress(frame, 0.9, 0.8)
   const hits = PACKETS.map((packet) => frame >= s(packet.start + packet.duration))
   const lit = (verdict: Verdict, local = false) => PACKETS.some((packet, i) => hits[i] && packet.verdict === verdict && Boolean(packet.local) === local)
-  const edges: P[][] = [[CALL, LOCAL], [LOCAL, MODEL], [LOCAL, LOCAL_OUT], [MODEL, OUT.allow], [MODEL, OUT.ask], [MODEL, OUT.deny]]
+  const edges: P[][] = [[CALL, LOCAL], [LOCAL, MODEL], [LOCAL, LOCAL_OUT.deny], [LOCAL, LOCAL_OUT.ask], [MODEL, OUT.allow], [MODEL, OUT.ask], [MODEL, OUT.deny]]
   return (
     <AbsoluteFill>
       <div style={{ position: "absolute", top: 110, width: "100%", textAlign: "center" }}>
         <Eyebrow text="tool.execute.before" start={0} />
-        <Words text={copy.flowTitle} start={0.1} size={60} weight={700} style={{ marginTop: 16 }} stagger={0.04} />
+        <Words text={copy.flowTitle} start={0.1} size={56} weight={700} style={{ marginTop: 16, padding: "0 120px" }} stagger={0.04} />
       </div>
       <svg width={1920} height={1080} style={{ position: "absolute" }}>
         {edges.map((edge, i) => (
@@ -80,10 +81,10 @@ export const Flow: React.FC<{ copy: Copy }> = ({ copy }) => {
       <div style={{ position: "absolute", left: CALL[0] - 150, top: CALL[1] - 45, width: 300, height: 90, borderRadius: 45, background: theme.card, boxShadow: cardShadow, border: `2px solid ${theme.cardBorder}`, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: theme.mono, fontSize: 28, color: theme.text, ...rise(frame, 0.5, 20) }}>
         {copy.flowToolCall}
       </div>
-      <Node at={LOCAL} w={400} h={180} title={copy.flowLocal} sub={copy.flowLocalSub} start={0.7} color={theme.accent} />
+      <Node at={LOCAL} w={NODE_W} h={180} title={copy.flowLocal} sub={copy.flowLocalSub} start={0.7} color={theme.accent} />
       <Node
         at={MODEL}
-        w={400}
+        w={NODE_W}
         h={200}
         title={copy.flowModel}
         sub={copy.flowModelSub}
@@ -92,12 +93,14 @@ export const Flow: React.FC<{ copy: Copy }> = ({ copy }) => {
         extra={<div style={{ fontFamily: theme.mono, fontSize: 18, color: theme.model }}>{DECISION_MODEL} · {AI_GATEWAY}</div>}
       />
       {/* Local outcomes */}
-      <Outcome at={LOCAL_OUT} label={`${copy.verdicts.deny} / ${copy.verdicts.ask}`} verdict="deny" on={lit("deny", true)} start={0.9} />
+      {(["deny", "ask"] as const).map((v, i) => (
+        <Outcome key={v} at={LOCAL_OUT[v]} label={copy.verdicts[v]} verdict={v} on={lit(v, true)} start={0.9 + i * 0.1} />
+      ))}
       {/* Model outcomes */}
       {(["allow", "ask", "deny"] as const).map((v, i) => (
         <Outcome key={v} at={OUT[v]} label={copy.verdicts[v]} verdict={v} on={lit(v)} start={1.1 + i * 0.1} />
       ))}
-      <div style={{ position: "absolute", left: MODEL[0] - 200, width: 400, top: MODEL[1] + 130, textAlign: "center", fontFamily: theme.mono, fontSize: 22, color: theme.ask, ...rise(frame, 6.4, 16) }}>{copy.flowFallback}</div>
+      <div style={{ position: "absolute", left: MODEL[0] - NODE_W / 2, width: NODE_W, top: MODEL[1] + 130, textAlign: "center", fontFamily: theme.mono, fontSize: 22, color: theme.ask, ...rise(frame, 6.4, 16) }}>{copy.flowFallback}</div>
     </AbsoluteFill>
   )
 }
@@ -107,7 +110,7 @@ const Outcome: React.FC<{ at: P; label: string; verdict: Verdict; on: boolean; s
   const color = theme[verdict]
   const r = rise(frame, start, 16)
   return (
-    <div style={{ ...r, position: "absolute", left: at[0] - 120, top: at[1] - 32, width: 240, height: 64, borderRadius: 32, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: theme.sans, fontWeight: 800, fontSize: 24, letterSpacing: "0.08em", color: on ? "#FFFFFF" : color, background: on ? color : theme.card, border: `2px solid ${color}`, boxShadow: on ? `0 0 60px ${color}` : "none", transform: `${r.transform} scale(${on ? 1.08 : 1})` }}>
+    <div style={{ ...r, position: "absolute", left: at[0], top: at[1], minWidth: 180, height: 64, padding: "0 30px", borderRadius: 32, display: "flex", alignItems: "center", justifyContent: "center", whiteSpace: "nowrap", fontFamily: theme.sans, fontWeight: 800, fontSize: 22, letterSpacing: "0.08em", color: on ? "#FFFFFF" : color, background: on ? color : theme.card, border: `2px solid ${color}`, boxShadow: on ? `0 0 60px ${color}` : "none", transform: `translate(-50%, -50%) ${r.transform} scale(${on ? 1.08 : 1})` }}>
       {label}
     </div>
   )
