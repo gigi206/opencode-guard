@@ -23,18 +23,18 @@ export const MUSIC_VOLUME = 0.55
  * Sound effects, from `public/audio/sfx/`: in which scene, at how many seconds from its start. A whoosh is also
  * played on every transition (`TRANSITION_SFX`). Set `SFX_VOLUME` to 0 to mute them all.
  */
-export const SFX_VOLUME = 0.7
+export const SFX_VOLUME = 0.5
 export const TRANSITION_SFX: string | null = "whoosh"
 export const SFX: ReadonlyArray<{ scene: SceneId; at: number; sound: SfxName; volume?: number }> = [
   { scene: "danger", at: 0.85, sound: "glitch" },
-  { scene: "danger", at: 0.85, sound: "impact" },
+  { scene: "danger", at: 0.85, sound: "impact", volume: 0.8 },
   { scene: "reveal", at: 1.0, sound: "scan", volume: 0.6 },
-  { scene: "flow", at: 2.9, sound: "stamp-deny" },
+  { scene: "flow", at: 2.9, sound: "stamp-deny", volume: 0.8 },
   { scene: "flow", at: 4.8, sound: "pop" },
   { scene: "flow", at: 6.7, sound: "stamp-ask" },
-  { scene: "demo", at: 1.65, sound: "stamp-deny" },
+  { scene: "demo", at: 1.65, sound: "stamp-deny", volume: 0.8 },
   { scene: "demo", at: 6.05, sound: "stamp-ask" },
-  { scene: "demo", at: 10.45, sound: "stamp-deny" },
+  { scene: "demo", at: 10.45, sound: "stamp-deny", volume: 0.8 },
   { scene: "redaction", at: 2.5, sound: "scan" },
   { scene: "redaction", at: 4.4, sound: "pop" },
   { scene: "selfProtection", at: 1.6, sound: "stamp-ask" },
