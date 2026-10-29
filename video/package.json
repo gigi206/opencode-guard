@@ -1,0 +1,28 @@
+{
+  "name": "opencode-guard-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Motion design presentation video of opencode-guard (Remotion)",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio",
+    "render": "remotion render GuardEN out/opencode-guard-en.mp4",
+    "render:fr": "remotion render GuardFR out/opencode-guard-fr.mp4",
+    "render:all": "npm run render && npm run render:fr",
+    "still": "remotion still GuardEN out/poster.png --frame=150",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource/inter": "5.3.0",
+    "@fontsource/jetbrains-mono": "5.3.0",
+    "@remotion/cli": "4.0.539",
+    "@remotion/transitions": "4.0.539",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "remotion": "4.0.539"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.9.3"
+  }
+}
