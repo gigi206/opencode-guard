@@ -1,7 +1,8 @@
-// Drawn mock-up of an OpenCode session (used when no real screenshot is set in content.ts), and the frame that
-// shows a real screenshot instead.
+// A real OpenCode screenshot, animated, and the drawn mock-up of a session used when no screenshot is set in
+// content.ts.
 import { Img, staticFile, useCurrentFrame } from "remotion"
 import { pop, progress, s, typed, typedEnd } from "../anim"
+import type { Shot } from "../content"
 import { term, theme, type Verdict } from "../theme"
 import { Window } from "./Terminal"
 
@@ -86,14 +87,22 @@ export const OpenCodeSession: React.FC<{
   )
 }
 
-/** A real screenshot from `public/screenshots/`, in the same window chrome, with a slow push-in. */
-export const Screenshot: React.FC<{ file: string; start?: number; duration?: number }> = ({ file, start = 0, duration = 4 }) => {
+/**
+ * A real screenshot from `public/screenshots/<dir>/`, in the same window chrome: it is revealed top to bottom from
+ * `start`, then the camera pushes in on `focus` at `zoomAt` (seconds), when the verdict appears.
+ */
+export const Screenshot: React.FC<{ dir: string; shot: Shot; start?: number; zoomAt?: number }> = ({ dir, shot, start = 0, zoomAt = 1.2 }) => {
   const frame = useCurrentFrame()
-  const zoom = 1 + 0.05 * progress(frame, start, duration)
+  const reveal = progress(frame, start, 0.7)
+  const zoom = 1 + 0.13 * progress(frame, zoomAt, 0.9) + 0.03 * progress(frame, start, 4)
+  const [fx, fy] = shot.focus
   return (
-    <Window title="opencode" width={W}>
-      <div style={{ overflow: "hidden" }}>
-        <Img src={staticFile(`screenshots/${file}`)} style={{ width: "100%", display: "block", transform: `scale(${zoom})`, transformOrigin: "50% 40%" }} />
+    <Window title="opencode — ~/projects/my-app" width={W}>
+      <div style={{ overflow: "hidden", background: "#0a0a0a" }}>
+        <Img
+          src={staticFile(`screenshots/${dir}/${shot.file}`)}
+          style={{ width: "100%", display: "block", transform: `scale(${zoom})`, transformOrigin: `${fx * 100}% ${fy * 100}%`, clipPath: `inset(0 0 ${(1 - reveal) * 100}% 0)` }}
+        />
       </div>
     </Window>
   )

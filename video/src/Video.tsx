@@ -4,9 +4,9 @@ import { fade } from "@remotion/transitions/fade"
 import { slide } from "@remotion/transitions/slide"
 import { wipe } from "@remotion/transitions/wipe"
 import { Fragment, useEffect, useState } from "react"
-import { AbsoluteFill, Audio, continueRender, delayRender, interpolate, staticFile, useCurrentFrame, useVideoConfig } from "remotion"
+import { AbsoluteFill, Audio, Sequence, continueRender, delayRender, interpolate, staticFile, useCurrentFrame, useVideoConfig } from "remotion"
 import { s } from "./anim"
-import { COPY, MUSIC, MUSIC_VOLUME, SCENES, TRANSITION, type Copy, type SceneId, type TransitionKind } from "./content"
+import { COPY, MUSIC, MUSIC_VOLUME, SCENES, SFX, SFX_VOLUME, TRANSITION, TRANSITION_SFX, type Copy, type SceneId, type TransitionKind } from "./content"
 import { Background } from "./components/Background"
 import { gradient } from "./theme"
 import { Cli } from "./scenes/Cli"
@@ -41,6 +41,37 @@ export function totalFrames(): number {
   return SCENES.reduce((total, scene, i) => total + s(scene.seconds) - (i > 0 && scene.transition !== "none" ? s(TRANSITION) : 0), 0)
 }
 
+/** First frame of each scene, as the transitions overlap them. */
+function sceneStarts(): Record<SceneId, number> {
+  const starts = {} as Record<SceneId, number>
+  let frame = 0
+  SCENES.forEach((scene, i) => {
+    if (i > 0 && scene.transition !== "none") frame -= s(TRANSITION)
+    starts[scene.id] = frame
+    frame += s(scene.seconds)
+  })
+  return starts
+}
+
+/** The sound effects of content.ts, and a whoosh on every transition. */
+const SoundEffects: React.FC = () => {
+  if (SFX_VOLUME <= 0) return null
+  const starts = sceneStarts()
+  const cues = [
+    ...SFX.filter((cue) => cue.scene in starts).map((cue) => ({ from: starts[cue.scene] + s(cue.at), sound: cue.sound, volume: cue.volume ?? 1 })),
+    ...(TRANSITION_SFX ? SCENES.slice(1).filter((scene) => scene.transition !== "none").map((scene) => ({ from: starts[scene.id], sound: TRANSITION_SFX, volume: 0.5 })) : []),
+  ]
+  return (
+    <>
+      {cues.map((cue, i) => (
+        <Sequence key={i} from={cue.from} layout="none" name={`sfx ${cue.sound}`}>
+          <Audio src={staticFile(`audio/sfx/${cue.sound}.wav`)} volume={SFX_VOLUME * cue.volume} />
+        </Sequence>
+      ))}
+    </>
+  )
+}
+
 /** Waits for the fonts before the first frame is captured. */
 function useFonts() {
   const [handle] = useState(() => delayRender("fonts"))
@@ -57,6 +88,12 @@ const ProgressBar: React.FC = () => {
   const { durationInFrames } = useVideoConfig()
   const width = interpolate(frame, [0, durationInFrames - 1], [0, 100])
   return <div style={{ position: "absolute", left: 0, bottom: 0, height: 5, width: `${width}%`, backgroundImage: gradient, opacity: 0.8 }} />
+}
+
+/** The music, faded out over the last 2 seconds of the video. */
+const Music: React.FC<{ file: string }> = ({ file }) => {
+  const { durationInFrames } = useVideoConfig()
+  return <Audio src={staticFile(file)} volume={(f) => MUSIC_VOLUME * interpolate(f, [durationInFrames - s(2), durationInFrames], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" })} />
 }
 
 export const Video: React.FC<{ lang: "en" | "fr" }> = ({ lang }) => {
@@ -80,7 +117,8 @@ export const Video: React.FC<{ lang: "en" | "fr" }> = ({ lang }) => {
         })}
       </TransitionSeries>
       <ProgressBar />
-      {MUSIC && <Audio src={staticFile(MUSIC)} volume={MUSIC_VOLUME} />}
+      {MUSIC && <Music file={MUSIC} />}
+      <SoundEffects />
     </AbsoluteFill>
   )
 }

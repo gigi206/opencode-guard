@@ -12,9 +12,42 @@ export const HEIGHT = 1080
 /** Length of the cross-fade between two scenes, in seconds. */
 export const TRANSITION = 0.5
 
-/** Optional background music: put the file in `public/` and write its name here, e.g. "music.mp3". */
-export const MUSIC: string | null = null
-export const MUSIC_VOLUME = 0.6
+/**
+ * Background music, from `public/` (`null`: none). The default one is synthesized by `tools/make-audio.py`
+ * (120 BPM, no rights issue); any mp3/wav can replace it. It fades out over the last seconds of the video.
+ */
+export const MUSIC: string | null = "audio/music.mp3"
+export const MUSIC_VOLUME = 0.55
+
+/**
+ * Sound effects, from `public/audio/sfx/`: in which scene, at how many seconds from its start. A whoosh is also
+ * played on every transition (`TRANSITION_SFX`). Set `SFX_VOLUME` to 0 to mute them all.
+ */
+export const SFX_VOLUME = 0.7
+export const TRANSITION_SFX: string | null = "whoosh"
+export const SFX: ReadonlyArray<{ scene: SceneId; at: number; sound: SfxName; volume?: number }> = [
+  { scene: "danger", at: 0.85, sound: "glitch" },
+  { scene: "danger", at: 0.85, sound: "impact" },
+  { scene: "reveal", at: 1.0, sound: "scan", volume: 0.6 },
+  { scene: "flow", at: 2.9, sound: "stamp-deny" },
+  { scene: "flow", at: 4.8, sound: "pop" },
+  { scene: "flow", at: 6.7, sound: "stamp-ask" },
+  { scene: "demo", at: 1.65, sound: "stamp-deny" },
+  { scene: "demo", at: 6.05, sound: "stamp-ask" },
+  { scene: "demo", at: 10.45, sound: "stamp-deny" },
+  { scene: "redaction", at: 2.5, sound: "scan" },
+  { scene: "redaction", at: 4.4, sound: "pop" },
+  { scene: "selfProtection", at: 1.6, sound: "stamp-ask" },
+  { scene: "cli", at: 0.9, sound: "pop", volume: 0.5 },
+  { scene: "cli", at: 5.25, sound: "pop", volume: 0.5 },
+  { scene: "cli", at: 9.6, sound: "pop", volume: 0.5 },
+  { scene: "stats", at: 0.2, sound: "pop" },
+  { scene: "stats", at: 0.38, sound: "pop" },
+  { scene: "stats", at: 0.56, sound: "pop" },
+  { scene: "stats", at: 0.74, sound: "pop" },
+]
+
+export type SfxName = "whoosh" | "impact" | "stamp-deny" | "stamp-ask" | "pop" | "scan" | "glitch"
 
 /**
  * Order and length of the scenes, in seconds. Remove a line to drop a scene, move it to reorder.
@@ -39,13 +72,19 @@ export type TransitionKind = "fade" | "slide" | "wipe" | "none"
 export type SceneId = "hook" | "danger" | "reveal" | "flow" | "demo" | "redaction" | "selfProtection" | "cli" | "stats" | "outro"
 
 // ── Screenshots ──────────────────────────────────────────────────────────────────────────────
-// Real OpenCode screenshots replace the drawn window when set: put the PNG in `public/screenshots/`
-// and write its file name, e.g. "deny.png". `null` keeps the drawn mock-up.
-export const SCREENSHOTS = {
-  demoDeny: null as string | null,
-  demoAsk: null as string | null,
-  demoExfiltration: null as string | null,
-  selfProtection: null as string | null,
+// Real screenshots of OpenCode 2.2.0 running the plugin, one folder per language in `public/screenshots/`
+// (`en/`, `fr/`). `focus` is the point the camera zooms on when the verdict appears (fractions of the width
+// and height). `null` draws a mock-up window instead.
+export interface Shot {
+  file: string
+  focus: readonly [number, number]
+}
+
+export const SCREENSHOTS: Record<"demoDeny" | "demoAsk" | "demoExfiltration" | "selfProtection", Shot | null> = {
+  demoDeny: { file: "deny.png", focus: [0.02, 0.36] },
+  demoAsk: { file: "ask.png", focus: [0.02, 0.84] },
+  demoExfiltration: { file: "exfil.png", focus: [0.02, 0.36] },
+  selfProtection: { file: "self.png", focus: [0.02, 0.84] },
 }
 
 // ── Language independent data (what the product really prints) ───────────────────────────────
@@ -74,7 +113,7 @@ export interface DemoStep {
   rule: string
   /** Reason exactly as the guard logs it. */
   reason: string
-  screenshot: string | null
+  screenshot: Shot | null
 }
 
 export const DEMO_STEPS: DemoStep[] = [
@@ -192,11 +231,12 @@ export const CLI_TAKES: ReadonlyArray<{ command: string; output: Line[] }> = [
   },
 ]
 
-/** The plugin entry of opencode.json shown at the end (LINAGORA AI gateway, Nox-4B). */
+/** Shown at the end: the install command, then the plugin entry of opencode.json (LINAGORA AI gateway, Nox-4B). */
+export const INSTALL_COMMAND = "opencode plugin add github:gigi206/opencode-guard"
 export const INSTALL_SNIPPET: Line[] = [
   [["{", "dim"]],
   [['  "plugins"', "model"], [": [{", "dim"]],
-  [['    "package"', "model"], [": ", "dim"], ['"/path/to/opencode-guard"', "allow"], [",", "dim"]],
+  [['    "package"', "model"], [": ", "dim"], ['"github:gigi206/opencode-guard"', "allow"], [",", "dim"]],
   [['    "options"', "model"], [": {", "dim"]],
   [['      "decision"', "model"], [": {", "dim"]],
   [['        "baseURL"', "model"], [": ", "dim"], ['"https://ai-api.linagora.com/v1"', "allow"], [",", "dim"]],
@@ -212,6 +252,8 @@ export const INSTALL_SNIPPET: Line[] = [
 // ── Texts, per language ──────────────────────────────────────────────────────────────────────
 
 export interface Copy {
+  /** Folder of the screenshots in `public/screenshots/`. */
+  screenshotDir: string
   hookTitle: string[]
   hookSub: string
   dangerTitle: string
@@ -253,6 +295,7 @@ export interface Copy {
 
 export const COPY: Record<"en" | "fr", Copy> = {
   en: {
+    screenshotDir: "en",
     hookTitle: ["Your AI agent", "has a shell."],
     hookSub: "It edits files, runs commands, talks to the network.",
     dangerTitle: "One bad command is enough.",
@@ -290,10 +333,11 @@ export const COPY: Record<"en" | "fr", Copy> = {
     ],
     outroLine1: "Not a sandbox.",
     outroLine2: "A guardrail.",
-    outroCta: "Add it to opencode.json",
+    outroCta: "Install it from GitHub",
     outroPowered: "Decisions by Nox-4B on the LINAGORA AI gateway",
   },
   fr: {
+    screenshotDir: "fr",
     hookTitle: ["Votre agent IA", "a un shell."],
     hookSub: "Il modifie des fichiers, lance des commandes, parle au réseau.",
     dangerTitle: "Une seule mauvaise commande suffit.",
@@ -331,7 +375,7 @@ export const COPY: Record<"en" | "fr", Copy> = {
     ],
     outroLine1: "Pas un bac à sable.",
     outroLine2: "Un garde-fou.",
-    outroCta: "Ajoutez-le à opencode.json",
+    outroCta: "Installez-le depuis GitHub",
     outroPowered: "Décisions par Nox-4B sur la passerelle IA LINAGORA",
   },
 }

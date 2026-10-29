@@ -19,7 +19,7 @@ export const SelfProtection: React.FC<{ copy: Copy }> = ({ copy }) => {
       </div>
       <div style={{ opacity: enter, transform: `translateX(${(1 - enter) * 80}px)` }}>
         {SELF_PROTECTION.screenshot ? (
-          <Screenshot file={SELF_PROTECTION.screenshot} />
+          <Screenshot dir={copy.screenshotDir} shot={SELF_PROTECTION.screenshot} start={0.3} zoomAt={1.5} />
         ) : (
           <OpenCodeSession
             prompt={copy.selfPrompt}

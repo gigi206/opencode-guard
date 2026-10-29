@@ -9,6 +9,7 @@ import { Eyebrow } from "../components/Title"
 
 const FIRST = 0.3
 const STEP = 4.4
+const SHOT_VERDICT = 1.2
 
 export const Demo: React.FC<{ copy: Copy }> = ({ copy }) => (
   <AbsoluteFill>
@@ -28,7 +29,8 @@ const Step: React.FC<{ index: number; copy: Copy; last: boolean }> = ({ index, c
   const step = DEMO_STEPS[index]!
   const enter = progress(frame, 0, 0.5)
   const exit = last ? 1 : fadeOut(frame, STEP, 0.35)
-  const outcomeAt = 0.7 + step.command.length / 40 + 0.3
+  // When the verdict shows: the screenshot zooms in on it, or the mock-up has typed the command.
+  const outcomeAt = step.screenshot ? SHOT_VERDICT : 0.7 + step.command.length / 40 + 0.3
   return (
     <AbsoluteFill style={{ opacity: Math.min(enter, exit), flexDirection: "row", alignItems: "center", padding: "0 120px", gap: 80 }}>
       <div style={{ width: 520, transform: `translateX(${(1 - enter) * -60}px)` }}>
@@ -43,7 +45,7 @@ const Step: React.FC<{ index: number; copy: Copy; last: boolean }> = ({ index, c
       </div>
       <div style={{ transform: `translateX(${(1 - enter) * 80}px) perspective(1600px) rotateY(${(1 - enter) * -8}deg)` }}>
         {step.screenshot ? (
-          <Screenshot file={step.screenshot} duration={STEP} />
+          <Screenshot dir={copy.screenshotDir} shot={step.screenshot} start={0.1} zoomAt={SHOT_VERDICT} />
         ) : (
           <OpenCodeSession
             prompt={copy.demoPrompts[index]!}

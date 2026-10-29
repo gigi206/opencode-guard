@@ -10,7 +10,9 @@
     "render:fr": "remotion render GuardFR out/opencode-guard-fr.mp4",
     "render:all": "npm run render && npm run render:fr",
     "still": "remotion still GuardEN out/poster.png --frame=150",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "screenshots": "tools/screenshots/capture.sh",
+    "audio": "python3 tools/make-audio.py"
   },
   "dependencies": {
     "@fontsource/inter": "5.3.0",

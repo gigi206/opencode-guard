@@ -1,7 +1,7 @@
 // 10. "Not a sandbox. A guardrail." then how to install and where to find it.
 import { AbsoluteFill, Img, staticFile, useCurrentFrame } from "remotion"
-import { rise } from "../anim"
-import { BRAND_LOGO, INSTALL_SNIPPET, REPO_URL, type Copy } from "../content"
+import { rise, typed } from "../anim"
+import { BRAND_LOGO, INSTALL_COMMAND, INSTALL_SNIPPET, REPO_URL, type Copy } from "../content"
 import { gradientText, term, theme } from "../theme"
 import { Shield } from "../components/Shield"
 import { TerminalLine, Window } from "../components/Terminal"
@@ -10,7 +10,7 @@ import { Words } from "../components/Title"
 export const Outro: React.FC<{ copy: Copy }> = ({ copy }) => {
   const frame = useCurrentFrame()
   return (
-    <AbsoluteFill style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 110 }}>
+    <AbsoluteFill style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 80 }}>
       <div>
         <Shield size={120} start={0} />
         <Words text={copy.outroLine1} start={0.3} size={96} color={theme.muted} style={{ marginTop: 30 }} />
@@ -26,10 +26,16 @@ export const Outro: React.FC<{ copy: Copy }> = ({ copy }) => {
       </div>
       <div style={rise(frame, 1.1, 40)}>
         <div style={{ fontFamily: theme.sans, fontSize: 26, fontWeight: 600, color: theme.accent2, letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 18 }}>{copy.outroCta}</div>
-        <Window title="opencode.json" width={820}>
+        <Window title="zsh" width={820} style={{ marginBottom: 22 }}>
+          <div style={{ padding: "18px 32px", fontFamily: theme.mono, fontSize: 21, color: term.text, whiteSpace: "pre" }}>
+            <span style={{ color: term.allow, fontWeight: 700 }}>❯ </span>
+            {typed(frame, INSTALL_COMMAND, 1.3, 45)}
+          </div>
+        </Window>
+        <Window title="~/.config/opencode/opencode.json" width={820}>
           <div style={{ padding: "26px 32px", fontFamily: theme.mono, fontSize: 21, lineHeight: 1.5, color: term.text }}>
             {INSTALL_SNIPPET.map((line, i) => (
-              <div key={i} style={rise(frame, 1.3 + i * 0.05, 10)}>
+              <div key={i} style={rise(frame, 2.0 + i * 0.05, 10)}>
                 <TerminalLine line={line} />
               </div>
             ))}
