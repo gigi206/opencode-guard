@@ -2,9 +2,10 @@
 // (before any setting) and what they check: the same text as the table of docs/rules.md (a test compares them); then the
 // user's own rules (`rules` option), read and set aside exactly as the plugin does.
 import { parseConfig } from "../config.ts"
-import { RULE_FEATURES } from "../rules/features.ts"
-import { readSources, type CliIo, type Pretty } from "./context.ts"
-import { rowLines, title } from "./pretty.ts"
+import { RULE_DETAILS, ruleSettings } from "../rules/details.ts"
+import { RULE_FEATURES, type RuleFeature } from "../rules/features.ts"
+import { CliError, readSources, type CliIo, type Pretty } from "./context.ts"
+import { heading, rowLines, title } from "./pretty.ts"
 import { type Segment } from "./style.ts"
 
 /** Rule → its own verdict and what it checks. */
@@ -83,6 +84,43 @@ export function ruleLines(): string[] {
   const width = (column: number) => Math.max(...rows.map((row) => row[column]!.length))
   const [rule, group, verdict] = [width(0), width(1), width(2)]
   return rows.map((row) => `${row[0]!.padEnd(rule)}  ${row[1]!.padEnd(group)}  ${row[2]!.padEnd(verdict)}  ${row[3]}`)
+}
+
+const groupLabel = (group: RuleFeature) => (group === "always" ? "always active" : group)
+
+/**
+ * One built-in rule explained: what it checks, how it decides, the reason a finding usually carries and the settings
+ * that apply to it. Only the registry's own text, at the level of docs/rules.md: never the rule's pattern.
+ */
+export function explainRule(io: CliIo, rule: string): void {
+  const group = RULE_FEATURES.get(rule)
+  const summary = RULE_SUMMARIES.get(rule)
+  const detail = RULE_DETAILS.get(rule)
+  if (!group || !summary) throw new CliError(`${rule} is not a built-in rule`)
+  if (!detail) throw new CliError(`no explanation is available for the built-in rule ${rule}`)
+  const reason = detail.reason ?? summary.description
+  const settings = ruleSettings(rule, group)
+  if (io.pretty) {
+    const pretty = io.pretty
+    title(pretty, `Rule ${pretty.clean(rule)}`, `${groupLabel(group)}, own verdict ${summary.verdict}`, "builtins")
+    const block = (name: string, text: string) => {
+      pretty.line([])
+      heading(pretty, name)
+      for (const line of rowLines(pretty, [["    "]], 4, pretty.clean(text))) pretty.line(line)
+    }
+    block("What it checks", summary.description)
+    block("How it decides", detail.how)
+    block("Typical reason", reason)
+    block("Settings", settings)
+    return
+  }
+  io.out(`Rule: ${rule}`)
+  io.out(`  Group: ${group}`)
+  io.out(`  Own verdict: ${summary.verdict}`)
+  io.out(`  What it checks: ${summary.description}`)
+  io.out(`  How it decides: ${detail.how}`)
+  io.out(`  Typical reason: ${reason}`)
+  io.out(`  Settings: ${settings}`)
 }
 
 /** The plugin's warnings about its `rules` option: each one starts with the option's name. */
