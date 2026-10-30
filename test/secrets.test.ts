@@ -856,3 +856,51 @@ describe("batch 31: environment passwords with PASSWD or fixed names", () => {
     assert.deepEqual(names({ DB_PASSWORD: value, DB_PASS: value, COMPASS_MODE: value, BYPASS: value }), ["DB_PASSWORD", "DB_PASS"])
   })
 })
+
+describe("prompt: a password keyword and an explicit separator", async () => {
+  const { redactPromptSecrets } = await import("../src/secrets/prompt.ts")
+  const masked = (text: string) => redactPromptSecrets(text).value
+  const MARK = "[[GUARD_REDACTED:prompt_secret]]"
+  it("a strong value of 6 characters or more is masked, symbols counted even without a digit", () => {
+    for (const [text, value] of [
+      ["mon password est $\\çP@!", "$\\çP@!"],
+      ["mon password est $\\çP@!aB", "$\\çP@!aB"],
+      ["mon mot de passe : a$b!c?", "a$b!c?"],
+      ["mdp = Zx#9qq", "Zx#9qq"],
+      ["my password is Soleil42", "Soleil42"],
+      ["le mot de passe c'est P@ris!", "P@ris!"],
+    ])
+      assert.equal(masked(text), text.replace(value, MARK), text)
+  })
+  it("ordinary words, accented or not, stay: an accented letter is a letter, not a symbol", () => {
+    for (const text of [
+      "mon mot de passe est oublié",
+      "le mot de passe est réinitialisé",
+      "password is required",
+      "le mot de passe est trop court",
+      "mon password est $\\çP@",
+      "mot de passe oublié depuis hier",
+      "my password is wrong!",
+      "password is invalid?",
+      "le mot de passe est incorrect!",
+    ])
+      assert.equal(masked(text), text, text)
+  })
+  it("code, references and placeholders stay, even after a password keyword", () => {
+    for (const text of [
+      "password: $DB_PASS",
+      "mot de passe = ${PASSWORD}",
+      "password = process.env.DB_PASSWORD",
+      "password: <your-password>",
+      "mot de passe : changeme!!",
+    ])
+      assert.equal(masked(text), text, text)
+  })
+  it("a rejected value never swallows the next keyword", () => {
+    assert.equal(masked("mot de passe: secret: Zx#9qqW2!"), `mot de passe: secret: ${MARK}`)
+  })
+  it("other keywords keep 8 characters and their checks", () => {
+    for (const text of ["le token est $\\çP@!", "secret: Zx#9qq", "le token est base64url"]) assert.equal(masked(text), text, text)
+    assert.equal(masked("le token est Zx#9qqW2"), `le token est ${MARK}`)
+  })
+})

@@ -1,4 +1,4 @@
-import { looksLikeSecretValue, trimEndChars } from "./patterns.ts"
+import { looksLikeCodeOrPlaceholder, looksLikeSecretValue, trimEndChars } from "./patterns.ts"
 import { placeholder, PLACEHOLDER_RE, type RedactResult } from "./redact.ts"
 
 // Secrets typed in natural language in the prompt (English and French keyword variants are recognized): applied ONLY to the
@@ -21,6 +21,10 @@ const KEYWORDS = [
   `cl[ée]${SPACE}+secr[èe]te`,
 ].join("|")
 
+/** Shortest value after a password keyword and an explicit separator (`mdp : a$b!c?`); 8 for every other case. */
+const PASSWORD_MIN = 6
+const SECRET_MIN = 8
+
 /** Keywords that unambiguously designate a password: the only ones allowed without a separator (`mdp Xy7!…`). */
 const PASSWORD_KEYWORD = /^(?:mots?[\s  ]+de[\s  ]+passe|mdp|password|passwd|passphrase)$/i
 
@@ -28,7 +32,8 @@ const PROMPT_SECRET = new RegExp(
   `(?<![\\p{L}\\d_])(?<keyword>${KEYWORDS})(?![\\p{L}\\d_])` +
     `(?<separator>${SPACE}*[:=]\\s*|[^\\S\\n]+(?:est|is|c['’]est|vaut)[^\\S\\n]+|[^\\S\\n]*(?:→|->)[^\\S\\n]*|[^\\S\\n]+)` +
     // `,` and `;` allowed in the value (`Abcdef12;Zz9!`), removed only at the end (sentence punctuation).
-    `(?:["'\`«“][^\\S\\n]*)?(?<value>[^\\s"'\`»”]{8,})`,
+    // A value never starts with a keyword (`mot de passe: secret: …`): the next keyword is examined on its own.
+    `(?:["'\`«“][^\\S\\n]*)?(?!(?:${KEYWORDS})(?![\\p{L}\\d_]))(?<value>[^\\s"'\`»”]{${PASSWORD_MIN},})`,
   "giu",
 )
 
@@ -37,9 +42,14 @@ function isPathLike(value: string): boolean {
   return /^[/~.]/.test(value) || value.includes("://") || /^[\w.-]+(?:\/[\w.-]+)+$/.test(value)
 }
 
-/** "Strong" value: a symbol (other than `_ . -`), or uppercase + lowercase + digit (`hardcoded2`, `base64url` excluded). */
-function isStrong(value: string): boolean {
-  return /[^A-Za-z0-9_.-]/.test(value) || (/[a-z]/.test(value) && /[A-Z]/.test(value) && /\d/.test(value))
+/**
+ * "Strong" value: a symbol (neither a letter, accented or not, nor a digit, nor `_ . -`), or uppercase + lowercase +
+ * digit (`hardcoded2`, `base64url`, `réinitialisé` excluded). Final `!` and `?` are sentence punctuation here
+ * (`password is wrong!`); the value masked keeps them (`$\çP@!`).
+ */
+function isStrong(whole: string): boolean {
+  const value = whole.replace(/[!?]+$/u, "")
+  return /[^\p{L}\p{N}_.-]/u.test(value) || (/\p{Ll}/u.test(value) && /\p{Lu}/u.test(value) && /\p{N}/u.test(value))
 }
 
 export function redactPromptSecrets(text: string): RedactResult<string> {
@@ -48,14 +58,20 @@ export function redactPromptSecrets(text: string): RedactResult<string> {
     const match = args[0] as string
     const groups = args[args.length - 1] as { keyword: string; separator: string; value: string }
     const secret = trimEndChars(groups.value, ".,;:)")
-    if (secret.length < 8 || PLACEHOLDER_RE.test(secret) || isPathLike(secret)) return match
+    if (secret.length < PASSWORD_MIN || PLACEHOLDER_RE.test(secret) || isPathLike(secret)) return match
     const assignment = /[:=]/.test(groups.separator)
     const bare = !assignment && !/\S/.test(groups.separator)
     const keyword = groups.keyword.toLowerCase()
     // `pwd` (also the command) only with `:` or `=`; without a separator, only a password keyword.
     if (keyword === "pwd" && !assignment) return match
     if (bare && !PASSWORD_KEYWORD.test(keyword)) return match
-    if (!looksLikeSecretValue(secret) || (!assignment && !isStrong(secret))) return match
+    if (PASSWORD_KEYWORD.test(keyword) && !bare) {
+      // A password keyword and an explicit separator: a strong value of 6 characters or more is enough, code and
+      // references aside (`$DB_PASS`, `${PASSWORD}`, `process.env.X`, `<your-password>`); with `:` or `=`, a value that
+      // looks like a secret too (`password: hunter22`), as for any assignment.
+      const strong = isStrong(secret) || (assignment && looksLikeSecretValue(secret))
+      if (looksLikeCodeOrPlaceholder(secret) || !strong) return match
+    } else if (secret.length < SECRET_MIN || !looksLikeSecretValue(secret) || (!assignment && !isStrong(secret))) return match
     count++
     const at = match.lastIndexOf(secret)
     return match.slice(0, at) + placeholder("prompt_secret") + match.slice(at + secret.length)
