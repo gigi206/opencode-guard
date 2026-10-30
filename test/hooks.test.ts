@@ -56,7 +56,9 @@ describe("guard: execute.before", () => {
     await trigger("tool.execute.before", before("shell", { command: `git reset --hard && echo ${FAKE.openai}` }))
     assert.equal(asserts.length, 1)
     const input = asserts[0]!
-    assert.ok(input.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}git-reset-hard: git reset --hard (uncommitted changes lost) · shell: git reset --hard`), input.action)
+    // The call kept whole (a redacted secret in it), the reason cut at a word to make room.
+    assert.ok(input.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}git-reset-hard: git reset --hard (uncommitted`), input.action)
+    assert.ok(input.action.endsWith(" · shell: git reset --hard && echo [[GUARD_REDACTED:openai_key]]"), input.action)
     assert.ok([...input.action.slice(`${GUARD_ACTION}${GUARD_SEPARATOR}`.length)].length <= MAX_ACTION_DETAIL, input.action)
     assert.ok(!input.action.includes(FAKE.openai), input.action)
     assert.equal(input.sessionID, "ses_1")
@@ -1368,7 +1370,7 @@ describe("lot 28: MCP tool with a credential path", () => {
     const input = { pageId: 1, uid: "e1", filePaths: ["~/.ssh/id_ed25519_guard_test"] }
     await trigger("tool.execute.before", before("chrome-devtools-mcp_upload_file", input))
     assert.equal(asserts.length, 1)
-    assert.ok(asserts[0]!.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}secret-file-read: access to a credential file (`), asserts[0]!.action)
+    assert.ok(asserts[0]!.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}secret-file-read: access to a credential file (~/.ssh/id_ed25519_guard_test) · chrome-devtools-mcp_upload_file`), asserts[0]!.action)
     assert.match(String(asserts[0]!.metadata?.reason), /credential file/)
     const own = await trigger("permission.evaluate", {
       sessionID: "ses_1",

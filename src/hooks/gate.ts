@@ -25,8 +25,10 @@ export const GUARD_ACTION = "guard"
 export const GUARD_SEPARATOR = " · "
 /** Length of the detail after `GUARD_ACTION` and the separator (rule, reason, model opinion, tool call), cut mark included. */
 export const MAX_ACTION_DETAIL = 120
-/** Length kept for the tool call when even the shortest reason does not fit with it. */
-const MIN_ACTION_CALL = 40
+/** Length kept for the reason, after the rule's name, when even the shortest reason does not fit with the whole tool call. */
+const MIN_ACTION_REASON = 32
+/** Length the tool call keeps in any case (a rule's name never takes all the room). */
+const MIN_ACTION_CALL = 24
 
 export interface GateDeps {
   readonly decider: Decider
@@ -112,8 +114,10 @@ function fit(value: string, limit: number): string {
  * on one line (invisible characters written out), the detail at most `MAX_ACTION_DETAIL` code points. OpenCode shows
  * the action twice, so the detail keeps the most that fits whole: the full opinion, then the model's verdict alone,
  * then no opinion, each first with the finding's reason, then with the rule's short reason (only when the reason is
- * exactly the rule's usual one, never another rule under the same name); last, the reason and the tool call cut at a
- * word. The full reason is in the log. An error gives `GUARD_ACTION` alone (still asked).
+ * exactly the rule's usual one, never another rule under the same name); last, the tool call kept whole if it can,
+ * the reason cut at a word (the rule's name and at least `MIN_ACTION_REASON` code points of it), then the call cut too. A reason that names the call's target in parentheses (`write to a protected location (<path>)`) leaves it to the
+ * tool call, shown once; when the call holds it deeper (an MCP tool's JSON, never a command or code), the call may
+ * be reduced to the tool's name instead. The full reason is in the log. An error gives `GUARD_ACTION` alone (still asked).
  */
 export function guardAction(redactor: Redactor, reason: string, rule?: string, resource?: string, parts?: ReasonParts): string {
   try {
@@ -122,19 +126,31 @@ export function guardAction(redactor: Redactor, reason: string, rule?: string, r
     const name = rule ? clean(rule) : ""
     const own = parts?.local ?? reason
     const usual = rule ? RULE_DETAILS.get(rule) : undefined
-    const reasons = [clean(own), ...(usual?.prompt && own === usual.reason ? [clean(usual.prompt)] : [])]
-    const opinions = parts ? [clean(parts.opinion), clean(parts.verdict), ""] : [""]
     const call = resource ? clean(resource) : ""
+    const split = call.indexOf(": ")
+    const [tool, target] = split > 0 ? [call.slice(0, split), call.slice(split + 2)] : [call, ""]
+    // The call's target (`write: <path>` → `<path>`) named once: by the call, not again by the reason.
+    const reasons = [target ? clean(own).replace(` (${target})`, "") : clean(own), ...(usual?.prompt && own === usual.reason ? [clean(usual.prompt)] : [])]
+    // A target the reason names in parentheses and the call holds deeper, in the JSON of an input without a command,
+    // path, URL, query or code (an MCP tool's): the call may then be reduced to its tool, the finding's reason naming
+    // the target whole. Never a command or code, whose rest would no longer be seen.
+    const json = /^[{[]/.test(target)
+    const named = json && [...reasons[0]!.matchAll(/ \(([^()]{4,})\)/g)].some((match) => target.includes(match[1]!))
+    const opinions = parts ? [clean(parts.opinion), clean(parts.verdict), ""] : [""]
     const why = (text: string) => [name, text].filter(Boolean).join(": ")
-    const compose = (text: string, opinion: string) =>
-      [[why(text), opinion].filter(Boolean).join(" — "), call].filter(Boolean).join(GUARD_SEPARATOR)
-    const whole = opinions.flatMap((opinion) => reasons.map((text) => compose(text, opinion)))
+    const compose = (text: string, opinion: string, shown: string) =>
+      [[why(text), opinion].filter(Boolean).join(" — "), shown].filter(Boolean).join(GUARD_SEPARATOR)
+    const whole = [
+      ...opinions.flatMap((opinion) => reasons.map((text) => compose(text, opinion, call))),
+      ...(named ? opinions.map((opinion) => compose(reasons[0]!, opinion, tool)) : []),
+    ]
     let detail = whole.find((candidate) => length(candidate) <= MAX_ACTION_DETAIL)
     if (detail === undefined) {
-      // Nothing fits whole: the shortest reason, then the tool call, each cut at a word, the call kept to some length.
-      const kept = fit(why(reasons.at(-1)!), MAX_ACTION_DETAIL - (call ? length(GUARD_SEPARATOR) + Math.min(length(call), MIN_ACTION_CALL) : 0))
-      const room = MAX_ACTION_DETAIL - length(kept) - length(GUARD_SEPARATOR)
-      detail = [kept, call && room > 0 ? fit(call, room) : ""].filter(Boolean).join(GUARD_SEPARATOR)
+      // Nothing fits whole: the tool call first (what is approved), then the shortest reason, each cut at a word.
+      const text = why(reasons.at(-1)!)
+      const reserved = Math.min(length(text), (name ? length(name) + 2 : 0) + MIN_ACTION_REASON)
+      const shown = call ? fit(call, Math.max(MAX_ACTION_DETAIL - length(GUARD_SEPARATOR) - reserved, Math.min(length(call), MIN_ACTION_CALL))) : ""
+      detail = [fit(text, MAX_ACTION_DETAIL - (shown ? length(GUARD_SEPARATOR) + length(shown) : 0)), shown].filter(Boolean).join(GUARD_SEPARATOR)
     }
     return detail ? `${GUARD_ACTION}${GUARD_SEPARATOR}${detail}` : GUARD_ACTION
   } catch {
