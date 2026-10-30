@@ -118,7 +118,7 @@ The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lis
 
 ## Logs
 
-The start line states the model, the confirmation mode and whether the system configuration enforces the plugin. Every confirmation and refusal is logged with its source (`local`, `model`, `cache`…), its rule, its full reason and the duration of the model call, for example `shell → ask (local, rule git-reset-hard): …`; with `debug: true`, allowed actions too. A confirmation prompt shows the same rule and reason in its title, cut at 160 characters.
+The start line states the model, the confirmation mode and whether the system configuration enforces the plugin. Every confirmation and refusal is logged with its source (`local`, `model`, `cache`…), its rule, its full reason and the duration of the model call, for example `shell → ask (local, rule git-reset-hard): …`; with `debug: true`, allowed actions too. A confirmation prompt shows the rule, the reason, the decision model's opinion and the tool call's summary (`guard · <rule>: <reason> — <opinion> · <tool call>`), as much of them as fits in 120 characters; the full reason is in the log.
 
 ```sh
 tail -f ~/.local/share/opencode/log/guard.log

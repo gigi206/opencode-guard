@@ -221,6 +221,8 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
         resource = `${summarize(event.tool, deps.redactor.redactDeep(event.input).value)} (output check)`
       } catch {}
       const reason = `the output of ${event.tool} may contain a secret in clear (${deps.label} ${p.toFixed(2)}): approve to pass it to the agent, reject to withhold it`
+      // The prompt's action, at most 120 characters: the choice first, so that a long tool name never hides it.
+      const prompt = `approve to pass on, reject to withhold: ${event.tool} output may hold a secret (${deps.label} ${p.toFixed(2)})`
       let why: string | undefined
       let feedback: string | undefined
       if (deps.askAs === "deny") why = "unattended mode (askAs: deny) withholds it"
@@ -229,7 +231,7 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
           await ctx.permission.assert({
             sessionID: event.sessionID,
             agent: event.agent,
-            action: guardAction(deps.redactor, reason),
+            action: guardAction(deps.redactor, prompt),
             resources: [resource],
             metadata: { guard: true, tool: event.tool, reason },
             source: { type: "tool", messageID: event.messageID, id: event.id },

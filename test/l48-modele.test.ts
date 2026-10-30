@@ -127,6 +127,12 @@ describe("lot 48 step B2: options and precedence", () => {
     const allowed = await decideShell(options, "sudo ls", ALLOW)
     assert.deepEqual([allowed.verdict, allowed.rule, allowed.source], ["allow", "privilege", "model"])
     assert.match(allowed.reason, /^privilege escalation, left to the decision model by localAsks, decided by m: /)
+    // Its parts, for the prompt's action: why the model decides, its full verdict, its verdict alone.
+    const asked = await decideShell(options, "sudo ls", ASK)
+    assert.equal(asked.parts?.local, "privilege escalation, left to the decision model by localAsks")
+    assert.match(String(asked.parts?.opinion), /^decided by m: ask \(/)
+    assert.equal(asked.parts?.verdict, "decided by m: ask")
+    assert.equal(asked.reason, "privilege escalation, left to the decision model by localAsks, decided by m: risk 2.00/3")
     assert.deepEqual([(await decideShell(options, "sudo ls", ASK)).verdict, (await decideShell(options, "sudo ls", DENY)).verdict], ["ask", "deny"])
     // Unreachable model, truncated input, model disabled: the ask remains.
     const down = await decideShell(options, "sudo ls", DOWN)

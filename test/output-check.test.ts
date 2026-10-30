@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import { DEFAULT_OUTPUT_CHECK, parseConfig } from "../src/config.ts"
+import { MAX_ACTION_DETAIL } from "../src/hooks/gate.ts"
 import { registerOutputCheck, withhold, withheldNotice } from "../src/hooks/output-check.ts"
 import { setupGuard } from "../src/index.ts"
 import { ModelError, type ModelRequest, type ModelResponse } from "../src/model/client.ts"
@@ -156,15 +157,21 @@ describe("batch 32: output check (fake model)", () => {
     assert.equal(fake.asserts.length, 0)
     assert.deepEqual(event.result.output, { value: "page title" })
   })
-  it("flagged, confirmation granted → output passed through; a single guard request with the reason", async () => {
+  it("flagged, confirmation granted → output passed through; a single guard request with the reason, the full reason in metadata", async () => {
     const { fake } = await setup(() => noul(0.9))
     const event = done("webfetch", { output: "db password is hunter-two-x", content: [{ type: "text", text: "db password is hunter-two-x" }] })
     await fake.trigger("tool.execute.after", event)
     assert.equal(fake.asserts.length, 1)
-    assert.equal(fake.asserts[0]!.action, "guard · the output of webfetch may contain a secret in clear (nox-4b 0.90): approve to pass it to the agent, reject to withhold it")
+    assert.equal(fake.asserts[0]!.action, "guard · approve to pass on, reject to withhold: webfetch output may hold a secret (nox-4b 0.90)")
     assert.match(String(fake.asserts[0]!.metadata?.reason), /output of webfetch may contain a secret in clear \(nox-4b 0\.90\)/)
     assert.deepEqual(fake.asserts[0]!.source, { type: "tool", messageID: "msg_1", id: "call_1" })
     assert.equal(event.result.output, "db password is hunter-two-x")
+    // A long MCP tool name: the choice stays whole at the start of the action, within MAX_ACTION_DETAIL.
+    const mcp = await setup(() => noul(0.9))
+    await mcp.fake.trigger("tool.execute.after", done("chrome-devtools-mcp_take_snapshot", { output: "db password is hunter-two-x" }))
+    const action = mcp.fake.asserts[0]!.action
+    assert.equal(action, "guard · approve to pass on, reject to withhold: chrome-devtools-mcp_take_snapshot output may hold a secret (nox-4b 0.90)")
+    assert.ok([...action.slice("guard · ".length)].length <= MAX_ACTION_DETAIL, action)
   })
   it("rejection → notice in place of the output, strings replaced, numbers kept, the step continues", async () => {
     const { fake } = await setup(() => noul(0.95))

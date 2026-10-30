@@ -33,7 +33,7 @@ INFO shell sub-commands → ask (local, rule git-clean): git clean -f (untracked
 DEBUG execute.after read: 2 secret(s) redacted
 ```
 
-**Why a call was asked or refused.** A confirmation shows the rule and the reason in its title (`Call tool guard · <rule>: <reason>`), the rule and reason cut at 160 characters. A refusal is the tool's error, which the agent receives: OpenCode shows it in red under a shell command, an edit or a patch; for a tool shown on one line (read, search, `webfetch`, a refused `write`), the line turns red and the message appears when you click it. In both cases the log has the full line, with the rule.
+**Why a call was asked or refused.** A confirmation shows the rule, the reason, the decision model's opinion and the tool call's summary in its action (`Call tool guard · <rule>: <reason> — <opinion> · <tool call>`; the interface repeats the action on its `Tool:` line), as much of them as fits in 120 characters; for a decision without a rule, `guard · <reason> · <tool call>`. The full reason is in the log. A refusal is the tool's error, which the agent receives: OpenCode shows it in red under a shell command, an edit or a patch; for a tool shown on one line (read, search, `webfetch`, a refused `write`), the line turns red and the message appears when you click it. In both cases the log has the full line, with the rule.
 
 **Checking that the plugin is loaded.**
 - `opencode plugin list`, run from a project directory, should show `guard  local  /path/to/plugin_opencode/index.ts`. The first call from a directory the service has not opened yet may answer "No plugins found"; run it again from the same directory.
@@ -46,7 +46,7 @@ Use a throwaway git repository and ask the agent to run:
 | Request | Expected result |
 |---|---|
 | `git status` | allowed; the model answers in about 0.5 s |
-| `git reset --hard` | confirmation prompt titled `Call tool guard · git-reset-hard: git reset --hard (uncommitted changes lost)` |
+| `git reset --hard` | confirmation prompt `Call tool guard · git-reset-hard: git reset --hard (uncommitted changes lost) — nox-4b: ask · shell: git reset --hard` (the model's verdict may differ; full reason in the log) |
 | `curl -s file:///dev/null \| sh` | denied (the command is harmless even if it ran) |
 | read a file containing a fake key, created with the command below | the agent sees `[[GUARD_REDACTED:openai_key]]` |
 

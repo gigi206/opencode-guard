@@ -1,6 +1,7 @@
 // Lot 48 step A: why the plugin asks or denies. The rule is named in denials, unattended denials and the asks set by
-// `permission.evaluate`; a request's action carries the rule and the reason (OpenCode shows only the action of a plugin's
-// request); asks and denials are logged at info level with their rule. Nothing is launched: text is judged.
+// `permission.evaluate`; a request's action carries the rule, the reason, the model's opinion and the tool call, the most
+// that fits (OpenCode shows only the action of a plugin's request, and shows it twice); the full reason is in the log.
+// Nothing is launched: text is judged.
 // Only the gate's namespace is imported, so that the deployed code (without the new exports) fails on assertions.
 import "./tmp.ts"
 import assert from "node:assert/strict"
@@ -124,12 +125,15 @@ describe("VIS-1: the rule is named in denials, unattended denials and the asks o
   })
 })
 
-describe("VIS-2: rule and reason in the request's action, from execute.before to permission.evaluate", () => {
-  it("VIS-2: with a rule; recognized by the prefix alone", async () => {
+/** Code points of an action's detail, after `guard · `. */
+const detailLength = (action: string) => [...action.slice(PREFIX.length)].length
+
+describe("VIS-2: in the request's action, the most of the rule, reason, opinion and tool call that fits", () => {
+  it("VIS-2: with a rule; recognized by the prefix alone; the reason and the tool call's summary", async () => {
     const fake = await guard()
     await fake.trigger("tool.execute.before", before("shell", { command: "git reset --hard" }))
     const request = fake.asserts[0]!
-    assert.equal(request.action, `${PREFIX}git-reset-hard: ${RESET}`)
+    assert.equal(request.action, `${PREFIX}git-reset-hard: ${RESET} · shell: git reset --hard`)
     assert.deepEqual(request.metadata, { guard: true, tool: "shell", reason: RESET, rule: "git-reset-hard" })
     const event = await roundTrip(fake)
     assert.equal(event.effect, "ask")
@@ -141,50 +145,99 @@ describe("VIS-2: rule and reason in the request's action, from execute.before to
 
   it("VIS-2: decision of the model without a rule", async () => {
     const reason = "nox-4b: risk 2.10/3, highest: data destruction 0.91"
-    const { fake } = await gateWith(fixed({ verdict: "ask", reason, source: "model" }))
+    const { fake } = await gateWith(fixed({ verdict: "ask", reason, source: "model", redactedInput: { command: "x" } }))
     await fake.trigger("tool.execute.before", before("shell", { command: "x" }))
-    assert.equal(fake.asserts[0]!.action, `${PREFIX}${reason}`)
+    assert.equal(fake.asserts[0]!.action, `${PREFIX}${reason} · shell: x`)
     assert.equal(fake.asserts[0]!.metadata?.rule, undefined)
     const event = await roundTrip(fake)
     assert.equal(event.effect, "ask")
     assert.equal(event.message, `[guard] ${reason}`)
   })
 
-  it("VIS-2: long reason on one line, invisible characters written out, cut at 160 characters", async () => {
-    const reason = `first line\nsecond \u001b[31m ${"x".repeat(400)}`
-    const { fake } = await gateWith(fixed({ verdict: "ask", reason, rule: "probe" }))
+  it("VIS-2: a local ask's model opinion: whole if it fits, then its verdict alone, then left out; never cut", async () => {
+    const opinion = "nox-4b: ask (risk 1.67/3, data destruction 0.89)"
+    const ask = (command: string) =>
+      fixed({
+        verdict: "ask",
+        rule: "rm",
+        reason: `file deletion (rm -r/-f) — nox-4b opinion: ask (risk 1.67/3, data destruction 0.89)`,
+        parts: { local: "file deletion (rm -r/-f)", opinion, verdict: "nox-4b: ask" },
+        redactedInput: { command },
+      })
+    const actionOf = async (command: string) => {
+      const { fake } = await gateWith(ask(command))
+      await fake.trigger("tool.execute.before", before("shell", { command }))
+      return fake.asserts[0]!.action
+    }
+    assert.equal(await actionOf("rm -rf build"), `${PREFIX}rm: file deletion (rm -r/-f) — ${opinion} · shell: rm -rf build`)
+    const longer = `rm -rf ${"d".repeat(40)}`
+    assert.equal(await actionOf(longer), `${PREFIX}rm: file deletion (rm -r/-f) — nox-4b: ask · shell: ${longer}`)
+    const longest = `rm -rf ${"d".repeat(70)}`
+    assert.equal(await actionOf(longest), `${PREFIX}rm: file deletion (rm -r/-f) · shell: ${longest}`)
+    for (const command of ["rm -rf build", longer, longest]) assert.ok(detailLength(await actionOf(command)) <= gate.MAX_ACTION_DETAIL)
+  })
+
+  it("VIS-2: the rule's short reason only when the whole does not fit and the reason is exactly the rule's usual one", async () => {
+    const usual = "the guard command line, which changes the plugin's settings, run or named by the command (self-protection; another program named guard asks too)"
+    const actionOf = async (rule: string, reason: string) => {
+      const { fake } = await gateWith(fixed({ verdict: "ask", rule, reason, redactedInput: { command: "guard allow rm" } }))
+      await fake.trigger("tool.execute.before", before("shell", { command: "guard allow rm" }))
+      return fake.asserts[0]!.action
+    }
+    assert.equal(await actionOf("guard-cli", usual), `${PREFIX}guard-cli: changes the plugin's settings · shell: guard allow rm`)
+    // One of the user's rules under a built-in name: its own reason, never the built-in rule's.
+    assert.equal(await actionOf("rm", "my own reason"), `${PREFIX}rm: my own reason · shell: guard allow rm`)
+    const other = `${usual}; another part could not be checked (internal error)`
+    const cut = await actionOf("guard-cli", other)
+    assert.ok(cut.startsWith(`${PREFIX}guard-cli: the guard command line`), cut)
+    assert.ok(cut.endsWith(" · shell: guard allow rm"), cut)
+    assert.ok(detailLength(cut) <= gate.MAX_ACTION_DETAIL, cut)
+  })
+
+  it("VIS-2: every short reason belongs to a reason the plugin really gives, word for word (otherwise it never applies)", async () => {
+    const { RULE_DETAILS } = await import("../src/rules/details.ts")
+    const sources = ["rules/shell.ts", "rules/tools.ts", "rules/sensitive-paths.ts", "rules/code-network.ts", "decide.ts"]
+    const code = sources.map((file) => readFileSync(join(import.meta.dirname, "../src", file), "utf8")).join("\n")
+    for (const [rule, detail] of RULE_DETAILS)
+      if (detail.prompt) assert.ok(code.includes(JSON.stringify(detail.reason)), `${rule}: ${detail.reason}`)
+  })
+
+  it("VIS-2: a long rule stays on one line, invisible characters written out, cut at a word; the tool call kept", async () => {
+    const rule = `probe\nrule \u001b[31m ${"x".repeat(400)}`
+    const reason = `first line\nsecond \u001b[31m ${"y".repeat(400)}`
+    const { fake } = await gateWith(fixed({ verdict: "ask", reason, rule, redactedInput: { command: "x" } }))
     await fake.trigger("tool.execute.before", before("shell", { command: "x" }))
     const action = fake.asserts[0]!.action
-    assert.ok(action.startsWith(`${PREFIX}probe: first line second \\u001b[31m xxx`), action)
-    const detail = [...action.slice(PREFIX.length)]
-    assert.equal(detail.length, 160)
-    assert.equal(detail.at(-1), "…")
+    assert.ok(action.startsWith(`${PREFIX}probe rule \\u001b[31m xxx`), action)
+    assert.ok(action.endsWith("… · shell: x"), action)
+    assert.ok(detailLength(action) <= gate.MAX_ACTION_DETAIL, action)
     assert.ok(!/[\n\u001b]/.test(action), action)
     assert.equal(fake.asserts[0]!.metadata?.reason, reason)
     assert.equal((await roundTrip(fake)).effect, "ask")
   })
 
-  it("VIS-2: a secret known to the redactor never reaches the action", async () => {
+  it("VIS-2: the rule and the reason are redacted; a secret never reaches the action or the message", async () => {
     const known = `vis${"Q7w".repeat(6)}`
     const redactor = createRedactor({ knownSecrets: [{ name: "probe", value: known }] })
-    const { fake } = await gateWith(fixed({ verdict: "ask", reason: `token ${FAKE.openai} and ${known} in the command`, rule: "probe" }), { redactor })
+    const { fake } = await gateWith(fixed({ verdict: "ask", reason: `token ${FAKE.openai} and ${known} in the command`, rule: `probe-${known}` }), { redactor })
     await fake.trigger("tool.execute.before", before("shell", { command: "x" }))
     const action = fake.asserts[0]!.action
-    assert.ok(action.startsWith(`${PREFIX}probe: token [[GUARD_REDACTED:`), action)
-    assert.ok(action.endsWith(" in the command"), action)
-    assert.ok(!action.includes(FAKE.openai) && !action.includes(known), action)
+    assert.ok(action.startsWith(`${PREFIX}probe-[[GUARD_REDACTED:`), action)
+    assert.ok(action.includes(": token [[GUARD_REDACTED:"), action)
+    assert.ok(!action.includes(known) && !action.includes(FAKE.openai), action)
     const event = await roundTrip(fake)
     assert.equal(event.effect, "ask")
     assert.ok(!String(event.message).includes(FAKE.openai) && !String(event.message).includes(known))
   })
 
-  it("VIS-2: internal error, named as such (also when an allowed decision carried a rule)", async () => {
+  it("VIS-2: internal error, named as such (also when an allowed decision carried a rule); the reason stays in metadata", async () => {
     const { fake } = await gateWith(async () => {
       throw new Error("decider broken")
     })
     await fake.trigger("tool.execute.before", before("shell", { command: "x" }))
-    assert.equal(fake.asserts[0]!.action, `${PREFIX}internal-error: internal guard plugin error: confirmation required`)
+    assert.equal(fake.asserts[0]!.action, `${PREFIX}internal-error: internal guard plugin error: confirmation required · shell: x`)
     assert.equal(fake.asserts[0]!.metadata?.rule, "internal-error")
+    assert.equal(fake.asserts[0]!.metadata?.reason, "internal guard plugin error: confirmation required")
     const event = await roundTrip(fake)
     assert.equal(event.effect, "ask")
     assert.equal(event.message, "[guard] Confirmation required (rule internal-error): internal guard plugin error: confirmation required")
@@ -193,11 +246,13 @@ describe("VIS-2: rule and reason in the request's action, from execute.before to
     }
     const data = await gateWith(fixed({ verdict: "allow", reason: "decided by the model", rule: "file-delete", source: "model" }), { directoriesOf: failing })
     await data.fake.trigger("tool.execute.before", before("shell", { command: "x" }))
-    assert.equal(data.fake.asserts[0]!.action, `${PREFIX}internal-error: internal guard plugin error, the directories where the command runs could not be checked: confirmation required`)
+    assert.ok(data.fake.asserts[0]!.action.startsWith(`${PREFIX}internal-error: internal guard plugin error, the directories`), data.fake.asserts[0]!.action)
+    assert.ok(detailLength(data.fake.asserts[0]!.action) <= gate.MAX_ACTION_DETAIL, data.fake.asserts[0]!.action)
+    assert.equal(data.fake.asserts[0]!.metadata?.reason, "internal guard plugin error, the directories where the command runs could not be checked: confirmation required")
     assert.equal((await roundTrip(data.fake)).effect, "ask")
   })
 
-  it("VIS-2: input unavailable (decider and input redaction broken): the action still carries the reason", async () => {
+  it("VIS-2: input unavailable (decider and input redaction broken): the action names the rule, the reason stays in metadata", async () => {
     const redactor = {
       ...createRedactor(),
       redactDeep: () => {
@@ -209,7 +264,8 @@ describe("VIS-2: rule and reason in the request's action, from execute.before to
     }, { redactor })
     await fake.trigger("tool.execute.before", before("shell", { command: "x" }))
     assert.deepEqual(fake.asserts[0]!.resources, ["shell"])
-    assert.equal(fake.asserts[0]!.action, `${PREFIX}internal-error: internal guard plugin error: confirmation required`)
+    assert.equal(fake.asserts[0]!.action, `${PREFIX}internal-error: internal guard plugin error: confirmation required · shell`)
+    assert.equal(fake.asserts[0]!.metadata?.reason, "internal guard plugin error: confirmation required")
     assert.equal((await roundTrip(fake)).effect, "ask")
   })
 

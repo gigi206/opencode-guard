@@ -42,7 +42,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
     "nested-opencode",
     detail(
       "Recognizes a command that starts another OpenCode agent or server, or that changes its configuration or the environment it reads. It also asks when the program a command runs cannot be determined (a command word built at run time, too long or too complex to read), because the plugin cannot rule out another OpenCode.",
-      "launches another OpenCode agent or server, or changes its configuration: it may run without the guard or approve its confirmations",
+      "launches another OpenCode agent or server, or changes its configuration: it may run without the guard or approve its confirmations (--auto)",
       "another OpenCode or a configuration change",
     ),
   ],
@@ -154,7 +154,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
     "permissions-critical",
     detail(
       "A recursive permission change on the root, the home directory or a system directory. It refuses because the change can make the system or the user's files unusable.",
-      "recursive permission change on /, HOME or a system directory",
+      "recursive permission change on / , HOME or a system directory",
       "recursive permission change on / or HOME",
     ),
   ],
@@ -232,7 +232,6 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
     detail(
       "A forced process kill or the USR1 signal. USR1 makes an OpenCode server write a copy of its memory, which can contain credentials.",
       "forced process kill, or signal USR1 sent to a process (an OpenCode server then writes a copy of its memory to a file)",
-      "forced process kill",
     ),
   ],
   ["power", detail("Shutdown, reboot or stopping system services; it asks because the machine or a service becomes unavailable.", "shutdown / reboot / system services")],
@@ -307,7 +306,6 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
     detail(
       "A script written by the agent whose content can no longer be checked (for example, it was modified outside the plugin); the rule asks before the script runs.",
       "the script was created by the agent but can no longer be checked",
-      "the script can no longer be checked",
     ),
   ],
 ])

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import * as zlib from "node:zlib"
 import plugin, { setupGuard } from "../src/index.ts"
-import { GUARD_ACTION, GUARD_SEPARATOR } from "../src/hooks/gate.ts"
+import { GUARD_ACTION, GUARD_SEPARATOR, MAX_ACTION_DETAIL } from "../src/hooks/gate.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -51,12 +51,14 @@ describe("guard: execute.before", () => {
     assert.equal(asserts.length, 0)
   })
 
-  it("ask → permission.assert with reason and redacted summary", async () => {
+  it("ask → permission.assert with the rule, the reason and the redacted call in the action, full reason in metadata", async () => {
     const { trigger, asserts } = await setup()
     await trigger("tool.execute.before", before("shell", { command: `git reset --hard && echo ${FAKE.openai}` }))
     assert.equal(asserts.length, 1)
     const input = asserts[0]!
-    assert.equal(input.action, `${GUARD_ACTION}${GUARD_SEPARATOR}git-reset-hard: git reset --hard (uncommitted changes lost)`)
+    assert.ok(input.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}git-reset-hard: git reset --hard (uncommitted changes lost) · shell: git reset --hard`), input.action)
+    assert.ok([...input.action.slice(`${GUARD_ACTION}${GUARD_SEPARATOR}`.length)].length <= MAX_ACTION_DETAIL, input.action)
+    assert.ok(!input.action.includes(FAKE.openai), input.action)
     assert.equal(input.sessionID, "ses_1")
     assert.deepEqual(input.source, { type: "tool", messageID: "msg_1", id: "call_1" })
     assert.match(String(input.metadata?.reason), /git reset --hard/)
@@ -565,6 +567,8 @@ describe("model opinion in the confirmation message", () => {
     await fake.trigger("tool.execute.before", before("shell", { command: "rm -rf node_modules" }))
     const reason = String(fake.asserts[0]?.metadata?.reason)
     assert.equal(reason, "file deletion (rm -r/-f) — nox-4b opinion: ask (risk 1.67/3, data destruction 0.89)")
+    // The prompt's action, through the real decider: the opinion as it fits, then the call.
+    assert.equal(fake.asserts[0]!.action, `${GUARD_ACTION}${GUARD_SEPARATOR}rm: file deletion (rm -r/-f) — nox-4b: ask (risk 1.67/3, data destruction 0.89) · shell: rm -rf node_modules`)
     const event = await fake.trigger("permission.evaluate", { sessionID: "s", action: "guard", resources: ["x"], metadata: { reason }, effect: "allow" as const, message: undefined as string | undefined })
     assert.equal(event.message, `[guard] ${reason}`)
   })
@@ -1364,7 +1368,7 @@ describe("lot 28: MCP tool with a credential path", () => {
     const input = { pageId: 1, uid: "e1", filePaths: ["~/.ssh/id_ed25519_guard_test"] }
     await trigger("tool.execute.before", before("chrome-devtools-mcp_upload_file", input))
     assert.equal(asserts.length, 1)
-    assert.ok(asserts[0]!.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}secret-file-read: access to a credential file`), asserts[0]!.action)
+    assert.ok(asserts[0]!.action.startsWith(`${GUARD_ACTION}${GUARD_SEPARATOR}secret-file-read: access to a credential file (`), asserts[0]!.action)
     assert.match(String(asserts[0]!.metadata?.reason), /credential file/)
     const own = await trigger("permission.evaluate", {
       sessionID: "ses_1",

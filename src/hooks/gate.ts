@@ -1,4 +1,4 @@
-import { UNAVAILABLE_INPUT, type Decider, type Decision, type ExecutedScript } from "../decide.ts"
+import { UNAVAILABLE_INPUT, type Decider, type Decision, type ExecutedScript, type ReasonParts } from "../decide.ts"
 import { afterLeadingCd, changesDirectory, heredocFiles, scriptRuns, shellFinding } from "../rules/shell.ts"
 import { createCredentialContent } from "../credential-content.ts"
 import { createRealPath } from "../real-path.ts"
@@ -8,6 +8,7 @@ import { createScriptTracker, isShellScript, resolveLike, shellDirectories, type
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { Scope } from "../config.ts"
 import type { ScopeResolver } from "../scopes.ts"
+import { RULE_DETAILS } from "../rules/details.ts"
 import { bySetting, type ActiveRules } from "../rules/features.ts"
 import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule } from "../rules/types.ts"
 import type { Redactor } from "../secrets/redact.ts"
@@ -16,12 +17,16 @@ import type { GuardContext, Logger, PermissionEvaluation } from "../types.ts"
 /** Plugin-specific permission action ("ask" requests via `ctx.permission.assert`). */
 export const GUARD_ACTION = "guard"
 /**
- * Between `GUARD_ACTION` and the rule and reason in a request's action: OpenCode's interface shows only the action of a
- * plugin's request, neither `message` nor `metadata` (packages/tui/src/util/permission.ts, v2.2.0).
+ * Between `GUARD_ACTION` and the detail of a request's action: OpenCode's interface shows only the action of a plugin's
+ * request, neither `message`, `metadata` nor `resources`, and shows it twice, as `Call tool <action>` then
+ * `Tool: <action>` (packages/tui/src/util/permission.ts, v2.2.4). The detail therefore stays compact, the full reason
+ * left to the log.
  */
 export const GUARD_SEPARATOR = " · "
-/** Length of the rule and reason in the action, cut mark included. */
-export const MAX_ACTION_DETAIL = 160
+/** Length of the detail after `GUARD_ACTION` and the separator (rule, reason, model opinion, tool call), cut mark included. */
+export const MAX_ACTION_DETAIL = 120
+/** Length kept for the tool call when even the shortest reason does not fit with it. */
+const MIN_ACTION_CALL = 40
 
 export interface GateDeps {
   readonly decider: Decider
@@ -91,16 +96,46 @@ export function askMessage(reason: string, rule?: string): string {
   return rule ? `[guard] Confirmation required${ruleNote(rule)}: ${reason}` : `[guard] ${reason}`
 }
 
+/** `value` cut to `limit` code points, at a word boundary when possible, with `…`; a cut never leaves half a character. */
+function fit(value: string, limit: number): string {
+  const chars = [...value]
+  if (chars.length <= limit) return value
+  if (limit <= 1) return "…"
+  const slice = chars.slice(0, limit - 1).join("")
+  const space = slice.lastIndexOf(" ")
+  const kept = space > Math.floor(limit * 0.6) ? slice.slice(0, space) : slice
+  return `${kept.trimEnd()}…`
+}
+
 /**
- * Action of a request: `GUARD_ACTION`, the separator, then the rule and the reason, redacted, on one line (invisible
- * characters written out) and cut. The prefix is never redacted; an error gives `GUARD_ACTION` alone (still asked).
+ * Action of a request: `GUARD_ACTION`, the separator, then `<rule>: <reason> — <model opinion> · <tool call>`, redacted,
+ * on one line (invisible characters written out), the detail at most `MAX_ACTION_DETAIL` code points. OpenCode shows
+ * the action twice, so the detail keeps the most that fits whole: the full opinion, then the model's verdict alone,
+ * then no opinion, each first with the finding's reason, then with the rule's short reason (only when the reason is
+ * exactly the rule's usual one, never another rule under the same name); last, the reason and the tool call cut at a
+ * word. The full reason is in the log. An error gives `GUARD_ACTION` alone (still asked).
  */
-export function guardAction(redactor: Redactor, reason: string, rule?: string): string {
+export function guardAction(redactor: Redactor, reason: string, rule?: string, resource?: string, parts?: ReasonParts): string {
   try {
-    const redacted = redactor.redactString(rule ? `${rule}: ${reason}` : reason).value
-    // By code point: a cut never leaves half a character.
-    const line = [...visible(redacted.replace(/\s+/g, " ").trim())]
-    const detail = line.length > MAX_ACTION_DETAIL ? `${line.slice(0, MAX_ACTION_DETAIL - 1).join("")}…` : line.join("")
+    const clean = (value: string) => visible(redactor.redactString(value).value.replace(/\s+/g, " ").trim())
+    const length = (value: string) => [...value].length
+    const name = rule ? clean(rule) : ""
+    const own = parts?.local ?? reason
+    const usual = rule ? RULE_DETAILS.get(rule) : undefined
+    const reasons = [clean(own), ...(usual?.prompt && own === usual.reason ? [clean(usual.prompt)] : [])]
+    const opinions = parts ? [clean(parts.opinion), clean(parts.verdict), ""] : [""]
+    const call = resource ? clean(resource) : ""
+    const why = (text: string) => [name, text].filter(Boolean).join(": ")
+    const compose = (text: string, opinion: string) =>
+      [[why(text), opinion].filter(Boolean).join(" — "), call].filter(Boolean).join(GUARD_SEPARATOR)
+    const whole = opinions.flatMap((opinion) => reasons.map((text) => compose(text, opinion)))
+    let detail = whole.find((candidate) => length(candidate) <= MAX_ACTION_DETAIL)
+    if (detail === undefined) {
+      // Nothing fits whole: the shortest reason, then the tool call, each cut at a word, the call kept to some length.
+      const kept = fit(why(reasons.at(-1)!), MAX_ACTION_DETAIL - (call ? length(GUARD_SEPARATOR) + Math.min(length(call), MIN_ACTION_CALL) : 0))
+      const room = MAX_ACTION_DETAIL - length(kept) - length(GUARD_SEPARATOR)
+      detail = [kept, call && room > 0 ? fit(call, room) : ""].filter(Boolean).join(GUARD_SEPARATOR)
+    }
     return detail ? `${GUARD_ACTION}${GUARD_SEPARATOR}${detail}` : GUARD_ACTION
   } catch {
     return GUARD_ACTION
@@ -496,7 +531,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       await ctx.permission.assert({
         sessionID: event.sessionID,
         agent: event.agent,
-        action: guardAction(deps.redactor, decision.reason, decision.rule),
+        action: guardAction(deps.redactor, decision.reason, decision.rule, resource, decision.parts),
         resources: [resource],
         metadata: { guard: true, tool: event.tool, reason: decision.reason, ...(decision.rule ? { rule: decision.rule } : {}) },
         source: { type: "tool", messageID: event.messageID, id: event.id },

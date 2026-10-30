@@ -64,6 +64,18 @@ export interface Decision {
    * allowed and judged in full, it exempts the shell sub-commands' asks left to the model in the same way (`gate.ts`).
    */
   readonly bySetting?: boolean
+  /**
+   * A local ask's reason in two parts, for the confirmation prompt's action (`guardAction`), which keeps as much as fits:
+   * the local rule's reason and the decision model's opinion or verdict (in full, then the verdict alone), already joined
+   * in `reason`.
+   */
+  readonly parts?: ReasonParts
+}
+
+export interface ReasonParts {
+  readonly local: string
+  readonly opinion: string
+  readonly verdict: string
 }
 
 export interface DeciderDeps {
@@ -251,11 +263,11 @@ export function createDecider(deps: DeciderDeps) {
   const timing = (consultation?: Consultation) =>
     consultation?.modelMs === undefined ? {} : { modelMs: consultation.modelMs, attempts: consultation.attempts ?? 1 }
 
+  const detailOf = (reason: string) => (reason.startsWith(`${label}: `) ? reason.slice(label.length + 2) : reason)
   /** "nox-4b opinion: deny (risk 2.36/3, data destruction 0.96)". */
-  const opinion = (judgement: { verdict: Verdict; reason: string }) => {
-    const detail = judgement.reason.startsWith(`${label}: `) ? judgement.reason.slice(label.length + 2) : judgement.reason
-    return `${label} opinion: ${judgement.verdict} (${detail})`
-  }
+  const opinion = (judgement: { verdict: Verdict; reason: string }) => `${label} opinion: ${judgement.verdict} (${detailOf(judgement.reason)})`
+  /** "nox-4b: deny (risk 2.36/3, data destruction 0.96)", for the prompt's action. */
+  const shortOpinion = (judgement: { verdict: Verdict; reason: string }) => `${label}: ${judgement.verdict} (${detailOf(judgement.reason)})`
 
   /** Log of an internal error; a logger that throws does not change the decision. */
   function report(message: string, error: unknown): void {
@@ -354,14 +366,16 @@ export function createDecider(deps: DeciderDeps) {
         (grants || consultation.judgement.verdict === "deny")
       ) {
         const { verdict, reason } = consultation.judgement
+        const why = `${local.reason}, ${local.dataOnly ? "only inside heredoc data" : local.modelDecides}`
         return {
           verdict,
-          reason: `${local.reason}, ${local.dataOnly ? "only inside heredoc data" : local.modelDecides}, decided by ${reason}`,
+          reason: `${why}, decided by ${reason}`,
           rule: local.rule,
           source: consultation.source,
           redactedInput,
           judgedInFull: consultation.inFull,
           ...(bySetting(local) ? { bySetting: true } : {}),
+          parts: { local: why, opinion: `decided by ${shortOpinion(consultation.judgement)}`, verdict: `decided by ${label}: ${verdict}` },
           ...timing(consultation),
         }
       }
@@ -381,6 +395,7 @@ export function createDecider(deps: DeciderDeps) {
           source: "local",
           redactedInput,
           judgedInFull: consultation.inFull,
+          parts: { local: local.reason, opinion: shortOpinion(consultation.judgement), verdict: `${label}: ${consultation.judgement.verdict}` },
           ...timing(consultation),
         }
       if (local.modelDecides !== undefined && consultation && "error" in consultation)
