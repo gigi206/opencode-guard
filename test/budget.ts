@@ -3,8 +3,8 @@
 // the machine is right now (a fixed reference workload, its median of three runs against its time on an unloaded
 // machine). A cost that grows with the input stays over even the scaled budget.
 
-/** Median time of the reference workload on an unloaded machine (measured on the development machine, 2026-10-31). */
-export const REFERENCE_MS = 20
+/** Median time of the reference workload on an unloaded machine (measured under Node and Bun on the development machine: 7 to 8 ms). */
+export const REFERENCE_MS = 8
 
 let sink = 0
 function reference(): number {
