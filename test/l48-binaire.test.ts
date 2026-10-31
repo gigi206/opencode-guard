@@ -551,7 +551,7 @@ describe("lot 48 step D: guard-cli, the command line asks", () => {
 describe("lot 48 step D: documentation", () => {
   it("BIN-14: configuration.md describes the command line, README points to it, rules.md lists guard-cli", () => {
     const configuration = readFileSync(join(PLUGIN_DIR, "docs", "configuration.md"), "utf8")
-    for (const text of ["## The `guard` command", "`guard allow <rule>`", "`--agent <name>`", "`--project [<dir>]`", "`guard trust [<dir>\\|--all]`", "`guard show [--agent <name>]`", "`guard last [<count>]`", "No confirmation in the terminal", "next prompt", "never left to the decision model"])
+    for (const text of ["## The `guard` command", "`guard rules off <rule>`", "`--agent`", "`--project [<dir>]`", "`guard trust [<dir>\\|--all]`", "`guard show [--agent <name>]`", "`guard last [<count>]`", "No confirmation in the terminal", "next prompt", "never left to the decision model"])
       assert.ok(configuration.includes(text), text)
     assert.ok(readFileSync(join(PLUGIN_DIR, "README.md"), "utf8").includes("docs/configuration.md#the-guard-command"))
     const rules = readFileSync(join(PLUGIN_DIR, "docs", "rules.md"), "utf8")

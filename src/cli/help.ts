@@ -1,0 +1,91 @@
+// `guard help`: the commands, in two groups (what they read, what they write in the global guard.json). The same
+// entries give the plain text (`USAGE`, printed as is when the output is not a terminal, and after a usage error) and
+// the terminal layout (a banner, the groups as headings, the commands in color, descriptions wrapped to the width).
+import type { Pretty } from "./context.ts"
+import { DEFAULT_LAST, MAX_LAST } from "./last.ts"
+import { rowLines, title } from "./pretty.ts"
+import type { Segment } from "./style.ts"
+
+interface Entry {
+  /** Command and arguments; an option of the entry above starts with `--`. */
+  readonly usage: string
+  readonly text: string
+}
+
+const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; readonly entries: readonly Entry[] }> = [
+  {
+    name: "Read",
+    detail: "nothing is written",
+    entries: [
+      { usage: "rules [--builtins|--custom]", text: "built-in rules (identifier, group, own verdict, what they check), then yours" },
+      { usage: "rules --explain <rule>", text: "one built-in rule: what it checks, how it decides, its typical reason and settings" },
+      { usage: "redaction [--builtins|--custom]", text: "redaction formats (built-in ones and their state, OpenCode's), then your patterns" },
+      { usage: "redaction --explain <format>", text: "one format: what it catches, its patterns, how to turn it off" },
+      { usage: "show [--agent <name>]", text: "policy settings in force for the current directory, and where they come from" },
+      { usage: "last [<count>]", text: `latest asks and denials of the plugin's log (default ${DEFAULT_LAST}, at most ${MAX_LAST})` },
+    ],
+  },
+  {
+    name: "Change",
+    detail: "in the global guard.json only",
+    entries: [
+      { usage: "rules off|ask|deny|model <rule>", text: 'set a built-in rule ("off" turns it off, "model" leaves its asks to the decision model)' },
+      { usage: "rules on <rule>", text: "remove the rule's setting there: it applies with its own verdict again" },
+      { usage: "  --agent <name>", text: "in the section of this agent (main agent, or subagent)" },
+      { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
+      { usage: "redaction off|on <format>", text: "turn a built-in redaction format off, or back on (top level only)" },
+      { usage: "trust [<dir>|--all]", text: "add a project to trustedProjects (default: the git repository of the current directory)" },
+      { usage: "untrust [<dir>|--all]", text: "remove it" },
+    ],
+  },
+]
+
+const NOTES = [
+  'Also accepted: guard allow|off|ask|deny|model <rule> and guard reset <rule>, like guard rules off|ask|deny|model|on ("allow" is "off").',
+  "Only the global guard.json is written (OpenCode's global configuration directory, from this terminal's environment).",
+  "The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.",
+]
+
+const COLUMN = Math.max(...GROUPS.flatMap((group) => group.entries.map((entry) => entry.usage.length))) + 4
+
+export const USAGE = [
+  "Usage: guard <command> [arguments]",
+  ...GROUPS.flatMap((group) => ["", `${group.name} (${group.detail}):`, ...group.entries.map((entry) => `  ${entry.usage.padEnd(COLUMN - 2)}${entry.text}`)]),
+  "  help".padEnd(COLUMN) + "this help",
+  "",
+  ...NOTES,
+].join("\n")
+
+/** Words of a usage, colored: the command, its options, the placeholders. */
+function usageSegments(usage: string): Segment[] {
+  return usage.split(/(\s+)/).map((word, index): Segment => {
+    if (/^\s+$/.test(word) || !word) return [word]
+    if (word.startsWith("--") || word.startsWith("[--")) return [word, "ask"]
+    if (/^\[?<[^>]+>\]?$/.test(word) || /^\[<[^>]+>\|--\w+\]$/.test(word)) return [word, "dim"]
+    return index === 0 ? [word, "rule"] : [word, "good"]
+  })
+}
+
+/** One row: the usage indented (an option further), then the description from one column for every row. */
+function row(pretty: Pretty, usage: string, text: string): void {
+  const option = usage.startsWith("  ")
+  const indent = option ? 6 : 4
+  const words = usageSegments(usage.trim()).map(([word, style]): Segment => [word, option && style ? "ask" : style])
+  const column = COLUMN + 2
+  const cells: Segment[] = [[" ".repeat(indent)], ...words, [" ".repeat(Math.max(2, column - indent - usage.trim().length))]]
+  for (const line of rowLines(pretty, cells, column, text)) pretty.line(line)
+}
+
+/** `guard help` in a terminal. */
+export function prettyHelp(pretty: Pretty): void {
+  title(pretty, "guard", "the guard plugin's command line: guard <command> [arguments]", "builtins")
+  for (const group of GROUPS) {
+    pretty.line([])
+    pretty.line([["  "], [group.name, "group"], [`  ${group.detail}`, "dim"]])
+    for (const entry of group.entries) row(pretty, entry.usage, entry.text)
+  }
+  pretty.line([])
+  row(pretty, "help", "this help")
+  pretty.line([])
+  for (const note of NOTES) for (const line of rowLines(pretty, [["  "]], 2, note, "dim")) pretty.line(line)
+}

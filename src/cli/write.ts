@@ -9,6 +9,7 @@ import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, openSync, renam
 import { dirname, join, resolve } from "node:path"
 import { parseConfig, REDACTION_OFF, type GuardFile, type Version } from "../config.ts"
 import { GUARD_FILE, guardIdentity, MAX_GUARD_FILE_BYTES, readGuardFiles } from "../guard-file.ts"
+import { RULE_FEATURES } from "../rules/features.ts"
 import { CliError, projectDirectory, readSources, realOrUndefined, resolution, type CliIo, type Sources } from "./context.ts"
 
 type Json = Record<string, unknown>
@@ -135,8 +136,10 @@ export function setRule(io: CliIo, word: SettingWord, rule: string, target: Targ
   if (section.ruleOverrides !== undefined && !isObject(section.ruleOverrides))
     throw new CliError(`ruleOverrides in ${placeOf(target)} of the global guard.json is not an object: it is left as is (fix it by hand)`)
   const overrides = (section.ruleOverrides ??= {}) as Json
-  if (overrides[rule] === word) {
-    io.out(`ruleOverrides.${rule} is already "${word}" in ${placeOf(target)} of ${guard.path}: nothing changed`)
+  // "allow" is read as "off": one replacing the other changes nothing.
+  const read = (value: unknown) => (value === "allow" ? "off" : value)
+  if (read(overrides[rule]) === read(word)) {
+    io.out(`ruleOverrides.${rule} is already "${String(overrides[rule])}" in ${placeOf(target)} of ${guard.path}: nothing changed`)
     return
   }
   overrides[rule] = word
@@ -161,8 +164,15 @@ export function resetRule(io: CliIo, rule: string, target: Target): void {
     write(guard, data)
     io.out(`ruleOverrides.${rule} removed from ${placeOf(target)} of ${guard.path}`)
   }
-  const still = inForce(resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]), target, rule)
+  const after = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }])
+  const still = inForce(after, target, rule)
   if (still) io.out(`ruleOverrides.${rule} is still "${still.value}" there, set by ${still.origin}`)
+  else {
+    // Without a setting, a rule of a group applies only if its group's switch is on there (profile included).
+    const group = RULE_FEATURES.get(rule)
+    const switched = group && group !== "always" ? after.settings?.(target.agent).find((item) => item.key === group) : undefined
+    if (switched && switched.value === false) io.out(`${rule} still does not apply there: its group ${group} is off, set by ${switched.origin}`)
+  }
 }
 
 /**

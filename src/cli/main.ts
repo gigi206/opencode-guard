@@ -7,6 +7,7 @@ import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
 import { CliError, outputRedactor, type CliIo, type Pretty } from "./context.ts"
+import { prettyHelp, USAGE } from "./help.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
@@ -14,25 +15,7 @@ import { show } from "./show.ts"
 import { paint } from "./style.ts"
 import { directoryOf, resetRule, setRedaction, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
 
-export const USAGE = `Usage: guard <command> [arguments]
-
-  rules [--builtins|--custom]      built-in rules (identifier, group, own verdict, what they check), then yours
-  rules --explain <rule>           one built-in rule: what it checks, how it decides, its typical reason and settings
-  redaction [--builtins|--custom]  redaction formats (built-in ones and their state, OpenCode's), then your patterns
-  redaction --explain <format>     one format: what it catches, its patterns, how to turn it off
-  redaction off|on <format>        turn a built-in format off, or back on, in the global guard.json
-  show [--agent <name>]            policy settings in force for the current directory, and where they come from
-  last [<count>]                   latest asks and denials of the plugin's log (default ${DEFAULT_LAST}, at most ${MAX_LAST})
-  allow|off|ask|deny|model <rule>  set a built-in rule in the global guard.json ("allow" turns it off, like "off")
-  reset <rule>                     remove the rule's setting there
-      --agent <name>               in the section of this agent (main agent, or subagent)
-      --project [<dir>]            in the section of this project (default: the git repository of the current directory)
-  trust [<dir>|--all]              add a project to trustedProjects (default: the git repository of the current directory)
-  untrust [<dir>|--all]            remove it
-  help                             this help
-
-Only the global guard.json is written (OpenCode's global configuration directory, from this terminal's environment).
-The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.`
+export { USAGE } from "./help.ts"
 
 class UsageError extends CliError {}
 
@@ -78,20 +61,25 @@ function expect(parsed: Parsed, min: number, max: number, what: string): void {
   if (parsed.positionals.length > max) throw new UsageError(`unexpected argument ${parsed.positionals[max]}`)
 }
 
-function run(command: string, args: readonly string[], io: CliIo): void {
-  if ((SETTINGS as readonly string[]).includes(command) || command === "reset") {
-    const parsed = parse(args, ["agent", "project"])
-    expect(parsed, 1, 1, "a rule identifier")
-    const target: Target = {
-      ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
-      ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, command === "reset") }),
-    }
-    if (command === "reset") resetRule(io, parsed.positionals[0]!, target)
-    else setRule(io, command as SettingWord, parsed.positionals[0]!, target)
-    return
+/** A rule's setting (`allow`, `off`, `ask`, `deny`, `model`) or its removal (`reset`), at the target given by the options. */
+function setting(word: string, args: readonly string[], io: CliIo): void {
+  const parsed = parse(args, ["agent", "project"])
+  expect(parsed, 1, 1, "a rule identifier")
+  const target: Target = {
+    ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
+    ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, word === "reset") }),
   }
+  if (word === "reset") resetRule(io, parsed.positionals[0]!, target)
+  else setRule(io, word as SettingWord, parsed.positionals[0]!, target)
+}
+
+function run(command: string, args: readonly string[], io: CliIo): void {
+  if ((SETTINGS as readonly string[]).includes(command) || command === "reset") return setting(command, args, io)
   switch (command) {
     case "rules": {
+      // `rules <setting> <rule>`: the same as the top-level setting commands.
+      const [word, ...rest] = args
+      if (word !== undefined && (SETTINGS as readonly string[]).concat("on", "reset").includes(word)) return setting(word === "on" ? "reset" : word, rest, io)
       const parsed = parse(args, ["builtins", "custom", "explain"])
       expect(parsed, 0, 0, "")
       if (parsed.explain !== undefined) {
@@ -207,7 +195,9 @@ export function main(argv: readonly string[], terminal: CliIo): number {
   const io = redacted(terminal)
   const [command, ...args] = argv
   if (command === undefined || command === "help" || command === "--help" || command === "-h") {
-    for (const line of USAGE.split("\n")) io.out(line)
+    // In a terminal, the colored layout; otherwise (and after a usage error, on the error output) the plain text.
+    if (io.pretty) prettyHelp(io.pretty)
+    else for (const line of USAGE.split("\n")) io.out(line)
     return command === undefined ? 2 : 0
   }
   try {

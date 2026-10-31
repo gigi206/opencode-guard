@@ -6,6 +6,12 @@ import { terminalOf } from "../src/cli/style.ts"
 import { systemConfigDirectory } from "../src/index.ts"
 
 const terminal = terminalOf(process.env, process.stdout.isTTY, process.stdout.columns)
+// The reader went away (`guard rules | head`): nothing more to print, stop quietly; any other output error is thrown.
+for (const stream of [process.stdout, process.stderr])
+  stream.on("error", (error) => {
+    if (error.code === "EPIPE") process.exit(process.exitCode ?? 0)
+    throw error
+  })
 
 process.exitCode = main(process.argv.slice(2), {
   env: process.env,
