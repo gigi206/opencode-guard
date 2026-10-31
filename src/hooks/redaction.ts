@@ -1,9 +1,10 @@
 import * as zlib from "node:zlib"
 import { isSignedBlock, isToolArguments, type Redactor } from "../secrets/redact.ts"
 import { redactToolError } from "../secrets/errors.ts"
-import { PROMPT_NOTE, redactPromptSecrets } from "../secrets/prompt.ts"
+import { PROMPT_NOTE } from "../secrets/prompt.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
 import { timedMap } from "./gate.ts"
+import type { PromptGate } from "./prompt-check.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { GuardContext, Logger } from "../types.ts"
 
@@ -16,12 +17,15 @@ export interface RedactionDeps {
   readonly log: Logger
   /** Unprotected agent: no redaction for it; absent = everything is redacted. */
   readonly unprotected?: UnprotectedGate
+  /** Check of the typed prompt by the decision model (`promptCheck` option, active); absent = technical redaction only. */
+  readonly promptCheck?: PromptGate
 }
 
 // Common rule: a redaction hook does not throw (an exception in a session hook makes the
 // session fail, and again on every retry). The only exception, intentional: the wire safety net (`http.request`,
 // `experimental.ws.send`), last line of defense before the provider; an internal error there blocks the request rather than
-// letting it leave unredacted (`WIRE_BLOCKED_MESSAGE`).
+// letting it leave unredacted (`WIRE_BLOCKED_MESSAGE`). With the prompt check (`promptCheck`), the prompt hook too: a
+// prompt the user does not approve is blocked (`PromptBlockedError`), so that it never reaches the provider.
 
 /**
  * Message for a request blocked by an internal error in the safety net: fixed (neither content nor cause, which go to the log); the
@@ -183,22 +187,37 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
     })
   }
 
-  if (deps.redactPrompt) {
+  if (deps.redactPrompt || deps.promptCheck) {
     await ctx.session.hook("prompt", async (event) => {
+      // With the prompt check, the hook fails closed: the only error it lets out blocks the prompt (OpenCode then does
+      // not create the message); it is never an internal error, which leads to a confirmation instead.
+      let block: Error | undefined
       try {
         if (await deps.unprotected?.notePrompt(event.sessionID, event.messageID)) return
-        const result = redactor.redactString(event.prompt.text)
-        // Then secrets typed in natural language ("my password is …"), specific to the prompt.
-        const typed = redactPromptSecrets(result.value)
-        const count = result.count + typed.count
+        const result = deps.redactPrompt ? redactor.redactString(event.prompt.text) : { value: event.prompt.text, count: 0 }
+        let text = result.value
+        let count = result.count
+        if (count) event.prompt.text = text
+        if (deps.promptCheck) {
+          // Words in plain language (`mon mot de passe est soleil42`), any language: the decision model.
+          const checked = await deps.promptCheck.check(event, text)
+          text = checked.text
+          count += checked.count
+          block = checked.block
+        }
         if (!count) return
-        event.prompt.text = `${typed.value}\n\n${PROMPT_NOTE}`
+        event.prompt.text = `${text}\n\n${PROMPT_NOTE}`
         // Mention offsets no longer match the modified text.
         for (const item of [...(event.prompt.files ?? []), ...(event.prompt.agents ?? []), ...(event.prompt.skills ?? [])])
           delete item.mention
         log.debug(`prompt: ${count} secret(s) redacted`)
       } catch (error) {
-        log.error("internal error in session.prompt", error)
+        try {
+          log.error("internal error in session.prompt", error)
+        } catch {}
+        if (deps.promptCheck) block = await deps.promptCheck.confirm(event, "internal error")
+      } finally {
+        if (block) throw block
       }
     })
   }

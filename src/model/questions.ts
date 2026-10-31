@@ -83,6 +83,59 @@ export const OUTPUT_QUESTIONS = {
   },
 } as const satisfies Record<string, ModelQuestion>
 
+/**
+ * Prompt checking (`promptCheck` option), calibrated on 2026-10-31 for nox-4b (dev/plans/prompt-secrets/plan.md): the
+ * typed prompt, already redacted, its known secrets shown as `<redacted>` (a `[[GUARD_REDACTED:…]]` placeholder reads as
+ * a secret still there). Stage 1: does a part of the prompt give a credential's value? Explicit criteria: the gap
+ * between real values and ordinary prompts is much wider with them. Language-neutral: the model reads every language.
+ */
+export const PROMPT_QUESTION_ID = "secret_in_prompt"
+
+export const PROMPT_QUESTIONS = {
+  [PROMPT_QUESTION_ID]: {
+    type: "noul",
+    instructions: "Does `message` give the value of a real credential typed in clear?",
+    criteria: {
+      true: "The message contains the actual characters of a password, passphrase, PIN, API key, token or other secret, in any language or format, even short, weak or an ordinary-looking word, even without saying it is a password: for example a value to log in or connect with, given next to a user name (log in as alice with sunflower).",
+      false:
+        "The message only talks about a credential (forgotten, expired, required, stored, hashed, reset, generated), names a variable or setting (SECRET_KEY, $DB_PASSWORD, process.env.X), or shows an example or dummy value (xxxx, ****, <your-password>, changeme); or it is an ordinary request with no credential.",
+    },
+  },
+} as const satisfies Record<string, ModelQuestion>
+
+/** Stage 2: which word of the part is the secret value (options: the words, and `none`). */
+export const PROMPT_WORD_QUESTION_ID = "secret_word"
+
+export function promptWordQuestion(words: readonly string[]): Record<string, ModelQuestion> {
+  const criteria: Record<string, string> = Object.fromEntries(words.map((word, i) => [`w${i}`, word]))
+  criteria.none = "no word is a secret value"
+  return {
+    [PROMPT_WORD_QUESTION_ID]: {
+      type: "choice",
+      instructions: "Which word of `message` is the secret value itself: the exact characters of a password, passphrase, key or token typed in clear?",
+      criteria,
+    },
+  }
+}
+
+/**
+ * Stage 3: is the word chosen at stage 2 really the value? The choice always names a word, even in a prompt without a
+ * secret (`rust`, a user name, `GITHUB_TOKEN`); this question, with explicit criteria, tells them apart.
+ */
+export const PROMPT_VERIFY_QUESTION_ID = "secret_value"
+
+export const PROMPT_VERIFY_QUESTIONS = {
+  [PROMPT_VERIFY_QUESTION_ID]: {
+    type: "noul",
+    instructions: "Is `value` the actual value of a credential typed in clear in `message`?",
+    criteria: {
+      true: "`value` is the exact characters of a password, passphrase, PIN, API key, token or login code given in the message, even weak, even an example password written out in full.",
+      false:
+        "`value` is an ordinary word, a command, a name (of a user, repository, tool, file, function, variable or setting such as GITHUB_TOKEN or SECRET_KEY), a number with another meaning (error code, duration, count), or a dummy placeholder (xxxx, ****, <your-password>, $VAR).",
+    },
+  },
+} as const satisfies Record<string, ModelQuestion>
+
 const LABELS: Record<string, string> = {
   destructive: "data destruction",
   exfiltration: "exfiltration",

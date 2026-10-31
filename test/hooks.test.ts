@@ -407,7 +407,7 @@ describe("decision model key from settings", () => {
     await setupGuard(fake.ctx, {})
     await fake.trigger("tool.execute.before", before("shell", { command: "cargo build" })).catch(() => {})
     const log = readFileSync(file, "utf8")
-    assert.match(log, /INFO active \(decision model: nox-4b via http:\/\/127\.0\.0\.1:9\/v1 \(chat\); confirmations: ask; system config: (?:not )?enforced\)/)
+    assert.match(log, /INFO active \(decision model: nox-4b via http:\/\/127\.0\.0\.1:9\/v1 \(chat\); confirmations: ask; system config: (?:not )?enforced; prompt check: inactive\)/)
     assert.match(log, /INFO shell → ask \(model-error\): nox-4b unavailable/)
     assert.ok(!log.includes(KEY))
   })
@@ -619,25 +619,26 @@ describe("lot 7: review and prompt", () => {
     assert.equal((await trigger("permission.evaluate", evaluation([heredoc]))).effect, "allow")
     assert.equal((await trigger("permission.evaluate", evaluation([heredoc, "sudo apt install x"]))).effect, "ask")
   })
-  it("prompt: natural-language password redacted, note added, mentions removed", async () => {
+  it("prompt: secret redacted, note added, mentions removed", async () => {
     const { trigger } = await setup()
-    const password = `Xy7!${FAKE.password}`
+    const password = FAKE.password
     const event = await trigger("session.prompt", {
       prompt: {
-        text: `mon mdp est ${password} pour @db`,
+        text: `voici DB_PASSWORD=${password} pour @db`,
         files: [{ mention: { start: 1, end: 2 } }],
         agents: [{ mention: { start: 3, end: 4 } }],
         skills: [{ mention: { start: 5, end: 6 } }],
       },
     })
     assert.ok(!event.prompt.text.includes(password))
-    assert.match(event.prompt.text, /\[\[GUARD_REDACTED:prompt_secret\]\]/)
+    assert.match(event.prompt.text, /\[\[GUARD_REDACTED:/)
     assert.match(event.prompt.text, /A secret typed in this message was masked/)
     assert.equal(event.prompt.files[0].mention, undefined)
     assert.equal(event.prompt.agents[0].mention, undefined)
     assert.equal(event.prompt.skills[0].mention, undefined)
-    const plain = await trigger("session.prompt", { prompt: { text: "le token est base64url, voir config/secrets2.yaml" } })
-    assert.equal(plain.prompt.text, "le token est base64url, voir config/secrets2.yaml")
+    // Plain words are left to the decision model (`promptCheck`): no keyword of any language here.
+    const plain = await trigger("session.prompt", { prompt: { text: `mon mdp est Xy7!${FAKE.password}` } })
+    assert.equal(plain.prompt.text, `mon mdp est Xy7!${FAKE.password}`)
   })
 })
 
@@ -647,7 +648,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
   const call = (agent: string, tool: string, input: unknown, sessionID = "ses_1") => ({ ...base, sessionID, agent, id: "call_u", tool, input })
   // One identifier per message, as in OpenCode (the session lookup is shared per message).
   let messages = 0
-  const prompt = (sessionID = "ses_1", text = `mon mdp est Xy7!${FAKE.password}`) => ({ sessionID, messageID: `msg_p${++messages}`, prompt: { text } })
+  const prompt = (sessionID = "ses_1", text = `DB_PASSWORD=${FAKE.password}`) => ({ sessionID, messageID: `msg_p${++messages}`, prompt: { text } })
   async function unprotected(extra: Record<string, unknown> = {}) {
     const fake = fakeContext({ ...options, ...extra })
     await setupGuard(fake.ctx, {})
@@ -664,7 +665,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
   it("chosen by the user (prompt): no more control or redaction, placeholder rule kept", async () => {
     const fake = await unprotected()
     const typed = await fake.trigger("session.prompt", prompt())
-    assert.match(typed.prompt.text, /Xy7!/)
+    assert.ok(typed.prompt.text.includes(FAKE.password))
     await fake.trigger("tool.execute.before", call(AGENT, "shell", { command: "sudo rm -rf /" }))
     assert.equal(fake.asserts.length, 0)
     const after = await fake.trigger("tool.execute.after", {
@@ -730,7 +731,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
     const failed = await unprotected()
     failed.failLookups(true)
     const typed = await failed.trigger("session.prompt", prompt())
-    assert.ok(!typed.prompt.text.includes(`Xy7!${FAKE.password}`))
+    assert.ok(!typed.prompt.text.includes(FAKE.password))
     const unattended = await unprotected({ askAs: "deny" })
     await unattended.trigger("session.prompt", prompt())
     await assert.rejects(unattended.trigger("tool.execute.before", call(AGENT, "shell", { command: "rm -rf /" })), /Blocked/)
@@ -785,8 +786,8 @@ describe("lot 7: unprotected agent — return to protected, child sessions, titl
     const fake = await ready()
     await fake.trigger("tool.execute.before", call(AGENT, "shell", { command: "rm -rf /" }))
     fake.switchAgent("ses_1", "build")
-    const typed = await fake.trigger("session.prompt", { sessionID: "ses_1", messageID: "msg_b", prompt: { text: `mon mdp est Xy7!${FAKE.password}` } })
-    assert.ok(!typed.prompt.text.includes(`Xy7!${FAKE.password}`))
+    const typed = await fake.trigger("session.prompt", { sessionID: "ses_1", messageID: "msg_b", prompt: { text: `DB_PASSWORD=${FAKE.password}` } })
+    assert.ok(!typed.prompt.text.includes(FAKE.password))
     await assert.rejects(fake.trigger("tool.execute.before", call("build", "shell", { command: "rm -rf /" })), /Blocked/)
     // Even if the model switches the session back mid-turn: protected until the next prompt.
     fake.switchAgent("ses_1", AGENT)

@@ -12,6 +12,7 @@ import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
 import { registerGate } from "./hooks/gate.ts"
 import { registerOutputCheck } from "./hooks/output-check.ts"
+import { createPromptGate, type PromptGate } from "./hooks/prompt-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
@@ -256,6 +257,34 @@ export async function setupGuard(
     log.error("guard hooks failed to register: plugin not loaded, NO protection", error)
     throw error
   }
+  // Prompt check (on by default with the decision model): same condition as the output check; its gate goes to the
+  // prompt hook. Without the decision model, nothing is said unless the user asked for it.
+  let promptCheck: OutputCheckState | undefined
+  let promptGate: PromptGate | undefined
+  if (config.promptCheck && (config.promptCheck.explicit || (model && config.decision))) {
+    try {
+      promptCheck =
+        model && config.decision
+          ? declaredOutputCheck({ option: "promptCheck", pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decision.baseURL, globalDir, systemDir, env })
+          : { active: false, reason: "the decision model is disabled" }
+      if (promptCheck.active && config.decision) {
+        promptGate = createPromptGate(ctx, {
+          redactor,
+          model: createModelClient(config.decision),
+          label: config.decision.model,
+          threshold: config.promptCheck.threshold,
+          timeoutMs: config.decision.timeoutMs,
+          askAs: config.askAs,
+          log,
+        })
+        log.warn("prompt check active: typed prompts, redacted, are sent to the decision model")
+      } else if (!promptCheck.active && config.promptCheck.explicit) log.warn(`promptCheck requested but inactive: ${promptCheck.reason}`)
+    } catch (error) {
+      log.error("prompt check unavailable", error)
+      promptCheck = { active: false, reason: "internal error" }
+      degraded.push("prompt check: UNAVAILABLE")
+    }
+  }
   try {
     await registerRedaction(ctx, {
       redactor,
@@ -264,6 +293,7 @@ export async function setupGuard(
       redactWire: config.features.redactWire,
       log,
       unprotected,
+      ...(promptGate ? { promptCheck: promptGate } : {}),
     })
   } catch (error) {
     log.error("secret redaction hooks failed to register: secrets may reach the provider", error)
@@ -309,7 +339,9 @@ export async function setupGuard(
   const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)
   const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}`
-  const checked = outputCheck === undefined ? "" : `; output check: ${outputCheck.active ? "active" : "inactive"}`
+  // Prompt check: its state whenever the decision model is on (`off` when turned off, so that a project doing it shows).
+  const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}` : model && !config.promptCheck ? "; prompt check: off" : ""
+  const checked = `${outputCheck === undefined ? "" : `; output check: ${outputCheck.active ? "active" : "inactive"}`}${prompted}`
   log.info(`active (decision model: ${modelText}; confirmations: ${confirmations}; system config: ${enforced}${profile}${overrides}${off}${checked}${degraded.map((item) => `; ${item}`).join("")})`)
   if (config.version) log.info(`settings by agent and by project (${config.version.summary})`)
   if (config.askAs === "deny") log.warn("unattended mode (askAs: deny): every confirmation request is denied")

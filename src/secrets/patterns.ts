@@ -54,20 +54,15 @@ export function entropy(value: string): number {
   return bits
 }
 
-/** Code, a reference or a placeholder rather than a value: `process.env.X`, `${PASS}`, `$DB_PASS`, `<your-password>`, `null`. */
-export function looksLikeCodeOrPlaceholder(value: string): boolean {
-  if (PLACEHOLDER_WORDS.test(value)) return true
-  // Expressions or member accesses: process.env.X, config.apiKey, getToken()
-  if (/^[A-Za-z_$][\w$]*(?:[?!]?\.[A-Za-z_$][\w$]*)+[?!]?$/.test(value)) return true
-  // Code or references: ${…}, $(…), [index]; a variable reference alone ($DB_PASS) is not a secret.
-  if (/[(){}[\]]/.test(value) || /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return true
-  return /^(true|false|null|undefined|none|string|number|boolean)$/i.test(value)
-}
-
 /** Heuristic for generic assignments: rules out code and placeholders. */
 export function looksLikeSecretValue(value: string): boolean {
   if (value.length < 8) return false
-  if (looksLikeCodeOrPlaceholder(value)) return false
+  if (PLACEHOLDER_WORDS.test(value)) return false
+  // Expressions or member accesses: process.env.X, config.apiKey, getToken()
+  if (/^[A-Za-z_$][\w$]*(?:[?!]?\.[A-Za-z_$][\w$]*)+[?!]?$/.test(value)) return false
+  // Code or references: ${…}, $(…), [index]; a variable reference alone ($DB_PASS) is not a secret.
+  if (/[(){}[\]]/.test(value) || /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return false
+  if (/^(true|false|null|undefined|none|string|number|boolean)$/i.test(value)) return false
   const hasDigit = /\d/.test(value)
   const hasLetter = /[A-Za-z]/.test(value)
   return (hasDigit && hasLetter) || entropy(value) >= 3.5

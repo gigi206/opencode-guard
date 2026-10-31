@@ -14,7 +14,6 @@ import { setupGuard } from "../src/index.ts"
 import { createModelClient } from "../src/model/client.ts"
 import { placeholderFinding, toolFinding } from "../src/rules/tools.ts"
 import { MAX_SERVICE_SECRETS, serviceSecretSource } from "../src/secrets/opencode-service.ts"
-import { redactPromptSecrets } from "../src/secrets/prompt.ts"
 import { createRedactor, placeholder, type Redactor } from "../src/secrets/redact.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE, rand } from "./fixtures.ts"
@@ -159,20 +158,17 @@ describe("audit 49: redactor", () => {
     assert.equal(value, placeholder("base64"))
   })
 
-  it("SEC-4: end-of-value trimming in linear time (commas, closers, prompt punctuation)", () => {
+  it("SEC-4: end-of-value trimming in linear time (commas, closers)", () => {
     const redactor = createRedactor()
     assertLinear((n) => () => redactor.redactString(`password=x${",".repeat(n)}y`), 20_000)
     assertLinear((n) => () => redactor.redactString(`password=x${")".repeat(n)}y`), 20_000)
-    assertLinear((n) => () => redactPromptSecrets(`mdp: x${".".repeat(n)}y`), 20_000)
   })
 
-  it("SEC-4: same values trimmed as before (trailing commas and closers, prompt punctuation)", () => {
+  it("SEC-4: same values trimmed as before (trailing commas and closers)", () => {
     const redactor = createRedactor()
     const secret = rand(24, 31)
     assert.equal(redactor.redactString(`DB_PASSWORD=${secret},,`).value, `DB_PASSWORD=${placeholder("generic_secret")},,`)
     assert.equal(redactor.redactString(`f(token=${secret}))`).value.includes(secret), false)
-    assert.equal(redactPromptSecrets(`mon mdp est ${secret}...`).value.includes(secret), false)
-    assert.ok(redactPromptSecrets(`mon mdp est ${secret}...`).value.includes("..."))
   })
 
   it("SEC-6: after 1,000 learned values, redacting an ordinary body costs at most a few times more", () => {

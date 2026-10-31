@@ -38,7 +38,7 @@ A local `deny` is final, and the decision model can only make a decision **stric
 | Secrets leaving the machine | a credential file or a detected secret in a network command, web request, MCP call or CodeMode code | `deny` |
 | Protected locations | writes to the plugin directory, `opencode.json(c)`, `.opencode/`, shell startup files, `/etc`, git hooks | `ask` |
 | Redaction placeholder | writing a placeholder back into a file would destroy the real secret | `deny` |
-| Secrets in prompts and results | API keys, tokens, passwords, private keys, base64 and hex dumps | redacted |
+| Secrets in prompts and results | API keys, tokens, passwords in code or configuration (`DB_PASSWORD=…`), private keys, base64 and hex dumps; with the decision model, passwords typed in plain words in the prompt | redacted |
 
 The exact patterns, exceptions and false positives are listed in [Rules and redaction](docs/rules.md).
 
@@ -105,6 +105,7 @@ All options live under `options` in the plugin entry.
 | `thresholds` | see docs | `denyNoul`, `askNoul`, `askExfiltration`, `denyRisk`, `askRisk`, `minConfidence`. |
 | `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`. |
 | `outputCheck` | off | Also ask the decision model whether an output still holds a secret in clear. |
+| `promptCheck` | on | Also ask the decision model for a secret typed in plain words in the prompt, in any language, and mask it. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
 | `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"` (or `"allow"`), `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"allow"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `localAsks` | `"ask"` | `"model"`: the confirmations of the built-in rules without a setting are decided by the decision model (self-protection only with `selfProtectionByModel: true`); must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |

@@ -1,10 +1,10 @@
-// `outputCheck` option: effective only if the user's global configuration file (or the system
+// `outputCheck` and `promptCheck` options: effective only if the user's global configuration file (or the system
 // configuration) also declares it for this plugin, with the same decision model address. A repository can replace the plugin's
-// options (project configuration loaded after the global one): it cannot thereby enable sending outputs to its
-// own server. At the slightest doubt, the option stays inactive.
+// options (project configuration loaded after the global one): it cannot thereby enable sending outputs or prompts to
+// its own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
-import { declaredDecision, normalizedURL, outputCheckRequested, type PluginDeclaration } from "./config.ts"
+import { declaredDecision, normalizedURL, outputCheckRequested, promptCheckRequested, type PluginDeclaration } from "./config.ts"
 
 /**
  * OpenCode 2.0.31 global configuration directory (`util/src/global.ts`, `global-roots.ts`): `OPENCODE_CONFIG_DIR`
@@ -92,6 +92,8 @@ export function declaredPluginOptions(input: {
  * system configuration? Reason in words (never a value) otherwise.
  */
 export function declaredOutputCheck(input: {
+  /** Option checked (default `outputCheck`); `promptCheck` is on when the file leaves it out. */
+  readonly option?: "outputCheck" | "promptCheck"
   readonly pluginDir: string
   readonly effectiveBaseURL: string
   readonly globalDir: string | undefined
@@ -99,6 +101,7 @@ export function declaredOutputCheck(input: {
   readonly env: Record<string, string | undefined>
 }): OutputCheckState {
   const effective = normalizedURL(input.effectiveBaseURL)
+  const option = input.option ?? "outputCheck"
   const reasons: string[] = []
   for (const [label, dir] of [
     ["global", input.globalDir],
@@ -115,12 +118,12 @@ export function declaredOutputCheck(input: {
     }
     const options = file.options
     // Values read from another file: never followed (the plugin reads no referenced file).
-    if (JSON.stringify([options.outputCheck, options.decision, options.jev]).includes("{file:")) {
+    if (JSON.stringify([options[option], options.decision, options.jev]).includes("{file:")) {
       reasons.push(`${label} configuration: it uses a {file:…} reference`)
       continue
     }
-    if (!outputCheckRequested(options.outputCheck)) {
-      reasons.push(`${label} configuration: outputCheck is not enabled there`)
+    if (!(option === "promptCheck" ? promptCheckRequested(options[option]) : outputCheckRequested(options[option]))) {
+      reasons.push(`${label} configuration: ${option} is not enabled there`)
       continue
     }
     const declared = normalizedURL(declaredDecision(options)?.baseURL)
