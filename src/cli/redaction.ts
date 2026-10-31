@@ -5,6 +5,7 @@
 import { parseConfig } from "../config.ts"
 import { OPENCODE_FORMAT_SUMMARIES, OPENCODE_PATTERNS } from "../secrets/opencode-service.ts"
 import { BUILTIN_PATTERNS, FORMAT_SUMMARIES, type SecretPattern } from "../secrets/patterns.ts"
+import { placeholder } from "../secrets/redact.ts"
 import { CliError, readSources, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment } from "./style.ts"
@@ -141,7 +142,7 @@ export function explainFormat(io: CliIo, type: string): void {
   const checked = patterns.some((pattern) => pattern.accept || pattern.trim)
   // A `secret` group: only the value is replaced, its prefix (`Bearer `, `name=`) kept.
   const part = patterns.every((pattern) => pattern.regex.source.includes("(?<secret>")) ? "the value (its prefix kept)" : patterns.some((pattern) => pattern.regex.source.includes("(?<secret>")) ? "the match, or only its value when the pattern names one" : "the whole match"
-  const how = `${count(patterns.length, "pattern")}${patterns.length > 1 && !opencode ? ", all turned off together" : ""}; ${part} replaced by [[GUARD_REDACTED:${type}]]${checked ? ", once it passes the format's own checks (what it catches says which)" : ""}.`
+  const how = `${count(patterns.length, "pattern")}${patterns.length > 1 && !opencode ? ", all turned off together" : ""}; ${part} replaced by ${placeholder(type)}${checked ? ", once it passes the format's own checks (what it catches says which)" : ""}.`
   const setting = opencode ? "Cannot be turned off: it protects OpenCode's own credentials." : TURN_OFF.replace("<format>", type)
   if (io.pretty) {
     const pretty = io.pretty

@@ -156,23 +156,45 @@ The patterns behind the detection above, by type (the type names the placeholder
 | `aws_access_key` | built-in | AWS access key identifiers (AKIA…, ASIA…) |
 | `github_token` | built-in | GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_) |
 | `github_pat` | built-in | GitHub fine-grained personal access tokens (github_pat_…) |
-| `gitlab_token` | built-in | GitLab personal access tokens (glpat-…) |
+| `gitlab_token` | built-in | GitLab personal, runner, deploy and trigger tokens (glpat-, glrt-, gldt-, glptt-, GR1348941…) |
 | `slack_token` | built-in | Slack tokens (xoxa-, xoxb-, xoxp-, xoxo-, xoxs-, xoxr-) |
 | `slack_webhook` | built-in | Slack incoming webhook addresses |
 | `stripe_key` | built-in | Stripe secret and restricted keys (sk_live_, rk_test_…) |
 | `npm_token` | built-in | npm access tokens (npm_…) |
 | `huggingface_token` | built-in | Hugging Face tokens (hf_…) |
+| `sendgrid_key` | built-in | SendGrid API keys (SG.…) |
+| `digitalocean_token` | built-in | DigitalOcean tokens (dop_v1_, doo_v1_, dor_v1_) |
+| `pypi_token` | built-in | PyPI upload tokens (pypi-AgEI…) |
+| `dockerhub_token` | built-in | Docker Hub access tokens (dckr_pat_, dckr_oat_) |
+| `vault_token` | built-in | HashiCorp Vault service and batch tokens (hvs., hvb.) |
+| `shopify_token` | built-in | Shopify access tokens and shared secrets (shpat_, shpca_, shppa_, shpss_) |
+| `atlassian_token` | built-in | Atlassian API tokens (ATATT3…) |
+| `twilio_key` | built-in | Twilio API keys (SK followed by 32 hexadecimal digits) |
+| `linear_key` | built-in | Linear API keys (lin_api_…) |
+| `grafana_token` | built-in | Grafana service account and cloud tokens (glsa_, glc_) |
+| `databricks_token` | built-in | Databricks tokens (dapi…) |
+| `doppler_token` | built-in | Doppler personal tokens (dp.pt.…) |
+| `postman_key` | built-in | Postman API keys (PMAK-…) |
+| `pulumi_token` | built-in | Pulumi access tokens (pul-…) |
+| `sentry_token` | built-in | Sentry user and organization tokens (sntryu_, sntrys_) |
+| `age_secret_key` | built-in | age secret keys (AGE-SECRET-KEY-1…) |
+| `square_token` | built-in | Square access tokens (sq0atp-…) |
+| `flyio_token` | built-in | Fly.io tokens (fo1_, fm1a_, fm1r_, fm2_) |
+| `planetscale_token` | built-in | PlanetScale tokens and passwords (pscale_tkn_, pscale_oauth_, pscale_pw_) |
+| `terraform_token` | built-in | HashiCorp Terraform Cloud tokens (….atlasv1.…) |
+| `cloudflare_origin_key` | built-in | Cloudflare Origin CA keys (v1.0-…) |
 | `jwt` | built-in | JSON Web Tokens (three base64url segments starting with eyJ) |
 | `bearer_token` | built-in | the token after Bearer, unless it reads as an ordinary word |
+| `authorization_token` | built-in | the credential after Authorization: Token, ApiKey, Api-Key, SSWS or Bot, unless it reads as an ordinary word |
 | `basic_auth` | built-in | the value after Basic, when it decodes to user:password |
 | `url_credentials` | built-in | the password of an address that carries a user and a password before the host, unless it is a placeholder or code |
 | `passphrase` | built-in | a quoted phrase assigned to an upper-case PASSWORD, PASSWD, PASSPHRASE, SECRET or PASS variable |
-| `generic_secret` | built-in | a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass (name = value, name: value), or given to a command-line option such as --password or --token; only a value that looks like a secret (not code, a variable or a placeholder) |
+| `generic_secret` | built-in | a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass, or to a name that ends in key (ENCRYPTION_KEY, AccountKey) (name = value, name: value), or given to a command-line option such as --password or --token, or the password given to curl -u, sshpass -p or mysql -p; only a value that looks like a secret (not code, a path, a variable or a placeholder) |
 | `opencode_credential` | OpenCode, always active | OpenCode's stored provider credentials (key, OAuth refresh and access tokens) |
 | `opencode_pairing` | OpenCode, always active | OpenCode's pairing code (connection link and API response) |
 | `qr_code` | OpenCode, always active | OpenCode's pairing QR code drawn in the terminal (replaced whole) |
 
-**Turning a built-in format off.** An entry `{ "type": "<format>", "enabled": false }` in `secretPatterns` turns off every pattern of that type (`generic_secret` and `private_key` are three patterns each). It counts only when the global or system configuration sets it: from a project's `opencode.json` it is ignored, with a warning, and the format stays on. Off, its patterns no longer redact anything (tool outputs, prompts, the wire, the log; in a prompt, the [prompt check](decision-model.md#prompt-check-promptcheck) may still mask such a value), the rules no longer treat it as a secret (`secret-network` and the like no longer deny it), and the decision model receives it in clear. The start line names the formats turned off (`redaction formats off: …`), and `guard show` marks each one as a relaxation. OpenCode's formats cannot be turned off. To leave one value alone rather than a whole format, use `allowlist`.
+**Turning a built-in format off.** An entry `{ "type": "<format>", "enabled": false }` in `secretPatterns` turns off every pattern of that type (`generic_secret` is seven patterns, `private_key` three). It counts only when the global or system configuration sets it: from a project's `opencode.json` it is ignored, with a warning, and the format stays on. Off, its patterns no longer redact anything (tool outputs, prompts, the wire, the log; in a prompt, the [prompt check](decision-model.md#prompt-check-promptcheck) may still mask such a value), the rules no longer treat it as a secret (`secret-network` and the like no longer deny it), and the decision model receives it in clear. The start line names the formats turned off (`redaction formats off: …`), and `guard show` marks each one as a relaxation. OpenCode's formats cannot be turned off. To leave one value alone rather than a whole format, use `allowlist`.
 
 ## Confirmations and run modes
 

@@ -1,5 +1,5 @@
 import * as zlib from "node:zlib"
-import { isSignedBlock, isToolArguments, type Redactor } from "../secrets/redact.ts"
+import { isSignedBlock, isToolArguments, PLACEHOLDER_KEYWORD, type Redactor } from "../secrets/redact.ts"
 import { redactToolError } from "../secrets/errors.ts"
 import { PROMPT_NOTE } from "../secrets/prompt.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
@@ -39,7 +39,7 @@ export const WIRE_BLOCKED_MESSAGE =
  * by the placeholder and "fixed" the file twice. Without `[[…]]`: copying it does not trigger the placeholder rule.
  */
 export const REDACTION_NOTE =
-  '[guard] The GUARD_REDACTED placeholders in this output mask secrets for display only: the file or data itself is unchanged. Do not try to rewrite or "fix" these values, and never write a placeholder into a file.'
+  `[guard] The ${PLACEHOLDER_KEYWORD} placeholders in this output mask secrets for display only: the file or data itself is unchanged. Do not try to rewrite or "fix" these values, and never write a placeholder into a file.`
 
 /**
  * Valid JSON (a CodeMode script may parse the output of an internal call): no note, except for the result of a

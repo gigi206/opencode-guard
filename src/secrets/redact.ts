@@ -5,10 +5,15 @@ import { BUILTIN_PATTERNS, envSecretValues, MIN_KNOWN_SECRET, type SecretPattern
 // Type bounded to 256 characters: without the bound, every unclosed marker in a long text scanned everything that followed it.
 // `placeholder` always produces a recognized type (at most 200 characters, without `]`); those of existing sessions are
 // at most 20 characters.
-export const PLACEHOLDER_RE = /\[\[GUARD_REDACTED:[^\]]{0,256}\]\]/
-export const placeholder = (type: string) => `[[GUARD_REDACTED:${type.replace(/]/g, "_").slice(0, 200)}]]`
+/** Keyword of the placeholder that replaces a redacted secret, `[[GUARD_REDACTED:<type>]]`: the one place to change it. */
+export const PLACEHOLDER_KEYWORD = "GUARD_REDACTED"
+/** The placeholder as the texts for the agent and the model name it. */
+export const PLACEHOLDER_SHOWN = `[[${PLACEHOLDER_KEYWORD}:…]]`
+const MARKER = `\\[\\[${PLACEHOLDER_KEYWORD}:[^\\]]{0,256}\\]\\]`
+export const PLACEHOLDER_RE = new RegExp(MARKER)
+export const placeholder = (type: string) => `[[${PLACEHOLDER_KEYWORD}:${type.replace(/]/g, "_").slice(0, 200)}]]`
 /** Splits a capture into placeholders and intermediate fragments. */
-const PLACEHOLDER_FRAGMENTS = /\[\[GUARD_REDACTED:[^\]]{0,256}\]\]|(?:(?!\[\[GUARD_REDACTED:[^\]]{0,256}\]\])[\s\S])+/g
+const PLACEHOLDER_FRAGMENTS = new RegExp(`${MARKER}|(?:(?!${MARKER})[\\s\\S])+`, "g")
 
 export interface RedactResult<T> {
   readonly value: T

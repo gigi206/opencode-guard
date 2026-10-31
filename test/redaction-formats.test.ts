@@ -139,7 +139,7 @@ describe("redaction formats", () => {
     assert.equal(r.code, 0)
     assert.deepEqual(r.out.slice(0, 2), ["Format: generic_secret", "  State: on"])
     const patterns = BUILTIN_PATTERNS.filter((pattern) => pattern.type === "generic_secret").map((pattern) => `    /${pattern.regex.source}/${pattern.regex.flags}`)
-    assert.equal(patterns.length, 3)
+    assert.equal(patterns.length, 7)
     for (const line of patterns) assert.ok(r.out.includes(line), line)
     assert.ok(r.out.some((line) => line.startsWith('  Setting: Turned off by { "type": "generic_secret", "enabled": false }')))
     assert.match(run("redaction", "--explain", "opencode_credential").out.join("\n"), /Cannot be turned off/)

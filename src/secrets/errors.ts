@@ -1,4 +1,4 @@
-import type { RedactResult, Redactor } from "./redact.ts"
+import { placeholder, type RedactResult, type Redactor } from "./redact.ts"
 
 // Redaction of tool errors. OpenCode shows the model the message of the CAUSE (`error.error`)
 // instead of the Tool.Error one when it has one (packages/core/src/session/to-session-error.ts):
@@ -8,8 +8,8 @@ import type { RedactResult, Redactor } from "./redact.ts"
 
 /** Depth limit for cause chains; beyond it, the remaining cause is replaced (never returned as is). */
 const MAX_CAUSE_DEPTH = 32
-const CYCLE_PLACEHOLDER = "[[GUARD_REDACTED:cause_cycle]]"
-const TOO_DEEP_PLACEHOLDER = "[[GUARD_REDACTED:cause_too_deep]]"
+const CYCLE_PLACEHOLDER = placeholder("cause_cycle")
+const TOO_DEEP_PLACEHOLDER = placeholder("cause_too_deep")
 
 type ErrorChanges = Record<PropertyKey, unknown>
 

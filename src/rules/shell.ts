@@ -1,5 +1,5 @@
 import { posix } from "node:path"
-import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
+import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes, NETWORK_FUNCTION } from "./code-network.ts"
 import { entrusted, hardened, overrideOf, ruleEnabled, withoutLowered, type ActiveRules } from "./features.ts"
 import { credentialFile, isCredentialFile, pathTokens, protectedWriteClass, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WriteClass, type WritePathContext } from "./sensitive-paths.ts"
@@ -95,9 +95,9 @@ const NESTED_CONFIG_VARIABLE = /(?:^|[^\w$])(?:OPENCODE_CLI_CONFIG_CONTENT|OPENC
 const AUTO_APPROVE = /\s--(?:auto|yolo|dangerously-skip-permissions)(?![\w-])/
 
 const PLACEHOLDER_REASON =
-  "the command contains a redacted secret ([[GUARD_REDACTED:…]]): writing it would destroy the real secret. Make a targeted edit that does not include the placeholder"
+  `the command contains a redacted secret (${PLACEHOLDER_SHOWN}): writing it would destroy the real secret. Make a targeted edit that does not include the placeholder`
 const PLACEHOLDER_ENCODED_REASON =
-  "the command contains a redacted secret encoded in base64 (a [[GUARD_REDACTED:…]] placeholder once decoded): writing it would destroy the real secret. Make a targeted edit that does not include it"
+  `the command contains a redacted secret encoded in base64 (a ${PLACEHOLDER_SHOWN} placeholder once decoded): writing it would destroy the real secret. Make a targeted edit that does not include it`
 
 /** Shell separators; `SHELL_SEPARATORS`: not inside a redirection operator (`2>&1`, `&>`, `<&`, `>|`), like the shell. */
 const SEPARATORS = /\|\||&&|;|\||&|\n/

@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path"
 import { fileURLToPath } from "node:url"
 import { patchTargets } from "../patch.ts"
 import { resolveLike } from "../scripts.ts"
-import { containsEncodedPlaceholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
+import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes } from "./code-network.ts"
 import { entrusted, overridden, ruleEnabled, type ActiveRules } from "./features.ts"
 import { credentialFile, exactSystemWrite, exactWriteClass, protectedWriteClass, strictestKind, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
@@ -63,10 +63,10 @@ export const BUILTIN_TOOLS = new Set([
 ])
 
 const PLACEHOLDER_REASON =
-  "the content to write contains a redacted secret ([[GUARD_REDACTED:…]]): writing it would destroy the real secret. Make a targeted edit that does not include the placeholder"
+  `the content to write contains a redacted secret (${PLACEHOLDER_SHOWN}): writing it would destroy the real secret. Make a targeted edit that does not include the placeholder`
 
 const PLACEHOLDER_ENCODED_REASON =
-  "the content to write contains a redacted secret encoded in base64 (a [[GUARD_REDACTED:…]] placeholder once decoded): writing it would destroy the real secret. Make a targeted edit that does not include it"
+  `the content to write contains a redacted secret encoded in base64 (a ${PLACEHOLDER_SHOWN} placeholder once decoded): writing it would destroy the real secret. Make a targeted edit that does not include it`
 
 const str = (value: unknown): string => (typeof value === "string" ? value : "")
 

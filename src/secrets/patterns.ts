@@ -1,5 +1,7 @@
 // Secret patterns. Base adapted from packages/http-recorder/src/redaction/secrets.ts
 // in OpenCode (MIT, Copyright (c) 2025 opencode), extended and converted into replacement patterns.
+// Provider token formats from the gitleaks default configuration (MIT, Copyright (c) 2019 Zachary Rice) and the
+// trufflehog Docker Hub detector (AGPL-3.0, format only), translated to JavaScript syntax and bounded.
 //
 // Every pattern must have the `g` flag. If it contains a named group `secret`, only that
 // group is replaced (the prefix, e.g. `Bearer ` or `API_KEY=`, is kept).
@@ -109,6 +111,9 @@ export function trimAssignedValue(value: string): string {
   )
 }
 
+/** Names ending in `key` whose value is not a secret (database, cache and storage keys, public keys, the WebSocket handshake nonce). */
+const NOT_SECRET_KEYS = ["public", "primary", "foreign", "sort", "partition", "cache", "idempotency", "storage", "i18n", "translation", "query", "row", "map", "hash", "object", "react", "websocket", "webSocket", "WebSocket"]
+
 /** Example phrasings from `.env.example` files (`"your secret here"`, `"change me"`, `"enter a password"`). */
 const EXAMPLE_PHRASE = /\b(?:your|here|change me|enter|insert|replace|put)\b/i
 
@@ -151,12 +156,42 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   { type: "aws_access_key", regex: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
   { type: "github_token", regex: /\bgh[pousr]_[A-Za-z0-9]{30,}\b/g },
   { type: "github_pat", regex: /\bgithub_pat_[A-Za-z0-9_]{50,}/g },
-  { type: "gitlab_token", regex: /\bglpat-[A-Za-z0-9_-]{20,}/g },
+  // Personal (glpat-), runner (glrt-), deploy (gldt-), pipeline trigger (glptt-) and runner registration (GR1348941) tokens.
+  { type: "gitlab_token", regex: /\b(?:glpat-|glrt-|gldt-|GR1348941)[A-Za-z0-9_-]{20,}|\bglptt-[0-9a-f]{40}\b/g },
   { type: "slack_token", regex: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
   { type: "slack_webhook", regex: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g },
   { type: "stripe_key", regex: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
   { type: "npm_token", regex: /\bnpm_[A-Za-z0-9]{36}\b/g },
   { type: "huggingface_token", regex: /\bhf_[A-Za-z0-9]{30,}\b/g },
+  // Provider formats with a prefix of their own: an exact length, then no further token character (a longer run is
+  // something else). Formats that gitleaks recognizes only near the provider's name (Mailgun, Cloudflare API keys,
+  // Sentry access tokens, New Relic) are left to `generic_secret` and the decision model.
+  { type: "sendgrid_key", regex: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g },
+  { type: "digitalocean_token", regex: /\bdo[opr]_v1_[a-f0-9]{64}(?![A-Za-z0-9])/g },
+  { type: "pypi_token", regex: /\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,1000}/g },
+  { type: "dockerhub_token", regex: /\b(?:dckr_pat_[A-Za-z0-9_-]{27}|dckr_oat_[A-Za-z0-9_-]{32})(?![A-Za-z0-9_-])/g },
+  // Current Vault service (hvs.) and batch (hvb.) tokens; the old `s.` form is too close to any identifier.
+  { type: "vault_token", regex: /\b(?:hvs\.[A-Za-z0-9_-]{90,120}|hvb\.[A-Za-z0-9_-]{138,300})(?![A-Za-z0-9_-])/g },
+  { type: "shopify_token", regex: /\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b/g },
+  { type: "atlassian_token", regex: /\bATATT3[A-Za-z0-9_=-]{186}(?![A-Za-z0-9_=-])/g },
+  { type: "twilio_key", regex: /\bSK[0-9a-fA-F]{32}\b/g },
+  { type: "linear_key", regex: /\blin_api_[A-Za-z0-9]{40}\b/g },
+  { type: "grafana_token", regex: /\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b|\bglc_[A-Za-z0-9+/]{32,400}={0,3}/g },
+  { type: "databricks_token", regex: /\bdapi[a-f0-9]{32}(?:-\d)?\b/g },
+  { type: "doppler_token", regex: /\bdp\.pt\.[A-Za-z0-9]{43}\b/g },
+  { type: "postman_key", regex: /\bPMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}\b/g },
+  { type: "pulumi_token", regex: /\bpul-[a-f0-9]{40}\b/g },
+  {
+    type: "sentry_token",
+    regex:
+      /\bsntryu_[a-f0-9]{64}\b|\bsntrys_eyJpYXQiO[A-Za-z0-9+/]{10,200}(?:LCJyZWdpb25fdXJs|InJlZ2lvbl91cmwi|cmVnaW9uX3VybCI6)[A-Za-z0-9+/]{10,200}={0,2}_[A-Za-z0-9+/]{43}/g,
+  },
+  { type: "age_secret_key", regex: /\bAGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}/g },
+  { type: "square_token", regex: /\bsq0atp-[A-Za-z0-9_-]{22,60}(?![A-Za-z0-9_-])/g },
+  { type: "flyio_token", regex: /\bfo1_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|\b(?:fm1[ar]|fm2)_[A-Za-z0-9+/]{100,}={0,3}/g },
+  { type: "planetscale_token", regex: /\bpscale_(?:tkn|oauth|pw)_[A-Za-z0-9_=.-]{32,64}/g },
+  { type: "terraform_token", regex: /\b[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_=-]{60,70}/g, hint: /\.atlasv1\./ },
+  { type: "cloudflare_origin_key", regex: /\bv1\.0-[a-f0-9]{24}-[a-f0-9]{146}\b/g },
   {
     // First segment without `-eyJ` (unrolled loop, linear; a per-character alternative is slow under Bun): otherwise
     // every `eyJ` of a long `eyJ-eyJ-…` run rescanned the run. A header that contains `-eyJ` is redacted from
@@ -166,6 +201,13 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   },
   // A word after `Bearer` ("Bearer internationalization") is not a token.
   { type: "bearer_token", regex: /\b(?:Bearer)\s+(?<secret>[A-Za-z0-9._~+/=-]{16,})/gi, accept: (value) => !isWordLike(value) },
+  {
+    // Other schemes of an Authorization header (`Authorization: Token …`, GitHub's `token`, `ApiKey`, Okta's `SSWS`,
+    // Discord's `Bot`): the name of the header is required, these words are common elsewhere.
+    type: "authorization_token",
+    regex: /\bAuthorization["']?\s*[:=]\s*["']?(?:Token|ApiKey|Api-Key|SSWS|Bot)\s+(?<secret>[A-Za-z0-9._~+/=-]{16,})/gi,
+    accept: (value) => !isWordLike(value),
+  },
   {
     // `Basic …` (any case): only if decoding yields a real `user:password`.
     type: "basic_auth",
@@ -206,6 +248,44 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
     accept: (value) => looksLikeSecretValue(value) && !/^(?:[~/]|\.\.?\/)/.test(value),
   },
   {
+    // A name whose last component is `key` (`ENCRYPTION_KEY=…`, `master_key: …`, Azure's `AccountKey=…`): after a
+    // separator, or `Key` after a lower-case letter, never `monkey` or `hotkey`; a bare `key` (a YAML or JSON key) is not
+    // one. Names of keys that are not secrets (`publicKey`, `primaryKey`, `sortKey`, `cacheKey`…) are excluded, and so are
+    // paths (`SSH_KEY=~/.ssh/id_ed25519`), hexadecimal key identifiers (`GPG_KEY=0x1A2B3C4D`) and the name of an environment
+    // variable (`EnvVaultClientKey = "BAO_CLIENT_KEY"`). Anchored on the keyword, like the others.
+    type: "generic_secret",
+    regex: new RegExp(
+      `(?<!(?:${NOT_SECRET_KEYS.flatMap((name) => [name, name[0]!.toUpperCase() + name.slice(1), name.toUpperCase()]).join("|")})[_.-]?)(?:(?<=[_.-])(?:KEY|[Kk]ey)|(?<=[a-z])Key)["']?\\s*[:=]\\s*["']?(?<secret>[^\\s"'\`;]{8,})`,
+      "g",
+    ),
+    trim: trimAssignedValue,
+    accept: (value) =>
+      looksLikeSecretValue(value) &&
+      !/^(?:[~/]|\.\.?\/)/.test(value) &&
+      !/^0x[0-9A-Fa-f]{8,40}$/.test(value) &&
+      !/^[A-Z]+(?:_[A-Z]+)+$/.test(value),
+  },
+  {
+    // `curl -u user:password` (`--user`, `-uuser:password`): only after `curl` in the same command (not `docker run -u
+    // 1000:1000`, `sort -u`), and only the part after the first colon; a variable (`$PASS`) is not a secret. 200-character
+    // window, as below.
+    type: "generic_secret",
+    regex: /(?<=\bcurl\b[^\n|;&]{0,200})(?<![\w-])(?:-u(?:\s+|(?=[^\s-]))|--user(?:\s+|=))["']?[^\s:"'`$]*:(?<secret>[^\s"'`]{3,})/g,
+    accept: (value) => !/^\$/.test(value) && !PLACEHOLDER_WORDS.test(value),
+  },
+  {
+    // `sshpass -p password`, then `mysql -ppassword` (MySQL, MariaDB: the value is glued to `-p`; `-p` alone asks for it
+    // and the next word is the database; `-P3306` is the port).
+    type: "generic_secret",
+    regex: /(?<=\bsshpass\b[^\n|;&]{0,200})(?<![\w-])-p\s*["']?(?<secret>[^\s"'`]{3,})/g,
+    accept: (value) => !/^\$/.test(value) && !PLACEHOLDER_WORDS.test(value),
+  },
+  {
+    type: "generic_secret",
+    regex: /(?<=\b(?:mysql\w*|mariadb\w*)\b[^\n|;&]{0,200})(?<![\w-])-p["']?(?<secret>[^\s"'`-][^\s"'`]{2,})/g,
+    accept: (value) => !/^\$/.test(value) && !PLACEHOLDER_WORDS.test(value),
+  },
+  {
     // Option separated from its value by whitespace (`docker login --password value`); exact name (`--token-file` is
     // not one). Except after a database client on the same line: for `psql` (`--password` without an argument) and
     // `mysql --password` without `=`, the next word is the database name. 200-character window: unbounded, a
@@ -231,20 +311,42 @@ export const FORMAT_SUMMARIES: ReadonlyMap<string, string> = new Map([
   ["aws_access_key", "AWS access key identifiers (AKIA…, ASIA…)"],
   ["github_token", "GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)"],
   ["github_pat", "GitHub fine-grained personal access tokens (github_pat_…)"],
-  ["gitlab_token", "GitLab personal access tokens (glpat-…)"],
+  ["gitlab_token", "GitLab personal, runner, deploy and trigger tokens (glpat-, glrt-, gldt-, glptt-, GR1348941…)"],
   ["slack_token", "Slack tokens (xoxa-, xoxb-, xoxp-, xoxo-, xoxs-, xoxr-)"],
   ["slack_webhook", "Slack incoming webhook addresses"],
   ["stripe_key", "Stripe secret and restricted keys (sk_live_, rk_test_…)"],
   ["npm_token", "npm access tokens (npm_…)"],
   ["huggingface_token", "Hugging Face tokens (hf_…)"],
+  ["sendgrid_key", "SendGrid API keys (SG.…)"],
+  ["digitalocean_token", "DigitalOcean tokens (dop_v1_, doo_v1_, dor_v1_)"],
+  ["pypi_token", "PyPI upload tokens (pypi-AgEI…)"],
+  ["dockerhub_token", "Docker Hub access tokens (dckr_pat_, dckr_oat_)"],
+  ["vault_token", "HashiCorp Vault service and batch tokens (hvs., hvb.)"],
+  ["shopify_token", "Shopify access tokens and shared secrets (shpat_, shpca_, shppa_, shpss_)"],
+  ["atlassian_token", "Atlassian API tokens (ATATT3…)"],
+  ["twilio_key", "Twilio API keys (SK followed by 32 hexadecimal digits)"],
+  ["linear_key", "Linear API keys (lin_api_…)"],
+  ["grafana_token", "Grafana service account and cloud tokens (glsa_, glc_)"],
+  ["databricks_token", "Databricks tokens (dapi…)"],
+  ["doppler_token", "Doppler personal tokens (dp.pt.…)"],
+  ["postman_key", "Postman API keys (PMAK-…)"],
+  ["pulumi_token", "Pulumi access tokens (pul-…)"],
+  ["sentry_token", "Sentry user and organization tokens (sntryu_, sntrys_)"],
+  ["age_secret_key", "age secret keys (AGE-SECRET-KEY-1…)"],
+  ["square_token", "Square access tokens (sq0atp-…)"],
+  ["flyio_token", "Fly.io tokens (fo1_, fm1a_, fm1r_, fm2_)"],
+  ["planetscale_token", "PlanetScale tokens and passwords (pscale_tkn_, pscale_oauth_, pscale_pw_)"],
+  ["terraform_token", "HashiCorp Terraform Cloud tokens (….atlasv1.…)"],
+  ["cloudflare_origin_key", "Cloudflare Origin CA keys (v1.0-…)"],
   ["jwt", "JSON Web Tokens (three base64url segments starting with eyJ)"],
   ["bearer_token", "the token after Bearer, unless it reads as an ordinary word"],
+  ["authorization_token", "the credential after Authorization: Token, ApiKey, Api-Key, SSWS or Bot, unless it reads as an ordinary word"],
   ["basic_auth", "the value after Basic, when it decodes to user:password"],
   ["url_credentials", "the password of an address that carries a user and a password before the host, unless it is a placeholder or code"],
   ["passphrase", "a quoted phrase assigned to an upper-case PASSWORD, PASSWD, PASSPHRASE, SECRET or PASS variable"],
   [
     "generic_secret",
-    "a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass (name = value, name: value), or given to a command-line option such as --password or --token; only a value that looks like a secret (not code, a variable or a placeholder)",
+    "a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass, or to a name that ends in key (ENCRYPTION_KEY, AccountKey) (name = value, name: value), or given to a command-line option such as --password or --token, or the password given to curl -u, sshpass -p or mysql -p; only a value that looks like a secret (not code, a path, a variable or a placeholder)",
   ],
 ])
 
