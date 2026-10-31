@@ -130,16 +130,30 @@ On 2026-10-17 and 18, seven models were scored on a bench of 34 tool calls with 
 | Model | With the defaults | Recommended `thresholds` | With them | With the two rules | Notes |
 |---|---|---|---|---|---|
 | `nox-4b` | 26/34 | `{ "askRisk": 1.2, "denyRisk": 2.2 }` | 30/34 | 32/34 | the current default; indulgent on risk-only cases (installs, `crontab`, `curl \| bash`), which these thresholds turn into confirmations |
-| `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models: over-strict with the defaults, about 1.3 s per call with 26 of its 32 layers on the GPU (`systemone` path) |
+| `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models, and the minimum recommended for a local decision model: over-strict with the defaults |
 | `d3-nano` | 23/34 | `{ "denyNoul": 0.94, "denyRisk": 2.2, "askRisk": 1.2 }` | 25/34 | 27/34 | below `nox-4b` |
 | `d3-lite` | 21/34 | `{ "askRisk": 1.2 }` | 23/34 | 24/34 | below `nox-4b` |
-| `d3-edge` | 22/34 | `{ "denyNoul": 0.86, "askNoul": 0.6 }` | 25/34 | 27/34 | identical verdicts on CPU and GPU, 884 MiB and about 0.1 s per call on a 4 GB GPU (about 1.4 s on CPU); denies two benign network commands, indulgent on installs |
+| `d3-edge` | 22/34 | `{ "denyNoul": 0.86, "askNoul": 0.6 }` | 25/34 | 27/34 | identical verdicts on CPU and GPU; denies two benign network commands, indulgent on installs |
 
 Two other models were measured as well; their recommended values: `d3-flash` `{ "denyNoul": 0.98 }`, `d3-27b` `{ "denyNoul": 0.96 }`.
 
 The values do not transfer from one model to another: the `0.94` would drop three expected refusals from `nox-4b`, and `nox-4b`'s values do nothing for `d3-mini`. They were searched on this same bench, so the last points are optimistic: watch real traffic with `debug: true`.
 
-**Where to get the models.** The original d3 weights and their runtime are published on Hugging Face under [`vllm-sr`](https://huggingface.co/vllm-sr) (`d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`, `d3-flash`); the GGUF conversions served here are under [`ggml-org`](https://huggingface.co/ggml-org), one `vllm-d3-<model>-GGUF` repository per model, each with a `BF16` file (the original precision) and a `Q8_0` file; `Q4_K_M` is also published for `d3-mini` and `d3-flash`. The main table used `Q4_K_M` for `d3-mini` and `Q8_0` for `d3-nano`, `d3-lite` and `d3-edge`; the `d3-flash` measurements used `Q4_K_M`. `d3-mini`'s `BF16` file was measured too (on CPU, since it is 9.1 GiB): 27/34 at the defaults, 31/34 with the recommended values, 33/34 with the rules — the same verdicts as `Q4_K_M` once tuned, so quantizing to fit the 4 GB GPU costs nothing measurable.
+**Where to get the models.** The original d3 weights and their runtime are published on Hugging Face under [`vllm-sr`](https://huggingface.co/vllm-sr) (`d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`, `d3-flash`); the GGUF conversions served here are under [`ggml-org`](https://huggingface.co/ggml-org), one `vllm-d3-<model>-GGUF` repository per model, each with a `BF16` file (the original precision) and a `Q8_0` file; `Q4_K_M` is also published for `d3-mini` and `d3-flash`. The main table used `Q4_K_M` for `d3-mini` and `Q8_0` for `d3-nano`, `d3-lite` and `d3-edge`; the `d3-flash` measurements used `Q4_K_M`. `d3-mini`'s `BF16` file was measured too (on CPU, since it is 9.1 GiB): 27/34 at the defaults, 31/34 with the recommended values, 33/34 with the rules — the same verdicts as `Q4_K_M` once tuned, so quantizing costs nothing measurable.
+
+### Secret checks (prompts and tool outputs)
+
+The [prompt check](#prompt-check-promptcheck) and the [output check](#output-check-outputcheck) were measured on their own sets: typed passwords in many languages and forms, ordinary prompts, real prompts (counts only), and tool outputs in the format of `read`, `grep`, `bash` and `webfetch` with a secret the redaction patterns do not catch. A leak is a secret left visible; a false mask, an ordinary word masked. Best settings per model:
+
+| Model | `promptCheck` | Prompts: leaks, false masks | Outputs, stage 1 alone (parts of 2,000) | Notes |
+|---|---|---|---|---|
+| `nox-4b` | the defaults (`threshold` 0.2, `verify` 0.6, `askScore` 0.6, `partChars` 2000, `candidates` 1) | 5 to 6 %, 2 to 8 % | `threshold` 0.2: 13 of 235 secrets missed, 1 real output in 127 flagged | the defaults; whole output chain at these settings: 19 of 195 secrets missed, no real output masked whole |
+| `d3-mini` | `{ "threshold": 0.5, "verify": 0.9, "askScore": 0.5, "partChars": 1500, "candidates": 2 }` | 1 to 1.5 %, 0 to 1.2 % | `threshold` 0.1 to 0.3: 4 to 7 missed, 0 to 1 real output flagged | separates passwords from ordinary words much better than `nox-4b`, about ten times more slowly |
+| `d3-flash` | — | — | `threshold` 0.2: 4 missed, no real output flagged | |
+| `d3-nano` | — | — | `threshold` 0.1 (parts of 1,000): 18 missed, 23 real outputs in 263 flagged | below `nox-4b` |
+| `d3-lite`, `d3-edge` | — | — | over 70 missed, or hundreds of outputs flagged | not usable for the checks |
+
+The secrets still missed by every model are mostly a password written next to a user name with no keyword (`deploy / rainbow89`). A local model must accept a whole part in one batch: see the batch size below.
 
 ## Serving one locally
 
@@ -216,7 +230,7 @@ bash tools/model-bench/run_local_gpu.sh d3-mini \
   models/d3-mini/vllm-d3-mini-Q4_K_M.gguf 26 /tmp/mini-gpu.jsonl 4096
 ```
 
-`model` must equal the `--alias`. Each layer moved to the CPU slows every call; keep the batch at 4096 and lower `-ngl` until the server loads (`tools/serve.sh` defaults to 26, which needs 3.7 GiB). A batch of 8192 (for a decision with several long scripts, about 6,600 tokens) fits only with `-ngl 16`, slower on every call. The lighter models fit entirely with `-ngl 99` and a batch of 4096: `d3-nano` Q8_0 (~2.4 GiB), `d3-lite` Q8_0 (~1.2 GiB) and `d3-edge` Q8_0 (~0.9 GiB). `d3-flash` Q4_K_M is 6.6 GB and does not fit entirely on 4 GB; with a batch of 4096 it runs with `-ngl 8`, about 2.1 s for a 2,000-character part.
+`model` must equal the `--alias`. Each layer moved to the CPU slows every call; keep the batch at 4096 and lower `-ngl` until the server loads (`tools/serve.sh` defaults to 26, which needs 3.7 GiB). A batch of 8192 (for a decision with several long scripts, about 6,600 tokens) fits only with `-ngl 16`, slower on every call. The lighter models fit entirely with `-ngl 99` and a batch of 4096: `d3-nano` Q8_0 (~2.4 GiB), `d3-lite` Q8_0 (~1.2 GiB) and `d3-edge` Q8_0 (~0.9 GiB). `d3-flash` Q4_K_M is 6.6 GB and does not fit entirely on a 4 GB GPU; with a batch of 4096 it runs there with `-ngl 8`.
 
 **Shared blind spots.** Every model in the table allows an in-place file edit (`sed -i`) and misses a secret looked up in the shell history (`history | grep`). Two [custom rules](configuration.md#configuration-reference) settle both for any model, before it is called:
 
