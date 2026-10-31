@@ -4,7 +4,7 @@
 // its own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
 import { isAbsolute, join, resolve } from "node:path"
-import { declaredDecision, normalizedURL, outputCheckRequested, promptCheckRequested, type PluginDeclaration } from "./config.ts"
+import { checkRequested, declaredDecision, normalizedURL, type PluginDeclaration } from "./config.ts"
 
 /**
  * OpenCode 2.0.31 global configuration directory (`util/src/global.ts`, `global-roots.ts`): `OPENCODE_CONFIG_DIR`
@@ -92,7 +92,7 @@ export function declaredPluginOptions(input: {
  * system configuration? Reason in words (never a value) otherwise.
  */
 export function declaredOutputCheck(input: {
-  /** Option checked (default `outputCheck`); `promptCheck` is on when the file leaves it out. */
+  /** Option checked (default `outputCheck`); both are on when the file leaves them out. */
   readonly option?: "outputCheck" | "promptCheck"
   readonly pluginDir: string
   readonly effectiveBaseURL: string
@@ -122,7 +122,7 @@ export function declaredOutputCheck(input: {
       reasons.push(`${label} configuration: it uses a {file:…} reference`)
       continue
     }
-    if (!(option === "promptCheck" ? promptCheckRequested(options[option]) : outputCheckRequested(options[option]))) {
+    if (!checkRequested(options[option])) {
       reasons.push(`${label} configuration: ${option} is not enabled there`)
       continue
     }

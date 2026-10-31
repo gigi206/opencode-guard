@@ -299,10 +299,10 @@ export async function setupGuard(
     log.error("secret redaction hooks failed to register: secrets may reach the provider", error)
     degraded.push("secret redaction: INCOMPLETE")
   }
-  // Output check (disabled by default): effective only if the global file also declares it, with the
-  // same model address; otherwise inactive, with the reason in words.
+  // Output check (on by default with the decision model): effective only if the global file declares the same model
+  // address and does not turn it off; otherwise inactive, with the reason in words when the user set it.
   let outputCheck: OutputCheckState | undefined
-  if (config.outputCheck) {
+  if (config.outputCheck && (config.outputCheck.explicit || (model && config.decision))) {
     try {
       outputCheck =
         model && config.decision
@@ -322,7 +322,7 @@ export async function setupGuard(
           unprotected,
         })
         log.warn("output check active: tool outputs, redacted, are sent to the decision model")
-      } else if (!outputCheck.active) log.warn(`outputCheck requested but inactive: ${outputCheck.reason}`)
+      } else if (!outputCheck.active && config.outputCheck.explicit) log.warn(`outputCheck requested but inactive: ${outputCheck.reason}`)
     } catch (error) {
       log.error("output check unavailable", error)
       outputCheck = { active: false, reason: "internal error" }
@@ -341,7 +341,8 @@ export async function setupGuard(
   const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}`
   // Prompt check: its state whenever the decision model is on (`off` when turned off, so that a project doing it shows).
   const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}` : model && !config.promptCheck ? "; prompt check: off" : ""
-  const checked = `${outputCheck === undefined ? "" : `; output check: ${outputCheck.active ? "active" : "inactive"}`}${prompted}`
+  const outputs = outputCheck !== undefined ? `; output check: ${outputCheck.active ? "active" : "inactive"}` : model && !config.outputCheck ? "; output check: off" : ""
+  const checked = `${outputs}${prompted}`
   log.info(`active (decision model: ${modelText}; confirmations: ${confirmations}; system config: ${enforced}${profile}${overrides}${off}${checked}${degraded.map((item) => `; ${item}`).join("")})`)
   if (config.version) log.info(`settings by agent and by project (${config.version.summary})`)
   if (config.askAs === "deny") log.warn("unattended mode (askAs: deny): every confirmation request is denied")

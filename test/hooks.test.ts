@@ -407,7 +407,7 @@ describe("decision model key from settings", () => {
     await setupGuard(fake.ctx, {})
     await fake.trigger("tool.execute.before", before("shell", { command: "cargo build" })).catch(() => {})
     const log = readFileSync(file, "utf8")
-    assert.match(log, /INFO active \(decision model: nox-4b via http:\/\/127\.0\.0\.1:9\/v1 \(chat\); confirmations: ask; system config: (?:not )?enforced; prompt check: inactive\)/)
+    assert.match(log, /INFO active \(decision model: nox-4b via http:\/\/127\.0\.0\.1:9\/v1 \(chat\); confirmations: ask; system config: (?:not )?enforced; output check: inactive; prompt check: inactive\)/)
     assert.match(log, /INFO shell → ask \(model-error\): nox-4b unavailable/)
     assert.ok(!log.includes(KEY))
   })

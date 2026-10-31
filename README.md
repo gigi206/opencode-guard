@@ -104,7 +104,7 @@ All options live under `options` in the plugin entry.
 | `askAs` | `"ask"` | `"deny"` turns every confirmation into a refusal (unattended mode). |
 | `thresholds` | see docs | `denyNoul`, `askNoul`, `askExfiltration`, `denyRisk`, `askRisk`, `minConfidence`. |
 | `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`. |
-| `outputCheck` | off | Also ask the decision model whether an output still holds a secret in clear. |
+| `outputCheck` | on | Also ask the decision model whether an output still holds a secret in clear. |
 | `promptCheck` | on | Also ask the decision model for a secret typed in plain words in the prompt, in any language, and mask it. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
 | `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"` (or `"allow"`), `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"allow"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |

@@ -23,17 +23,20 @@ const entry = (options: unknown) => JSON.stringify({ plugins: [{ package: PLUGIN
 
 describe("batch 32: outputCheck option", () => {
   const parse = (value: unknown) => parseConfig({ outputCheck: value })
-  it("absent, false, empty or enabled false → not requested; true, string, object → provisional or settled values", () => {
-    for (const value of [undefined, false, "", "false", "0", { enabled: false }, { enabled: "false" }]) assert.equal(parse(value).config.outputCheck, undefined)
-    assert.deepEqual(parse(true).config.outputCheck, DEFAULT_OUTPUT_CHECK)
-    assert.deepEqual(parse("TRUE").config.outputCheck, DEFAULT_OUTPUT_CHECK)
-    assert.deepEqual(parse({ threshold: "0,8", timeoutMs: 1500 }).config.outputCheck, { threshold: 0.8, timeoutMs: 1500 })
+  it("on by default (absent, empty); false, \"false\", \"0\" or enabled false → off; true, string, object → explicit values", () => {
+    for (const value of [undefined, ""]) assert.deepEqual(parse(value).config.outputCheck, DEFAULT_OUTPUT_CHECK)
+    for (const value of [false, "false", "0", { enabled: false }, { enabled: "false" }]) assert.equal(parse(value).config.outputCheck, undefined)
+    assert.deepEqual(parse(true).config.outputCheck, { ...DEFAULT_OUTPUT_CHECK, explicit: true })
+    assert.deepEqual(parse("TRUE").config.outputCheck, { ...DEFAULT_OUTPUT_CHECK, explicit: true })
+    assert.deepEqual(parse({ threshold: "0,8", timeoutMs: 1500 }).config.outputCheck, { threshold: 0.8, timeoutMs: 1500, explicit: true })
   })
   it("default values calibrated for nox-4b (2026-10-17): threshold 0.45, timeout 1100 ms", () => {
-    assert.deepEqual(DEFAULT_OUTPUT_CHECK, { threshold: 0.45, timeoutMs: 1100 })
+    assert.deepEqual(DEFAULT_OUTPUT_CHECK, { threshold: 0.45, timeoutMs: 1100, explicit: false })
   })
-  it("invalid value, unknown key, threshold out of bounds → warning", () => {
-    assert.match(parse("maybe").warnings.join("\n"), /invalid value for outputCheck/)
+  it("invalid value (kept on), unknown key, threshold out of bounds → warning", () => {
+    const typo = parse("maybe")
+    assert.match(typo.warnings.join("\n"), /invalid value for outputCheck \(.*\): output check on, as by default/)
+    assert.deepEqual(typo.config.outputCheck, DEFAULT_OUTPUT_CHECK)
     assert.match(parse({ threshhold: 1 }).warnings.join("\n"), /unknown option outputCheck\.threshhold/)
     const out = parse({ threshold: 2 })
     assert.equal(out.config.outputCheck?.threshold, DEFAULT_OUTPUT_CHECK.threshold)
@@ -55,10 +58,11 @@ describe("batch 32: declaration in the global file (option effective only if pre
     const jsonc = `// commentaire\n{ "plugins": [ { "package": "${PLUGIN}", /* c */ "options": { "outputCheck": "true", "jev": { "baseURL": "${URL_A}" }, }, }, ], }`
     assert.deepEqual(check(withGlobal(jsonc, "opencode.jsonc")), { active: true })
   })
-  it("{env:…} resolved with the server environment; missing variable → inactive", () => {
+  it("{env:…} resolved with the server environment; missing address variable → inactive; missing switch → on", () => {
     const dir = withGlobal(entry({ outputCheck: "{env:GUARD_OC}", decision: { baseURL: "{env:GUARD_URL}" } }))
     assert.deepEqual(check(dir, { GUARD_OC: "true", GUARD_URL: URL_A }), { active: true })
-    assert.equal(check(dir, { GUARD_URL: URL_A }).active, false)
+    assert.deepEqual(check(dir, { GUARD_URL: URL_A }), { active: true })
+    assert.equal(check(dir, { GUARD_OC: "false", GUARD_URL: URL_A }).active, false)
     assert.equal(check(dir, { GUARD_OC: "true" }).active, false)
   })
   it("each ambiguous case → inactive, with a reason in words", () => {
@@ -71,8 +75,9 @@ describe("batch 32: declaration in the global file (option effective only if pre
     assert.match(reason(temp("empty")), /global configuration: it is missing or unreadable/)
     assert.match(reason(withGlobal("{ not json")), /global configuration: it is not valid JSON/)
     assert.match(reason(withGlobal(JSON.stringify({ plugins: ["/other/plugin"] }))), /does not declare this plugin/)
-    assert.match(reason(withGlobal(JSON.stringify({ plugins: [PLUGIN] }))), /outputCheck is not enabled there/)
-    assert.match(reason(withGlobal(entry({ decision: { baseURL: URL_A } }))), /outputCheck is not enabled there/)
+    // Absent = on: then only the address decides.
+    assert.match(reason(withGlobal(JSON.stringify({ plugins: [PLUGIN] }))), /address differs/)
+    assert.deepEqual(check(withGlobal(entry({ decision: { baseURL: URL_A } }))), { active: true })
     assert.match(reason(withGlobal(entry({ outputCheck: false, decision: { baseURL: URL_A } }))), /outputCheck is not enabled there/)
     assert.match(reason(withGlobal(entry({ outputCheck: true, decision: { baseURL: "https://attacker.example.test/v1" } }))), /address differs/)
     assert.match(reason(withGlobal(entry({ outputCheck: true }))), /address differs/)
@@ -342,8 +347,12 @@ describe("batch 32: startup (option, global file, INFO line)", () => {
     await setupGuard(fakeContext({ logFile: file, ...options }).ctx, {}, temp("etc"), globalDir)
     return readFileSync(file, "utf8")
   }
-  it("option absent → no mention; requested and declared → active, warning", async () => {
-    assert.ok(!(await start({ decision }, undefined)).includes("output check"))
+  it("no model → no mention; option absent or requested, and declared → active, warning; turned off → shown off", async () => {
+    assert.ok(!(await start({}, undefined)).includes("output check"))
+    const declared = temp("global")
+    writeFileSync(join(declared, "opencode.json"), entry({ decision }))
+    assert.match(await start({ decision }, declared), /INFO active \(.*; output check: active(?:; prompt check: \w+)?\)/)
+    assert.match(await start({ decision, outputCheck: false }, declared), /INFO active \(.*; output check: off(?:; prompt check: \w+)?\)/)
     const global = temp("global")
     writeFileSync(join(global, "opencode.json"), entry({ outputCheck: true, decision }))
     const log = await start({ decision, outputCheck: true }, global)
@@ -359,5 +368,9 @@ describe("batch 32: startup (option, global file, INFO line)", () => {
     assert.ok(!log.includes("output check active"), log)
     const off = await start({ outputCheck: true }, empty)
     assert.match(off, /WARN outputCheck requested but inactive: the decision model is disabled/)
+    // Absent and not declared: inactive, said on the start line only.
+    const quiet = await start({ decision }, empty)
+    assert.match(quiet, /INFO active \(.*; output check: inactive(?:; prompt check: \w+)?\)/)
+    assert.ok(!quiet.includes("outputCheck requested"), quiet)
   })
 })

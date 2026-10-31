@@ -62,8 +62,8 @@ export interface GuardConfig {
   /** Primary agent with no checks and no redaction (chosen by the user, e.g. Shift+Tab); absent = disabled. */
   readonly unprotectedAgent?: string
   /**
-   * Checking of tool outputs by the decision model (`outputCheck` option); absent = not requested. Effective
-   * only if the global configuration file also declares it, with the same address (`output-check.ts`).
+   * Checking of tool outputs by the decision model (`outputCheck` option): on by default, `undefined` when turned off.
+   * Effective only if the global configuration declares the same address and does not turn it off (`output-check.ts`).
    */
   readonly outputCheck?: OutputCheckConfig
   /**
@@ -91,13 +91,15 @@ export interface OutputCheckConfig {
   readonly threshold: number
   /** Timeout specific to one check, without retry. */
   readonly timeoutMs: number
+  /** Set by the user (`true` or an object); absent = on by default, without a warning when it cannot be. */
+  readonly explicit: boolean
 }
 
 /**
  * Calibrated on 2026-10-17 for nox-4b on 100 real shell outputs (planted fake secrets): at threshold 0.45, 2% false
  * positives (upper bound) and 90% of fake secrets detected at the start and middle; timeout ≈ 1.5 × the 99th percentile (722 ms).
  */
-export const DEFAULT_OUTPUT_CHECK: OutputCheckConfig = { threshold: 0.45, timeoutMs: 1100 }
+export const DEFAULT_OUTPUT_CHECK: OutputCheckConfig = { threshold: 0.45, timeoutMs: 1100, explicit: false }
 
 export interface PromptCheckConfig {
   /** Probability from which a part of the prompt gives a secret (stage 1). */
@@ -467,11 +469,8 @@ function warnUnknown(value: Record<string, unknown>, known: readonly string[], p
   for (const key of Object.keys(value)) if (!known.includes(key)) warnings.push(`unknown option ${prefix}${key}, ignored`)
 }
 
-/**
- * `outputCheck` requested: `true` (or `"true"`, `"1"`), or an object whose `enabled` is not false. Same reading for the
- * options received and for the global file re-read by the plugin.
- */
-export function outputCheckRequested(value: unknown): boolean {
+/** Written as on: `true` (or `"true"`, `"1"`), or an object whose `enabled` is not false. */
+export function explicitlyOn(value: unknown): boolean {
   if (value === true) return true
   if (typeof value === "string") return ["true", "1"].includes(value.trim().toLowerCase())
   if (!isRecord(value)) return false
@@ -480,44 +479,46 @@ export function outputCheckRequested(value: unknown): boolean {
   return enabled === true || (typeof enabled === "string" && ["true", "1"].includes(enabled.trim().toLowerCase()))
 }
 
-const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs"]
-
-function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfig | undefined {
-  if (value === undefined || isEmpty(value) || value === false) return undefined
-  if (isRecord(value)) {
-    warnUnknown(value, OUTPUT_CHECK_KEYS, "outputCheck.", warnings)
-    if (!outputCheckRequested(value)) return undefined
-    return {
-      threshold: num(value.threshold, DEFAULT_OUTPUT_CHECK.threshold, "outputCheck.threshold", warnings, 0, 1),
-      timeoutMs: num(value.timeoutMs, DEFAULT_OUTPUT_CHECK.timeoutMs, "outputCheck.timeoutMs", warnings, 100, 60_000),
-    }
-  }
-  if (outputCheckRequested(value)) return DEFAULT_OUTPUT_CHECK
-  const raw = text(value).toLowerCase()
-  if (raw !== "false" && raw !== "0") warnings.push(`invalid value for outputCheck (${shown(value)}): output check not requested`)
-  return undefined
-}
-
-const PROMPT_CHECK_KEYS = ["enabled", "threshold"]
-
 /**
- * `promptCheck` requested: on unless turned off by `false`, `"false"`, `"0"` or `{ "enabled": false }` (same values as a
- * string). Same reading for the options and for the global file re-read by the plugin: a typo never turns it off.
+ * `outputCheck` or `promptCheck` requested: on unless turned off by `false`, `"false"`, `"0"` or `{ "enabled": false }`
+ * (same values as a string). Same reading for the options and for the global file re-read by the plugin: a typo never
+ * turns a check off.
  */
-export function promptCheckRequested(value: unknown): boolean {
+export function checkRequested(value: unknown): boolean {
   const off = (item: unknown) => item === false || (typeof item === "string" && ["false", "0"].includes(item.trim().toLowerCase()))
   return !(off(value) || (isRecord(value) && off(value.enabled)))
 }
 
+const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs"]
+
+/** `outputCheck`: on by default; an invalid value keeps it on, with a warning. */
+function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfig | undefined {
+  if (!checkRequested(value)) return undefined
+  if (value === undefined || isEmpty(value)) return DEFAULT_OUTPUT_CHECK
+  if (isRecord(value)) {
+    warnUnknown(value, OUTPUT_CHECK_KEYS, "outputCheck.", warnings)
+    return {
+      threshold: num(value.threshold, DEFAULT_OUTPUT_CHECK.threshold, "outputCheck.threshold", warnings, 0, 1),
+      timeoutMs: num(value.timeoutMs, DEFAULT_OUTPUT_CHECK.timeoutMs, "outputCheck.timeoutMs", warnings, 100, 60_000),
+      explicit: true,
+    }
+  }
+  if (explicitlyOn(value)) return { ...DEFAULT_OUTPUT_CHECK, explicit: true }
+  warnings.push(`invalid value for outputCheck (${shown(value)}): output check on, as by default`)
+  return DEFAULT_OUTPUT_CHECK
+}
+
+const PROMPT_CHECK_KEYS = ["enabled", "threshold"]
+
 /** `promptCheck`: on by default; an invalid value keeps it on, with a warning. */
 function promptCheckOption(value: unknown, warnings: string[]): PromptCheckConfig | undefined {
-  if (!promptCheckRequested(value)) return undefined
+  if (!checkRequested(value)) return undefined
   if (value === undefined || isEmpty(value)) return DEFAULT_PROMPT_CHECK
   if (isRecord(value)) {
     warnUnknown(value, PROMPT_CHECK_KEYS, "promptCheck.", warnings)
     return { threshold: num(value.threshold, DEFAULT_PROMPT_CHECK.threshold, "promptCheck.threshold", warnings, 0, 1), explicit: true }
   }
-  if (outputCheckRequested(value)) return { ...DEFAULT_PROMPT_CHECK, explicit: true }
+  if (explicitlyOn(value)) return { ...DEFAULT_PROMPT_CHECK, explicit: true }
   warnings.push(`invalid value for promptCheck (${shown(value)}): prompt check on, as by default`)
   return DEFAULT_PROMPT_CHECK
 }
