@@ -12,7 +12,7 @@ import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
 import { registerGate } from "./hooks/gate.ts"
 import { registerClaudeAgentWarning } from "./hooks/claude-agent.ts"
-import { registerOutputCheck } from "./hooks/output-check.ts"
+import { createUserShellCheck, registerOutputCheck, type UserShellCheck } from "./hooks/output-check.ts"
 import { createPromptGate, type PromptGate } from "./hooks/prompt-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
@@ -312,8 +312,11 @@ export async function setupGuard(
       degraded.push("prompt check: UNAVAILABLE")
     }
   }
+  // `!` command outputs, checked on the wire by the output check's search: set below once the output check is active.
+  const userShell: { check?: UserShellCheck } = {}
   try {
     await registerRedaction(ctx, {
+      userShell,
       redactor,
       redactPrompt: config.features.redactPrompt,
       redactOutputs: config.features.redactOutputs,
@@ -354,6 +357,13 @@ export async function setupGuard(
           askAs: config.askAs,
           log,
           unprotected,
+        })
+        userShell.check = createUserShellCheck({
+          model: createModelClient({ ...config.decision, timeoutMs: config.outputCheck.timeoutMs }),
+          label: config.decision.model,
+          threshold: config.outputCheck.threshold,
+          tuning: config.outputCheck.tuning,
+          questions: config.outputCheck.questions,
         })
         log.warn("output check active: tool outputs, redacted, are sent to the decision model")
       } else if (!outputCheck.active && config.outputCheck.explicit) log.warn(`outputCheck requested but inactive: ${outputCheck.reason}`)

@@ -394,3 +394,69 @@ function withNote<T>(content: T, note: string): T {
   }
   return content
 }
+
+/**
+ * Texts OpenCode adds to the conversation for a `!` command typed by the user (OpenCode 2.2.5, `ShellResult.userNotification`
+ * and the failure to start): no hook sees them before the wire, where they are found by these openings.
+ */
+export const USER_SHELL_OPENINGS = ["The following shell command was executed by the user:\n", "User shell command failed to start:\n"] as const
+
+/** Error that blocks a request whose `!` command output could not be checked (the decision model failed). */
+export class UserShellUncheckedError extends Error {
+  override readonly name = "UserShellUncheckedError"
+}
+
+export const USER_SHELL_BLOCKED_MESSAGE =
+  "[guard] Request to the model provider blocked: the output of a ! command in this session could not be checked by the decision model for a secret in clear (it did not answer), so nothing was sent. Send it again once the decision model answers; or start a new session without that output."
+
+export interface UserShellCheckDeps {
+  readonly model: ModelClient
+  readonly label: string
+  readonly threshold: number
+  readonly tuning: CheckTuning
+  readonly questions?: OutputQuestionTexts
+  readonly cache?: { readonly max: number; readonly ttlMs: number }
+  readonly now?: () => number
+}
+
+/**
+ * Check of the `!` command texts of a request body (already technically redacted), with the output check's search and its
+ * cache: every request carries the whole history again, the parts already judged cost nothing. Returns the masked text of
+ * each one that changes; throws `UserShellUncheckedError` when the model fails (the request is then blocked).
+ */
+export function createUserShellCheck(deps: UserShellCheckDeps) {
+  const checker = createSecretChecker({
+    model: deps.model,
+    label: deps.label,
+    threshold: deps.threshold,
+    tuning: deps.tuning,
+    field: "output",
+    questions: outputQuestions(deps.questions ?? DEFAULT_OUTPUT_QUESTIONS),
+    cut: "line",
+    cache: { ...(deps.cache ?? OUTPUT_CACHE), now: deps.now ?? Date.now },
+  })
+  return async function check(texts: readonly string[]): Promise<{ masked: Map<string, string>; words: number; parts: number }> {
+    const masked = new Map<string, string>()
+    let words = 0
+    let parts = 0
+    const distinct = [...new Set(texts)].filter((text) => !nothingToJudge(text))
+    const outcomes = await Promise.all(distinct.map((text) => checker(text, { tool: "user shell command" })))
+    distinct.forEach((text, i) => {
+      const outcome = outcomes[i]!
+      if (outcome.failure) throw new UserShellUncheckedError(outcome.failure)
+      let out = ""
+      let at = 0
+      for (const range of outcome.unresolved) {
+        out += text.slice(at, range.start) + OUTPUT_UNCHECKED_MARK + (/\n$/.test(text.slice(range.start, range.end)) ? "\n" : "")
+        at = range.end
+      }
+      const result = maskWords(out + text.slice(at), outcome.found, OUTPUT_SECRET_MARK)
+      words += outcome.found.size
+      parts += outcome.unresolved.length
+      if (result.text !== text) masked.set(text, result.text)
+    })
+    return { masked, words, parts }
+  }
+}
+
+export type UserShellCheck = ReturnType<typeof createUserShellCheck>

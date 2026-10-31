@@ -4,6 +4,7 @@ import { redactToolError } from "../secrets/errors.ts"
 import { PROMPT_NOTE } from "../secrets/prompt.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
 import { timedMap } from "./gate.ts"
+import { USER_SHELL_BLOCKED_MESSAGE, USER_SHELL_OPENINGS, UserShellUncheckedError, type UserShellCheck } from "./output-check.ts"
 import type { PromptGate } from "./prompt-check.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { GuardContext, Logger } from "../types.ts"
@@ -19,6 +20,8 @@ export interface RedactionDeps {
   readonly unprotected?: UnprotectedGate
   /** Check of the typed prompt by the decision model (`promptCheck` option, active); absent = technical redaction only. */
   readonly promptCheck?: PromptGate
+  /** Check of the `!` command outputs on the wire (set once the output check is active); absent or empty = none. */
+  readonly userShell?: { check?: UserShellCheck }
 }
 
 // Common rule: a redaction hook does not throw (an exception in a session hook makes the
@@ -132,6 +135,25 @@ export function bodyCodec(encoding: string, z: Zlib = zlib as unknown as Zlib): 
   return undefined
 }
 
+/** Strings of a request body that hold a `!` command text (outside signed blocks, which are never changed). */
+function userShellTexts(value: unknown, out: string[] = [], depth = 0): string[] {
+  if (typeof value === "string") {
+    if (USER_SHELL_OPENINGS.some((opening) => value.includes(opening))) out.push(value)
+  } else if (value !== null && typeof value === "object" && depth < 64) {
+    if (!Array.isArray(value) && isSignedBlock(value as Record<string, unknown>)) return out
+    for (const item of Object.values(value)) userShellTexts(item, out, depth + 1)
+  }
+  return out
+}
+
+/** The body with each checked `!` command text replaced by its masked version. */
+function replaceTexts<T>(value: T, masked: ReadonlyMap<string, string>, depth = 0): T {
+  if (typeof value === "string") return (masked.get(value) ?? value) as T
+  if (value === null || typeof value !== "object" || depth >= 64) return value
+  if (Array.isArray(value)) return value.map((item) => replaceTexts(item, masked, depth + 1)) as T
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceTexts(item, masked, depth + 1)])) as T
+}
+
 export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps): Promise<void> {
   const { redactor, log } = deps
 
@@ -232,8 +254,34 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
     warned.add(`${hook}\u0000${cause}`)
     log.warn(`${hook}: ${cause}: ${hook === "http.request" ? "request body" : "frame"} not inspected, secrets NOT redacted`)
   }
+  /**
+   * `!` command texts of a technically redacted body checked by the decision model; `undefined` when nothing changes. A
+   * model failure blocks the request (`UserShellUncheckedError`), the user's choice: nothing unchecked leaves.
+   */
+  const userShell = async (value: unknown, hook: string): Promise<{ value: unknown; count: number } | undefined> => {
+    const check = deps.userShell?.check
+    if (!check) return undefined
+    const texts = userShellTexts(value)
+    if (!texts.length) return undefined
+    let result: Awaited<ReturnType<UserShellCheck>>
+    try {
+      result = await check(texts)
+    } catch (error) {
+      if (!(error instanceof UserShellUncheckedError)) throw error
+      try {
+        log.warn(`${hook}: request blocked: the output of a ! command could not be checked (${error.message})`)
+      } catch {}
+      throw new Error(USER_SHELL_BLOCKED_MESSAGE)
+    }
+    if (!result.masked.size) return undefined
+    log.debug(`${hook}: ! command output: ${result.words} word(s) masked, ${result.parts} part(s) masked whole`)
+    return { value: replaceTexts(value, result.masked), count: result.masked.size }
+  }
+
   /** Internal error in the safety net: the request does not leave; the cause goes to the log only (a logger that throws changes nothing). */
   const blocked = (hook: string, error: unknown): never => {
+    // A `!` command output the decision model could not check: its own message, already logged.
+    if (error instanceof Error && error.message === USER_SHELL_BLOCKED_MESSAGE) throw error
     try {
       log.error(`internal error in ${hook}: request blocked`, error)
     } catch {}
@@ -263,7 +311,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
         notInspected(codec ? `${encoding} body could not be decoded` : "body is not valid JSON")
         return
       }
-      const result = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+      const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+      const checked = await userShell(redacted.value, "http.request")
+      const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
       if (!result.count) return
       const headers = new Headers(request.headers)
       headers.delete("content-length")
@@ -287,7 +337,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
           notInspected("frame is not valid JSON", "experimental.ws.send")
           return
         }
-        const result = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+        const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+        const checked = await userShell(redacted.value, "experimental.ws.send")
+        const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
         if (!result.count) return
         event.frame = JSON.stringify(result.value)
         log.debug(`ws.send (${event.kind}): ${result.count} secret(s) redacted`)

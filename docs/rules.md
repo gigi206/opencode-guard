@@ -203,7 +203,7 @@ The patterns behind the detection above, by type (the type names the placeholder
 - **Non-interactive `opencode run`** (without `--auto`). Confirmations are auto-rejected and the model continues without the action.
 - **"Always allow"** is not remembered for the plugin's confirmations: each action judged dangerous is asked again.
 - **`.env` reads.** Reading a `.env` file triggers two prompts: the plugin's, then OpenCode's built-in `*.env` rule.
-- **Your own `!` commands** are never blocked; only their output is redacted on the wire.
+- **Your own `!` commands** are never blocked. OpenCode adds the command and its output to the conversation without any hook, so they are redacted on the wire only; with the [output check](decision-model.md#output-check-outputcheck), the decision model also looks there for a secret written in plain words, masked in what is sent (the local history keeps it), and if it does not answer, the request is blocked: send it again once it answers.
 - **Scheduled tasks** (OpenCode 2.2, `experimental.schedules`): a task's condition written in code runs its tool calls through the plugin like any other; a condition written as a shell command is run by OpenCode itself, outside the tool hooks, and the confirmations it would need are settled without anyone present when it runs. The plugin refuses every confirmation of such a command (it comes from no tool call) rather than letting OpenCode allow it; its refusals stay refusals; the decision model does not see it. Turn scheduled tasks off in the protected layer ([Full protection](configuration.md#protecting-the-plugin-from-project-configuration)) if a project should not turn them on.
 
 ### Unattended mode (`askAs: "deny"`)

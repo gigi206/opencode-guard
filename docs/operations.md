@@ -65,7 +65,7 @@ echo "OPENAI_API_KEY=sk-proj-$(head -c 40 /dev/urandom | base64 | tr -dc A-Za-z0
   - voice calls: what a client sends to start a voice call or, in OpenCode 2.1, to change its instructions is relayed by the OpenCode server to the voice provider, outside the hooks;
   - raw files under OpenCode's `tool-output` data directory (full outputs of truncated tool results, shell command output files, binary contents returned by MCP tools), which are not sent unless read again;
   - in OpenCode 2.2, the raw output of a scheduled task's condition kept in its state, and the files of artifacts under OpenCode's data directory.
-- **Model-generated tool arguments** are redacted on the wire but stored as-is in the local history.
+- **Model-generated tool arguments** are redacted on the wire but stored as-is in the local history; so is a secret the decision model finds in the output of one of your `!` commands.
 - **False positives:**
   - a secret in MCP tool arguments or in CodeMode code is denied;
   - an MCP or plugin tool that only reads a protected location (`/etc`, `~/.ssh/`, OpenCode's configuration) asks for confirmation, since the plugin cannot tell whether the tool reads or writes;
