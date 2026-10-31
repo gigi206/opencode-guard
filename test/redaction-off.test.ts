@@ -90,7 +90,8 @@ describe("redaction formats turned off by the global guard.json", () => {
   it("RO-4: the plugin applies it at startup (start line) and keeps the model's right to allow asks", async () => {
     const w = world({ decision: DECISION })
     writeFileSync(w.guardFile, JSON.stringify({ redactionOff: ["jwt"] }))
-    const p = await plugin(w, { decision: DECISION })
+    // Output check off: its model is unreachable here, and each call would wait for its timeout.
+    const p = await plugin(w, { decision: DECISION, outputCheck: false })
     assert.match(p.log(), /INFO active \(.*; redaction formats off: jwt[;)]/)
     assert.equal(await p.output(), "clear")
     assert.ok(!p.log().includes("decision model not declared by the global configuration"), p.log())

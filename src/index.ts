@@ -6,7 +6,7 @@ import { readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
+import { DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
 import { createDecider } from "./decide.ts"
 import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
@@ -334,11 +334,11 @@ export async function setupGuard(
           model: createModelClient({ ...config.decision, timeoutMs: config.outputCheck.timeoutMs }),
           label: config.decision.model,
           threshold: config.outputCheck.threshold,
+          tuning: config.outputCheck.tuning,
+          skip: config.outputCheck.skip,
           questions: config.outputCheck.questions,
-          maxStateChars: config.maxStateChars,
+          prompt: config.promptCheck ?? DEFAULT_PROMPT_CHECK,
           askAs: config.askAs,
-          cacheTtlMs: config.cacheTtlMs,
-          cacheMax: config.cacheMax,
           log,
           unprotected,
         })

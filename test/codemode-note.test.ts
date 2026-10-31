@@ -1,6 +1,7 @@
 import "./tmp.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
+import { DEFAULT_OUTPUT_CHECK } from "../src/config.ts"
 import { setupGuard } from "../src/index.ts"
 import { registerOutputCheck } from "../src/hooks/output-check.ts"
 import { REDACTION_NOTE } from "../src/hooks/redaction.ts"
@@ -120,11 +121,10 @@ describe("2.1.3 review: the note does not give the output check text to judge", 
       redactor: createRedactor(),
       model,
       label: "nox-4b",
-      threshold: 0.7,
-      maxStateChars: 4000,
+      threshold: DEFAULT_OUTPUT_CHECK.threshold,
+      tuning: DEFAULT_OUTPUT_CHECK.tuning,
+      skip: DEFAULT_OUTPUT_CHECK.skip,
       askAs: "ask",
-      cacheTtlMs: 600_000,
-      cacheMax: 500,
       log,
     })
     await fake.trigger("tool.execute.before", start("call_j"))
@@ -132,6 +132,7 @@ describe("2.1.3 review: the note does not give the output check text to judge", 
     assert.equal(states.length, 0)
     await fake.trigger("tool.execute.before", start("call_k"))
     await fake.trigger("tool.execute.after", done("execute", { output: { output: "x" }, content: text(`user list: ${PLACEHOLDER}\n\n${REDACTION_NOTE}`) }, "call_k"))
-    assert.equal(states.length, 1)
+    // The script's text, and the string of its output object.
+    assert.equal(states.length, 2)
   })
 })

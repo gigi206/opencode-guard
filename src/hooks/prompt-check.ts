@@ -5,22 +5,19 @@
 // seen but not located, a model that fails or a check that takes too long leads to a confirmation: approved, the
 // prompt is sent with what was masked; otherwise it is blocked (never sent). The decision model is the trusted zone (it
 // may see a value in clear); the conversation model never does. Calibration: dev/plans/prompt-secrets/plan.md.
-import { ModelError, type ModelClient } from "../model/client.ts"
+import type { ModelClient } from "../model/client.ts"
 import { DEFAULT_PROMPT_TUNING, type PromptCheckTuning } from "../config.ts"
-import { DEFAULT_PROMPT_QUESTIONS, PROMPT_QUESTION_ID, PROMPT_VERIFY_QUESTION_ID, PROMPT_WORD_QUESTION_ID, promptQuestions, type PromptQuestionTexts } from "../model/questions.ts"
-import { placeholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
+import { DEFAULT_PROMPT_QUESTIONS, promptQuestions, type PromptQuestionTexts } from "../model/questions.ts"
+import { placeholder, type Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PromptEvent } from "../types.ts"
 import { guardAction } from "./gate.ts"
+import { createSecretChecker, maskWords } from "./secret-check.ts"
+
+export { promptWords } from "./secret-check.ts"
 
 /** Settings of the check (`promptCheck.<name>`, `config.ts`); the defaults are calibrated for nox-4b. */
 export type { PromptCheckTuning }
 export const PROMPT_CHECK_TUNING = DEFAULT_PROMPT_TUNING
-
-/**
- * What the model sees in place of a masked secret: a `[[GUARD_REDACTED:…]]` placeholder or a removed word reads as a
- * secret still there (`redis://user:@host` 0.37, `<redacted>` 0.09).
- */
-const SHOWN_MASK = "<redacted>"
 
 export interface PromptCheckDeps {
   readonly redactor: Redactor
@@ -44,199 +41,41 @@ export type CheckOutcome =
   | { readonly kind: "masked"; readonly text: string; readonly count: number; readonly p: number; readonly calls: number }
   | { readonly kind: "unresolved"; readonly text: string; readonly count: number; readonly cause: string; readonly calls: number }
 
-interface Token {
-  readonly word: string
-  readonly start: number
-  readonly end: number
-}
-
-/** Separators of words: spaces, placeholders, and runs of scripts written without spaces (Chinese, Japanese, Korean). */
-const SEPARATORS = new RegExp(`${PLACEHOLDER_RE.source}|[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\u3000-\\u303f\\uff00-\\uffef]+|\\s+`, "gu")
-const LEADING = /^[("'«“‘[]+/u
-const TRAILING = /[)"'»”’\],.;:]+$/u
-
-/** Words of a text with their positions, sentence punctuation around them removed (`printemps2026.`, `'blue-42'`). */
-export function promptWords(text: string, from = 0, to = text.length): Token[] {
-  const tokens: Token[] = []
-  const add = (start: number, end: number) => {
-    const raw = text.slice(start, end)
-    const lead = raw.match(LEADING)?.[0].length ?? 0
-    const word = raw.slice(lead).replace(TRAILING, "")
-    if (word && start + lead < to) tokens.push({ word, start: start + lead, end: start + lead + word.length })
-  }
-  let at = from
-  for (const match of text.slice(from, to).matchAll(SEPARATORS)) {
-    const start = from + match.index
-    if (start > at) add(at, start)
-    at = start + match[0].length
-  }
-  if (to > at) add(at, to)
-  return tokens
-}
-
-/** Parts of at most `size` characters, cut at a space when there is one in the second half. */
-function parts(text: string, size: number): Array<[number, number]> {
-  const ranges: Array<[number, number]> = []
-  let start = 0
-  while (start < text.length) {
-    let end = Math.min(start + size, text.length)
-    if (end < text.length) {
-      const half = Math.floor(size / 2)
-      const space = text.slice(start + half, end).search(/\s(?=\S*$)/u)
-      if (space >= 0) end = start + half + space + 1
-    }
-    ranges.push([start, end])
-    start = end
-  }
-  return ranges
-}
-
-const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
-
 export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label" | "threshold" | "timeoutMs" | "tuning" | "questions">) {
   const tuning = deps.tuning ?? DEFAULT_PROMPT_TUNING
-  const questions = promptQuestions(deps.questions ?? DEFAULT_PROMPT_QUESTIONS)
-  let running = 0
-  const waiting: Array<() => void> = []
-  /** At most `tuning.parallel` calls at once (shared by the checks of every session). */
-  async function call(request: Parameters<ModelClient>[0]) {
-    if (running >= tuning.parallel) await new Promise<void>((resolve) => waiting.push(resolve))
-    running++
-    try {
-      return await deps.model(request)
-    } finally {
-      running--
-      waiting.shift()?.()
-    }
-  }
-
-  /** Model's view of a part: placeholders and words found shown as `<redacted>`. */
-  function shown(text: string, [start, end]: [number, number], found: ReadonlySet<string>): string {
-    let out = ""
-    let at = start
-    for (const token of promptWords(text, start, end))
-      if (found.has(token.word)) {
-        out += text.slice(at, token.start) + SHOWN_MASK
-        at = token.end
-      }
-    return (out + text.slice(at, end)).replace(new RegExp(PLACEHOLDER_RE.source, "g"), SHOWN_MASK)
-  }
-
-  /** Stage 1: probability that the part gives a credential's value; throws a `ModelError` on failure. */
-  async function stage1(message: string): Promise<number> {
-    const answer = (await call({ state: { message }, questions: questions.secret })).answers[PROMPT_QUESTION_ID]
-    if (answer?.error) throw new ModelError(`question \`${PROMPT_QUESTION_ID}\` refused`)
-    if (!isNumber(answer?.noul)) throw new ModelError(`invalid answer: \`${PROMPT_QUESTION_ID}.noul\` missing`)
-    return Math.min(Math.max(answer.noul, 0), 1)
-  }
-
-  /** Stage 2: the words of the part most likely to be the value, best first (at most `tuning.candidates`). */
-  async function stage2(message: string, words: readonly string[]): Promise<{ candidates: string[]; calls: number }> {
-    const batches: string[][] = []
-    for (let at = 0; at < words.length; at += tuning.wordsPerQuestion) batches.push(words.slice(at, at + tuning.wordsPerQuestion))
-    const answers = await Promise.all(
-      batches.map(async (batch) => {
-        const answer = (await call({ state: { message }, questions: questions.word(batch) })).answers[PROMPT_WORD_QUESTION_ID]
-        if (answer?.error) throw new ModelError(`question \`${PROMPT_WORD_QUESTION_ID}\` refused`)
-        const probabilities = answer?.probabilities
-        if (!probabilities || typeof probabilities !== "object") throw new ModelError(`invalid answer: \`${PROMPT_WORD_QUESTION_ID}.probabilities\` missing`)
-        return batch.flatMap((word, i) => {
-          const p = probabilities[`w${i}`]
-          return isNumber(p) && p >= tuning.minCandidate ? [{ word, p }] : []
-        })
-      }),
-    )
-    const candidates = answers.flat().sort((x, y) => y.p - x.p).slice(0, tuning.candidates).map((item) => item.word)
-    return { candidates, calls: batches.length }
-  }
-
-  /** Stage 3: the candidates that really are the value. */
-  async function stage3(message: string, candidates: readonly string[]): Promise<string[]> {
-    const verdicts = await Promise.all(
-      candidates.map(async (value) => {
-        const answer = (await call({ state: { message, value }, questions: questions.value })).answers[PROMPT_VERIFY_QUESTION_ID]
-        if (answer?.error) throw new ModelError(`question \`${PROMPT_VERIFY_QUESTION_ID}\` refused`)
-        if (!isNumber(answer?.noul)) throw new ModelError(`invalid answer: \`${PROMPT_VERIFY_QUESTION_ID}.noul\` missing`)
-        return answer.noul >= tuning.verify
-      }),
-    )
-    return candidates.filter((_, i) => verdicts[i])
-  }
-
-  /** Every occurrence of a word found, as a whole word, replaced with the placeholder. */
-  function mask(text: string, found: ReadonlySet<string>): { text: string; count: number } {
-    if (!found.size) return { text, count: 0 }
-    let out = ""
-    let at = 0
-    let count = 0
-    for (const token of promptWords(text))
-      if (found.has(token.word)) {
-        out += text.slice(at, token.start) + placeholder("prompt_secret")
-        at = token.end
-        count++
-      }
-    return { text: out + text.slice(at), count }
-  }
-
-  /** Check of a technically redacted text. Throws only a `ModelError` (failure, refusal, invalid answer). */
-  async function run(text: string, state: { calls: number; found: Set<string> }): Promise<CheckOutcome> {
-    if (text.length > tuning.maxChars) return { kind: "unresolved", text, count: 0, cause: "too long to check", calls: 0 }
-    const ranges = parts(text, tuning.partChars)
-    state.calls += ranges.length
-    const scores = await Promise.all(ranges.map((range) => stage1(shown(text, range, state.found))))
-    const p = Math.max(...scores)
-    if (p < deps.threshold) return { kind: "clean", p, calls: state.calls }
-    let unresolved: string | undefined
-    await Promise.all(
-      ranges.map(async (range, i) => {
-        if (scores[i]! < deps.threshold) return
-        let score = scores[i]!
-        for (let round = 0; round < tuning.rounds; round++) {
-          const words = [...new Set(promptWords(text, ...range).map((token) => token.word))].filter((word) => [...word].length >= tuning.minWord && word !== SHOWN_MASK && !state.found.has(word))
-          const message = shown(text, range, state.found)
-          const { candidates, calls } = words.length ? await stage2(message, words) : { candidates: [], calls: 0 }
-          state.calls += calls + candidates.length
-          const confirmed = candidates.length ? await stage3(message, candidates) : []
-          if (!confirmed.length) {
-            // Seen but no word confirmed: a weak stage 1 is mostly a false alarm; a strong one, a secret not located.
-            if (score >= tuning.askScore) unresolved = `${deps.label} ${score.toFixed(2)}, not located`
-            return
-          }
-          for (const word of confirmed) state.found.add(word)
-          // Still a value without the words found (a second password): another round.
-          state.calls++
-          score = await stage1(shown(text, range, state.found))
-          if (score < deps.threshold) return
-        }
-        unresolved = `${deps.label} ${scores[i]!.toFixed(2)}, not all located`
-      }),
-    )
-    const masked = mask(text, state.found)
-    if (unresolved) return { kind: "unresolved", ...masked, cause: unresolved, calls: state.calls }
-    return { kind: "masked", ...masked, p, calls: state.calls }
-  }
+  const checker = createSecretChecker({ model: deps.model, label: deps.label, threshold: deps.threshold, tuning, field: "message", questions: promptQuestions(deps.questions ?? DEFAULT_PROMPT_QUESTIONS) })
+  const mark = placeholder("prompt_secret")
 
   /** Never throws: a failure, a refusal or the deadline gives `unresolved`, with what was masked so far. */
   return async function check(text: string): Promise<CheckOutcome> {
-    const state = { calls: 0, found: new Set<string>() }
+    if (text.length > tuning.maxChars) return { kind: "unresolved", text, count: 0, cause: "too long to check", calls: 0 }
+    const progress = { found: new Set<string>(), calls: 0 }
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<"deadline">((resolve) => {
       timer = setTimeout(() => resolve("deadline"), tuning.deadlineCalls * deps.timeoutMs)
       timer.unref?.()
     })
     try {
-      const outcome = await Promise.race([run(text, state), deadline])
-      if (outcome !== "deadline") return outcome
-      return { kind: "unresolved", ...mask(text, state.found), cause: "check too slow", calls: state.calls }
-    } catch (error) {
-      // Class only: a gateway may copy the request, so the prompt, into its error message.
-      const cause = error instanceof ModelError ? (error.timeout ? "model timeout" : "model unavailable") : "internal error"
-      return { kind: "unresolved", ...mask(text, state.found), cause, calls: state.calls }
+      const outcome = await Promise.race([checker(text, {}, progress), deadline])
+      // Deadline or failure: what was confirmed, and the safety-net words not confirmed (never left in clear unchecked).
+      if (outcome === "deadline") {
+        const net = new Set([...progress.found, ...checker.netWords(text)])
+        return { kind: "unresolved", ...masked(maskWords(text, net, mark)), cause: "check too slow", calls: progress.calls }
+      }
+      if (outcome.failure) return { kind: "unresolved", ...masked(maskWords(text, new Set([...outcome.found, ...outcome.net]), mark)), cause: outcome.failure, calls: outcome.calls }
+      const result = masked(maskWords(text, outcome.found, mark))
+      if (outcome.unresolved.length) return { kind: "unresolved", ...result, cause: outcome.unresolved[0]!.cause, calls: outcome.calls }
+      if (result.count) return { kind: "masked", ...result, p: outcome.p, calls: outcome.calls }
+      return { kind: "clean", p: outcome.p, calls: outcome.calls }
+    } catch {
+      return { kind: "unresolved", ...masked(maskWords(text, progress.found, mark)), cause: "internal error", calls: progress.calls }
     } finally {
       clearTimeout(timer)
     }
   }
 }
+
+const masked = (result: { text: string; count: number }) => ({ text: result.text, count: result.count })
 
 /**
  * Error that blocks the prompt (the hook rejects: OpenCode does not create the message). Never a word of the prompt. The

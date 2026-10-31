@@ -370,3 +370,25 @@ describe("prompt check: startup", () => {
     assert.match(await start({ promptCheck: true }, empty), /WARN promptCheck requested but inactive: the decision model is disabled/)
   })
 })
+
+describe("prompt check: safety net (words built like a password)", () => {
+  const net = "Kx9#mPq2!z"
+  const quiet = (request: ModelRequest) => (request.questions[PROMPT_QUESTION_ID] ? { answers: { [PROMPT_QUESTION_ID]: { type: "noul" as const, noul: 0.05 } } } : undefined)
+  it("stage 1 sees nothing: the word goes to stage 3 anyway; confirmed → masked; refused → left (never masked on its form alone)", async () => {
+    const { model, requests } = fakeModel([net], quiet)
+    const outcome = await createPromptChecker({ model, label: "nox-4b", threshold: 0.2, timeoutMs: 5000 })(`use ${net} and Build-2024x please`)
+    assert.equal(outcome.kind, "masked")
+    assert.equal(outcome.kind === "masked" && outcome.text, `use ${MARK} and Build-2024x please`)
+    const asked = requests.filter((request) => request.questions[PROMPT_VERIFY_QUESTION_ID]).map((request) => (request.state as { value: string }).value)
+    assert.deepEqual(asked.sort(), ["Build-2024x", net])
+  })
+  it("model failure → unresolved, the word masked anyway; deadline → the same", async () => {
+    const failing = fakeModel([], () => new ModelError("down"))
+    const outcome = await createPromptChecker({ model: failing.model, label: "nox-4b", threshold: 0.2, timeoutMs: 5000 })(`use ${net} please`)
+    assert.equal(outcome.kind, "unresolved")
+    assert.equal(outcome.kind === "unresolved" && outcome.text, `use ${MARK} please`)
+    const slow = async () => new Promise<never>(() => {})
+    const late = await createPromptChecker({ model: slow, label: "nox-4b", threshold: 0.2, timeoutMs: 100, tuning: { ...PROMPT_CHECK_TUNING, deadlineCalls: 1 } })(`use ${net} please`)
+    assert.deepEqual(late.kind === "unresolved" && [late.cause, late.text], ["check too slow", `use ${MARK} please`])
+  })
+})
