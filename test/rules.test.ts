@@ -1,3 +1,4 @@
+import { withinBudget } from "./budget.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { shellFinding, segments } from "../src/rules/shell.ts"
@@ -697,7 +698,7 @@ describe("batch 12: moving HOME or a system directory, kubectl/oc scale to 0", (
     for (const line of ["kubectl scale x ".repeat(4000), "oc scale --replicas ".repeat(3200)]) {
       const start = performance.now()
       shellFinding(line, ctx)
-      assert.ok(performance.now() - start < 1000)
+      assert.ok(withinBudget(start, 1000))
     }
   })
 })
@@ -739,7 +740,7 @@ describe("batch 33: CodeMode, language-grammar escapes and secret in the code", 
     const start = performance.now()
     assert.equal(decodeUnicodeEscapes(zeros), "\0".repeat(4))
     assert.equal(decodeUnicodeEscapes(huge), huge)
-    assert.ok(performance.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000))
   })
   it("secret in code without detected network access → deny; reason depends on network access", () => {
     const quiet = toolFinding("execute", { code: `const k = "${FAKE.openai}"; console.log(k.length)` }, ctx)
@@ -911,7 +912,7 @@ describe("batch 19: credentials of other coding agents and backups", () => {
       const start = performance.now()
       isSecretFile(path, HOME)
       shellFinding(`cat ${path}`, ctx)
-      assert.ok(performance.now() - start < 1000)
+      assert.ok(withinBudget(start, 1000))
     }
   })
 })
@@ -1211,7 +1212,7 @@ describe("batch 20: irreversible git", () => {
     ]) {
       const start = performance.now()
       shellFinding(command, ctx)
-      assert.ok(performance.now() - start < 1000)
+      assert.ok(withinBudget(start, 1000))
     }
   })
 })
@@ -1839,7 +1840,7 @@ describe("batch 36: CodeMode, script that reads the web without a tool delegated
     ]) {
       const start = performance.now()
       find(code)
-      assert.ok(performance.now() - start < 1000, code)
+      assert.ok(withinBudget(start, 1000), code)
     }
     for (const code of [
       // Repeated part of each IPv4 range: prefix followed by a long run of digits.
@@ -1856,7 +1857,7 @@ describe("batch 36: CodeMode, script that reads the web without a tool delegated
     ]) {
       const start = performance.now()
       find(code)
-      assert.ok(performance.now() - start < 1000, code.slice(0, 40))
+      assert.ok(withinBudget(start, 1000), code.slice(0, 40))
     }
   })
 })
@@ -2025,7 +2026,7 @@ describe("batch 37: disk tools designated by their path", () => {
     for (const line of [fill("\n", 16384), fill("\n \t", 16384), fill("(dd ", 262144), fill("(/bin/dd ", 262144)]) {
       const start = performance.now()
       addedRecognition(line)
-      assert.ok(performance.now() - start < 200, JSON.stringify(line.slice(0, 12)))
+      assert.ok(withinBudget(start, 200), JSON.stringify(line.slice(0, 12)))
     }
   })
   it("trapped 64 KiB line for the new recognition: bounded cost", () => {
@@ -2033,7 +2034,7 @@ describe("batch 37: disk tools designated by their path", () => {
     for (const line of [fill("(/bin/dd "), fill("-c \"/bin/dd "), fill("sudo a a a a a a a a /bin/ddx "), fill(";sudo a a a a a a a a /sbin/mkfs- "), fill("(/")]) {
       const start = performance.now()
       shellFinding(line, ctx)
-      assert.ok(performance.now() - start < 1000, line.slice(0, 40))
+      assert.ok(withinBudget(start, 1000), line.slice(0, 40))
     }
   })
 })
@@ -2194,7 +2195,7 @@ describe("batch 39: network examination of inline code", () => {
     ]) {
       const start = performance.now()
       inlineCodeNetwork(line)
-      assert.ok(performance.now() - start < 200, JSON.stringify(line.slice(0, 16)))
+      assert.ok(withinBudget(start, 200), JSON.stringify(line.slice(0, 16)))
     }
   })
 })
@@ -2516,7 +2517,7 @@ describe("batch 41: indirectly designated device", () => {
     ]) {
       const start = performance.now()
       shellFinding(line, withLinks())
-      assert.ok(performance.now() - start < 1000, JSON.stringify(line.slice(0, 16)))
+      assert.ok(withinBudget(start, 1000), JSON.stringify(line.slice(0, 16)))
     }
   })
   it("cost: target of unknown value that triggers the re-entry test, plus newline padding: bounded", () => {
@@ -2526,7 +2527,7 @@ describe("batch 41: indirectly designated device", () => {
     for (const line of [`tee $OUT${newlines}`, `dd if=a of=$OUT${newlines}`, `${newlines}cp a "$DEST"`]) {
       const start = performance.now()
       shellFinding(line, withLinks())
-      assert.ok(performance.now() - start < 1000, JSON.stringify(line.slice(0, 16)))
+      assert.ok(withinBudget(start, 1000), JSON.stringify(line.slice(0, 16)))
     }
   })
 
@@ -2660,7 +2661,7 @@ describe("batch 41: indirectly designated device", () => {
     for (const line of [fill("dev/"), fill("/dev/null "), fill("x/dev/"), fill(`"d"e"v/`), `echo x > ${fill("dev/")}`, `cp a ${fill("../dev")}`]) {
       const start = performance.now()
       shellFinding(line, withLinks())
-      assert.ok(performance.now() - start < 1000, JSON.stringify(line.slice(0, 16)))
+      assert.ok(withinBudget(start, 1000), JSON.stringify(line.slice(0, 16)))
     }
   })
 

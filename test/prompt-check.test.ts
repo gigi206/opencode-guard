@@ -1,4 +1,5 @@
 import "./tmp.ts"
+import { withinBudget } from "./budget.ts"
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -304,7 +305,7 @@ describe("prompt check: hook (fake model)", () => {
     const gate = createPromptGate(fake.ctx, { redactor: createRedactor(), model, label: "nox-4b", threshold: 0.3, timeoutMs: 20, askAs: "ask", log })
     const start = Date.now()
     const out = await gate.check({ sessionID: "s", prompt: { text: "x" } }, "mon mdp est soleil42")
-    assert.ok(Date.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000, Date.now))
     assert.equal(out.block, undefined)
     assert.equal(fake.asserts.length, 1)
     assert.match(fake.asserts[0]!.action, /check too slow/)

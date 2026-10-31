@@ -1,3 +1,4 @@
+import { fastEnough } from "./budget.ts"
 import assert from "node:assert/strict"
 import { posix } from "node:path"
 import { describe, it } from "node:test"
@@ -224,7 +225,7 @@ describe("batch 35: cost on long paths and many possible directories", () => {
     const start = performance.now()
     const result = run()
     const elapsed = performance.now() - start
-    assert.ok(elapsed < 1000, `${label} : ${elapsed.toFixed(0)} ms`)
+    assert.ok(fastEnough(elapsed, 1000), `${label} : ${elapsed.toFixed(0)} ms`)
     return result
   }
   /** Link-free I/O that counts lookups. */

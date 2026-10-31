@@ -1,3 +1,4 @@
+import { fastEnough } from "./budget.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { summarize } from "../src/hooks/gate.ts"
@@ -189,7 +190,7 @@ describe("batch 34: linear cost of readings (1 MiB patch, unfavorable lines)", (
         const start = performance.now()
         run()
         const elapsed = performance.now() - start
-        assert.ok(elapsed < 1000, `${what} : ${elapsed.toFixed(0)} ms`)
+        assert.ok(fastEnough(elapsed, 1000), `${what} : ${elapsed.toFixed(0)} ms`)
       }
     })
 })

@@ -1,4 +1,5 @@
 import "./tmp.ts"
+import { withinBudget } from "./budget.ts"
 // Provider token formats, names that end in `key`, other Authorization schemes and passwords given to curl, sshpass and
 // mysql. Fake values at the exact length of each format, each with a near miss; nothing is run.
 import assert from "node:assert/strict"
@@ -149,7 +150,7 @@ describe("provider formats and command passwords", () => {
     ]) {
       const start = performance.now()
       redact(text)
-      assert.ok(performance.now() - start < 2000, text.slice(0, 20))
+      assert.ok(withinBudget(start, 2000), text.slice(0, 20))
     }
   })
 })

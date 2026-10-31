@@ -1,4 +1,5 @@
 import "./tmp.ts"
+import { withinBudget } from "./budget.ts"
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
@@ -267,6 +268,6 @@ describe("lot 46c (d): signal that makes an OpenCode server write a heap snapsho
     const start = performance.now()
     assert.equal(found(`kill ${"-a ".repeat(20_000)}1`), "none")
     assert.equal(found(`${"kill -a ".repeat(10_000)}1`), "none")
-    assert.ok(performance.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000))
   })
 })

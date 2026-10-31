@@ -1,3 +1,4 @@
+import { withinBudget } from "./budget.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { createRedactor, isSignedBlock, isToolArguments, PLACEHOLDER_RE } from "../src/secrets/redact.ts"
@@ -623,7 +624,7 @@ describe("batch 11: redaction of pass/passphrase names, options, commas, passphr
     assert.ok(masked(`redis-cli --pass ${w}\npsql -h db`))
     const start = performance.now()
     r.redactString(`--pass ${w} `.repeat(20_000))
-    assert.ok(performance.now() - start < 2000)
+    assert.ok(withinBudget(start, 2000))
   })
   it("comma in a value: redacted entirely, except before a named argument; repetition redacted in the right place", () => {
     assert.equal(r.redactString(`DB_PASSWORD=${w},Tr4ilR3st`).value, "DB_PASSWORD=[[GUARD_REDACTED:generic_secret]]")
@@ -647,7 +648,7 @@ describe("batch 11: redaction of pass/passphrase names, options, commas, passphr
   it("phrase without a closing quote on a very long line: linear cost", () => {
     const start = performance.now()
     r.redactString(`PASSWORD="${"a b ".repeat(200_000)}`)
-    assert.ok(performance.now() - start < 2000)
+    assert.ok(withinBudget(start, 2000))
   })
   it("environment: phrases (PASSWORD/PASSPHRASE/SECRET/PASS names) and PASS names replaced; other values with whitespace left alone", () => {
     const env = createRedactor({ env: { GPG_PASSPHRASE: "velvet orbit lantern harbor", MY_PASS: "Zr8vNq3LxW2k", KEYBOARD_LAYOUT: "fr azerty layout x" } })
@@ -678,7 +679,7 @@ describe("batch 12: Bearer/Basic, Map/Set/RegExp in errors", async () => {
   it("Bearer: long run of letters ending in a digit → linear cost", () => {
     const start = performance.now()
     r.redactString(`Bearer ${"a".repeat(5000)}1`)
-    assert.ok(performance.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000))
   })
   it("Basic (all cases): only decodable credentials, including an empty password", () => {
     // Fake key as user, empty password (`curl -u sk_test_…:`): redacted (here by base64 decoding).
@@ -739,7 +740,7 @@ describe("batch 13: PGP private key block", () => {
     const long = `${block.split("=Ab3x")[0]}\n${"lorem ipsum ".repeat(1_000_000)}`
     const start = performance.now()
     const out = r.redactString(long)
-    assert.ok(performance.now() - start < 3000)
+    assert.ok(withinBudget(start, 3000))
     assert.ok(out.value.startsWith("[[GUARD_REDACTED:private_key]]"))
     assert.ok(!out.value.includes(body.split("\n")[0]!))
     const quote = "The format starts with -----BEGIN PGP PRIVATE KEY BLOCK----- followed by a blank line then the body."
@@ -748,7 +749,7 @@ describe("batch 13: PGP private key block", () => {
   it("thousands of unterminated headers: linear cost", () => {
     const start = performance.now()
     r.redactString("-----BEGIN PGP PRIVATE KEY BLOCK-----\nAb3x\n".repeat(10_000))
-    assert.ok(performance.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000))
   })
 })
 
@@ -760,7 +761,7 @@ describe("batch 14: redaction in linear time", () => {
   const fast = (text: string, limit = 1000) => {
     const start = performance.now()
     r.redactString(text)
-    assert.ok(performance.now() - start < limit)
+    assert.ok(withinBudget(start, limit))
   }
   it("generic assignment: keyword repeated in a long run without whitespace → linear cost", () => fast("token-".repeat(1000)))
   it("URL credentials: long run of scheme characters → linear cost", () => fast("a+-".repeat(50_000)))
@@ -769,7 +770,7 @@ describe("batch 14: redaction in linear time", () => {
   it("placeholder: unclosed markers → linear search (placeholder rule)", () => {
     const start = performance.now()
     assert.equal(PLACEHOLDER_RE.test("[[GUARD_REDACTED:".repeat(25_000)), false)
-    assert.ok(performance.now() - start < 1000)
+    assert.ok(withinBudget(start, 1000))
   })
 
   it("generic assignment: keyword at the start, middle or end of the name; prefix kept", () => {

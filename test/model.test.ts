@@ -1,3 +1,4 @@
+import { withinBudget } from "./budget.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
 import { parseConfig } from "../src/config.ts"
@@ -862,7 +863,7 @@ describe("lot 27: model client with a real local server, configuration", () => {
     const started = Date.now()
     try {
       await assert.rejects(client(server.baseURL, 300)({ state: {}, questions: {} }), (error: unknown) => error instanceof ModelError && error.timeout)
-      assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms`)
+      assert.ok(withinBudget(started, 2000, Date.now), `${Date.now() - started} ms`)
     } finally {
       server.close()
     }
