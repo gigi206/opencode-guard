@@ -2,7 +2,7 @@
 
 OpenCode agents can run shell commands, edit files and send data over the network. A single bad command is enough to erase uncommitted work, rewrite your shell configuration, or leak an API key.
 
-**opencode-guard** is an **OpenCode V2** plugin (tested with `opencode v2.2.0`) that sits in front of those actions. It blocks or asks for confirmation before dangerous tool calls, and redacts secrets before they reach the model provider or the session history.
+**opencode-guard** is an **OpenCode V2** plugin (tested with `opencode v2.2.5`) that sits in front of those actions. It blocks or asks for confirmation before dangerous tool calls, and redacts secrets before they reach the model provider or the session history.
 
 > **This is not a sandbox.** It is a heuristic guardrail and can be bypassed (obfuscation, writing a script and running it later…). Use a container for real isolation.
 
@@ -10,7 +10,7 @@ OpenCode agents can run shell commands, edit files and send data over the networ
 
 - **Local rules first.** Destructive commands, credential files, data leaving the machine and protected writes are settled instantly, without network access.
 - **A decision model for the rest.** Anything the local rules leave open is judged by a model that answers typed questions with probabilities through the System One API, such as **Nox-4B** or TypeSafe AI's **Jev**. The model and its address are set in `opencode.json`; nothing is hard-coded.
-- **Secret redaction.** API keys, tokens, passwords and private keys are masked before they reach the LLM provider or the stored history.
+- **Secret redaction.** API keys, tokens, passwords and private keys are masked before they reach the LLM provider or the stored history (with OpenCode's "Claude Agent" provider, only at the source: see [Known limitations](docs/operations.md#known-limitations)).
 - **Self-protection.** The agent cannot silently disable the guard: writing to the plugin directory, OpenCode's configuration, `.opencode/` or `opencode.json(c)` requires confirmation.
 
 Every tool call goes through `tool.execute.before`: local rules first, then the decision model if they do not settle it.

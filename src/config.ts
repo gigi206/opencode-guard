@@ -109,7 +109,8 @@ export interface OutputCheckConfig {
 
 /**
  * Unchecked outputs by default: writes and patches (their output repeats what the agent wrote), the task list (it
- * repeats the received list), an invalid call (the error names the tool and its parameters).
+ * repeats the received list), an invalid call (the error names the tool and its parameters). Their errors are checked
+ * (an `edit` error quotes lines of the file).
  */
 export const DEFAULT_OUTPUT_SKIP = ["edit", "write", "apply_patch", "patch", "todowrite", "invalid"] as const
 

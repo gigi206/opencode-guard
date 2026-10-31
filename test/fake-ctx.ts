@@ -60,8 +60,15 @@ export function fakeContext(options: Record<string, unknown> = {}) {
     },
   } as unknown as GuardContext
 
-  /** Triggers all callbacks of a hook, in order, on the same object (like OpenCode). */
+  /**
+   * Triggers all callbacks of a hook, in order, on the same object (like OpenCode). A shell permission evaluation carries
+   * a tool call's source, as OpenCode's shell tool always gives one, unless the event sets `source` itself (`undefined`:
+   * none, the shell condition of a scheduled task); its identifier matches no call of the tests.
+   */
   async function trigger<E>(key: string, event: E): Promise<E> {
+    const record = event as Record<string, unknown>
+    if (key === "permission.evaluate" && record && record.action === "shell" && !("source" in record))
+      record.source = { type: "tool", messageID: "msg_fake", id: "call_fake_source" }
     for (const callback of hooks.get(key) ?? []) await callback(event)
     return event
   }

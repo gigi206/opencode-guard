@@ -49,7 +49,8 @@ const NETWORK_TOOLS = "curl|wget|nc|ncat|netcat|socat|telnet|ftp|lftp|sftp|scp|r
 /** Network tool name anywhere, even as an argument (`grep http .env`): enough only to ask. */
 const NETWORK_WORD = word(NETWORK_TOOLS)
 
-const WRAPPERS = "sudo|doas|env|command|exec|nohup|time|timeout|nice|ionice|stdbuf|xargs|watch|setsid|torsocks|proxychains4?|unbuffer"
+/** `command -v`/`-V` only prints how a name resolves: not a launch. */
+const WRAPPERS = "sudo|doas|env|command(?![^\\S\\n]+-[a-zA-Z]*[vV])|exec|nohup|time|timeout|nice|ionice|stdbuf|xargs|watch|setsid|torsocks|proxychains4?|unbuffer"
 
 /** Path before a command name; does not cross separators (linear cost). */
 const COMMAND_PATH = "(?:[^\\s;&|()`{}]*/)?"
@@ -72,6 +73,10 @@ const commandRegex = (names: string, after = "(?=\\s|$|[;&|)])") =>
   )
 
 const NETWORK_COMMAND = commandRegex(NETWORK_TOOLS)
+const REMOTE_TOOLS = "scp|sftp|ssh|nc|ncat|netcat|socat|telnet|ftp|lftp"
+const REMOTE_COMMAND = commandRegex(REMOTE_TOOLS)
+/** A remote tool's path looked up and run in the same word (`$(which ssh) host`, `` `command -v nc` ``). */
+const REMOTE_LOOKED_UP = new RegExp(`(?:\\$\\(|\`)\\s*(?:which|command\\s+-v|type\\s+-[pP])\\s+(?:${REMOTE_TOOLS})\\s*(?:\\)|\`)`)
 
 /** bash network redirection (`> /dev/tcp/host/port`): equivalent to a launched network tool. */
 const NETWORK_DEVICE = /\/dev\/(?:tcp|udp)\//
@@ -2201,7 +2206,7 @@ const OPENCODE_KINDS = new Map<string, readonly OpencodeKind[]>([
 ])
 
 /**
- * API reads: GET operations of the OpenCode 2.1.1 protocol (`packages/protocol/openapi.json`), identifier then
+ * API reads: GET operations of the OpenCode 2.1.1 protocol (`packages/protocol/openapi.json`, with the five renamed in 2.2.5), identifier then
  * path template, except `credential.list`, `server.connect`, `config.get`, `fs.read` and the two WebSocket
  * (`pty.connect`, `persistentPty.connect`). Any other operation asks, including one from a future version.
  */
@@ -2213,6 +2218,11 @@ const OPENCODE_API_READS = `
   experimental.session.stats /api/experimental/session/stats  experimental.session.export /api/experimental/session/{sessionID}/export
   experimental.session.instructions.entry.list /api/experimental/session/{sessionID}/instructions/entries
   session.log /api/experimental/session/{sessionID}/log
+  experimental.session.log /api/experimental/session/{sessionID}/log
+  experimental.persistentPty.get /api/experimental/persistent-pty/{ptyID}
+  experimental.persistentPty.snapshot /api/experimental/persistent-pty/{ptyID}/snapshot
+  experimental.persistentPty.list /api/experimental/session/{sessionID}/terminal
+  experimental.persistentPty.read /api/experimental/session/{sessionID}/terminal/read
   server.experimental.persistentPty.list /api/experimental/session/{sessionID}/terminal
   server.experimental.persistentPty.read /api/experimental/session/{sessionID}/terminal/read  form.list /api/form  fs.find /api/fs/find
   fs.list /api/fs/list  server.info /api/info  integration.list /api/integration  integration.get /api/integration/{integrationID}
@@ -2693,8 +2703,11 @@ const ASK_RULES: readonly RegexRule[] = [
     id: "remote",
     verdict: "ask",
     reason: "connection or transfer to a remote host",
+    // Launched, like the network tools: a name only printed or searched (`command -v ssh`, `which ssh`, `grep ssh f`)
+    // is not a connection.
     test: (command) =>
-      word("scp|sftp|ssh|nc|ncat|netcat|socat|telnet|ftp|lftp").test(command) ||
+      REMOTE_COMMAND.test(command) ||
+      REMOTE_LOOKED_UP.test(command) ||
       /rsync\s[^;&|]*\S+:/.test(command) ||
       NETWORK_DEVICE.test(command),
   },

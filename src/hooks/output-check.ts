@@ -292,7 +292,8 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
       if (event.tool === CODEMODE_TOOL) codeMode.take(callKey)
       // Internal call of a CodeMode script: the model only sees the result of the outer `execute`.
       else if (codeMode.has(callKey)) return
-      if (skip.has(event.tool)) return
+      // Skipped tools: their successful output only (an `edit` error quotes lines of the file).
+      if (skip.has(event.tool) && event.status === "completed") return
       // Technically redacted copy first, regardless of `redactOutputs` and hook order: never a known secret sent, and
       // the texts checked are those of the result that is masked.
       const base = event.status === "completed" ? { result: deps.redactor.redactDeep(event.result).value } : { error: redactToolError(event.error, deps.redactor).value }

@@ -126,6 +126,10 @@ export interface GuardContext {
     hook(name: "http.request", callback: Hook<HttpRequestEvent>): Promise<unknown>
     hook(name: "experimental.ws.send", callback: Hook<WsSendEvent>): Promise<unknown>
   }
+  /** Integrations (OpenCode 2.2.x); absent before: never relied on. */
+  readonly integration?: {
+    readonly connection?: { active?(id: string): Promise<unknown> }
+  }
 }
 
 export interface Logger {

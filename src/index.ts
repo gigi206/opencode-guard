@@ -11,6 +11,7 @@ import { createDecider } from "./decide.ts"
 import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
 import { registerGate } from "./hooks/gate.ts"
+import { registerClaudeAgentWarning } from "./hooks/claude-agent.ts"
 import { registerOutputCheck } from "./hooks/output-check.ts"
 import { createPromptGate, type PromptGate } from "./hooks/prompt-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
@@ -324,6 +325,12 @@ export async function setupGuard(
   } catch (error) {
     log.error("secret redaction hooks failed to register: secrets may reach the provider", error)
     degraded.push("secret redaction: INCOMPLETE")
+  }
+  // OpenCode's "Claude Agent" provider bypasses the wire hooks: said in the log when it is connected.
+  try {
+    await registerClaudeAgentWarning(ctx, log)
+  } catch (error) {
+    log.error("Claude Agent check unavailable", error)
   }
   // Output check (on by default with the decision model): effective only if the global file declares the same model
   // address and does not turn it off; otherwise inactive, with the reason in words when the user set it.

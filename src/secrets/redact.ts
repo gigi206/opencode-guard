@@ -567,7 +567,9 @@ const GEMINI_NO_SIGNATURE = "skip_thought_signature_validator"
 export function isSignedBlock(node: Record<string, unknown>): boolean {
   const type = node.type
   if (type === "thinking" || type === "redacted_thinking" || type === "reasoning") return true
-  if ("signature" in node || "encrypted_content" in node) return true
+  if ("encrypted_content" in node) return true
+  // Google Interactions marks an unsigned call with the same sentinel as Gemini (OpenCode 2.2.5): not a signature.
+  if ("signature" in node && node.signature !== GEMINI_NO_SIGNATURE) return true
   return "thoughtSignature" in node && node.thoughtSignature !== GEMINI_NO_SIGNATURE
 }
 

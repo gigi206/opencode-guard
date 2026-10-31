@@ -600,6 +600,17 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         posed = { reason, rule: INTERNAL_ERROR_RULE }
       }
     }
+    // A shell request without a tool call (OpenCode 2.2.x: the shell condition of a scheduled task, run by OpenCode
+    // itself, outside the shell tool and its `execute.before`): when it runs, OpenCode settles every remaining ask
+    // without anyone present and allows the commands it scanned. Any ask left (the plugin's, OpenCode's own, or the
+    // fallback of an internal error) is denied instead; a denial stays.
+    if (event.action === "shell" && event.source === undefined && event.effect === "ask") {
+      const reason = posed ? posed.reason : describeRequest(event, deps.redactor)
+      event.effect = "deny"
+      event.message = blockedMessage(`${reason}; ${UNATTENDED_SHELL}`, posed?.rule)
+      note(`shell without a tool call → deny (${sourceNote("not run by a tool call", posed?.rule)}): ${reason}`)
+      return
+    }
     // Unattended mode: every remaining ask becomes a denial, including OpenCode's native
     // asks (`read *.env` rule, user `ask` rules) that an `--auto` client would approve.
     if (deps.askAs === "deny" && event.effect === "ask") {
@@ -623,7 +634,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       event.message = askMessage(reason, rule)
       return { reason, rule }
     }
-    // Defense in depth: sub-commands extracted by OpenCode's tree-sitter parser.
+    // Defense in depth: sub-commands extracted by OpenCode's shell parser.
     if (event.action !== "shell" || event.effect === "deny") return undefined
     const active = deps.scopes ? deps.scopes.resolve(event.sessionID, event.agent).policy : deps.active
     // Call already confirmed in execute.before: no second ask, but a denial still applies. Allowed there by the decision
@@ -692,6 +703,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     return undefined
   }
 }
+
+/** Why a shell request without a tool call is denied rather than asked. */
+export const UNATTENDED_SHELL =
+  "this shell command is run by OpenCode itself, not by a tool call (the condition of a scheduled task): its confirmation cannot be asked when it runs, so it is denied"
 
 /** Reason shown for an ask converted to a denial (no secret, truncated). */
 function describeRequest(event: PermissionEvaluation, redactor: Redactor): string {

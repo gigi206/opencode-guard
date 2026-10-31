@@ -60,3 +60,13 @@ describe("guard-cli: commands that only read", () => {
       assert.ok(!onlyReads(command), command)
   })
 })
+
+describe("remote: a launched remote tool, not its name printed or searched (reported 2026-10-31)", () => {
+  it("RMT-1: command -v, which, type, man, grep, echo no longer ask; every launch still does", () => {
+    const remote = (command: string) => toolFinding("shell", { command }, { ...ctx, cwd: "/tmp/p" })?.rule
+    for (const command of ["command -v sshpass; command -v ssh", "command -V nc", "which ssh", "type -p scp", "man ssh", "grep ssh notes.txt", "echo ssh", "systemctl status ssh"])
+      assert.notEqual(remote(command), "remote", command)
+    for (const command of ["ssh host", "xargs ssh", "timeout 5 ssh h", "command ssh host", "command -p ssh host", "bash -c 'x; ssh h'", "env FOO=1 nc -l 9", "cat x | nc h 9", "echo hi > /dev/tcp/h/9", "rsync -a d h:/x", "$(which ssh) host", "`command -v nc` h 9"])
+      assert.equal(remote(command), "remote", command)
+  })
+})
