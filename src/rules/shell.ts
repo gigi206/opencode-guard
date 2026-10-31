@@ -2958,6 +2958,9 @@ function readOnlyWords(command: string): string[][] | undefined {
 /** Options of `git` that run a program or a pager, before or after its subcommand. */
 const GIT_RUNS = new Set(["-c", "-p", "--paginate", "--exec-path", "--config-env", "--ext-diff", "--textconv", "--output"])
 
+/** Options of `file` that only change its report. */
+const FILE_READS = new Set(["-b", "--brief", "-i", "--mime", "--mime-type", "--mime-encoding", "-L", "--dereference", "-h", "--no-dereference", "-k", "--keep-going", "-E", "--extension", "-N", "--no-pad", "-0", "--print0"])
+
 /** One simple command that only reads files: a reader of a closed list, without an option that runs something. */
 function readsOnly(words: readonly string[]): boolean {
   const [name, ...args] = words
@@ -2976,6 +2979,10 @@ function readsOnly(words: readonly string[]): boolean {
       return true
     case "rg":
       return !args.some((arg) => arg.startsWith("--pre"))
+    case "file":
+      // Options that only change the report; `-z`, `-C`, `-m`, `-S`, `-f`… (decompressors, compiled or chosen magic
+      // files, no sandbox, a list of names) keep the ask.
+      return args.every((arg) => !arg.startsWith("-") || FILE_READS.has(arg))
     case "git": {
       if (args.some((arg) => GIT_RUNS.has(arg.split("=")[0]!))) return false
       let i = 0

@@ -21,6 +21,8 @@ describe("guard-cli: commands that only read", () => {
       "git -C /opt/guard log --oneline -- src/cli/help.ts",
       "rg -n guard src/cli/main.ts | wc -l",
       'grep "guard off" README.md 2>&1',
+      "sed -n '1,30p' bin/guard; file bin/guard; ls -l bin/guard",
+      "file -b --mime-type src/cli/main.ts",
     ])
       assert.notEqual(rule(command), "guard-cli", command)
   })
@@ -46,6 +48,9 @@ describe("guard-cli: commands that only read", () => {
       "grep a src/cli/main.ts # ; guard off",
       "cat src/cli/main.ts && guard rules off eval",
       "cat src/cli/main.ts; /opt/guard/bin/guard rules",
+      "file -z bin/guard",
+      "file -m ./magic bin/guard",
+      "file -C -m ./magic; cat bin/guard",
     ])
       assert.equal(rule(command), "guard-cli", command)
   })
