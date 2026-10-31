@@ -12,6 +12,7 @@ import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
+import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
 import { directoryOf, resetRule, setRedaction, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
@@ -165,6 +166,10 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
     }
     case "test":
       return test(io, testRequest(args))
+    case "status": {
+      if (args.some((arg) => arg !== "--offline")) throw new UsageError(`unexpected argument ${args.find((arg) => arg !== "--offline")}`)
+      return status(io, { offline: args.includes("--offline") })
+    }
     case "show": {
       const parsed = parse(args, ["agent"])
       expect(parsed, 0, 0, "")

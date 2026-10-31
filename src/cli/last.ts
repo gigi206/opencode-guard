@@ -11,7 +11,7 @@ import type { Segment } from "./style.ts"
 
 export const DEFAULT_LAST = 20
 export const MAX_LAST = 200
-const TAIL_BYTES = 2 * 1024 * 1024
+export const TAIL_BYTES = 2 * 1024 * 1024
 
 /** Decision line of the plugin: `<time> <LEVEL> <tool> → ask|deny (<source>[, rule <id>]…): <reason>`. */
 const DECISION = /^(\S+) [A-Z]+ (.*?) → (ask|deny) \(([^)]*)\): (.*)$/
@@ -93,24 +93,34 @@ const shownTime = (entry: Decision, env: Record<string, string | undefined>) => 
 // Control characters are never printed to the terminal.
 const flat = (entry: Decision, env: Record<string, string | undefined>) => `${shownTime(entry, env)}  ${entry.verdict}  ${entry.rule}  ${entry.subject}: ${entry.reason}`.replace(CONTROL_CHARACTERS, " ")
 
-export function last(io: CliIo, count: number): void {
+/**
+ * The plugin's log file, read as the plugin does (`logFile`, checked the same way), and the lines of its end (the
+ * previous copy before them when `previous` is asked); a message instead when there is none to read.
+ */
+export function logLines(io: CliIo): { file: string; lines: string[]; previous: () => string[] } | { message: string } {
   const sources = readSources(io)
   const { config } = parseConfig(sources.options, io.env)
   const fallback = defaultLogFile(io.env)
   const protectedDirs = [PLUGIN_DIR, realOrUndefined(PLUGIN_DIR), sources.globalDir, sources.globalDir && realOrUndefined(sources.globalDir)].filter((dir): dir is string => !!dir)
   const file = checkedLogFile(config.logFile, fallback, io.env.HOME, [...new Set(protectedDirs)], [], io.cwd)
   if (file === undefined) {
-    if (config.logFile === undefined && fallback !== undefined) io.out("The plugin writes no log file (logFile: false).")
-    else throw new CliError("the plugin's log file is unknown: neither XDG_DATA_HOME nor HOME is set")
+    if (config.logFile === undefined && fallback !== undefined) return { message: "The plugin writes no log file (logFile: false)." }
+    throw new CliError("the plugin's log file is unknown: neither XDG_DATA_HOME nor HOME is set")
+  }
+  const lines = tail(file)
+  if (lines === undefined) return { message: `No log file yet: ${file}` }
+  return { file, lines, previous: () => tail(`${file}.1`) ?? [] }
+}
+
+export function last(io: CliIo, count: number): void {
+  const log = logLines(io)
+  if ("message" in log) {
+    io.out(log.message)
     return
   }
-  const current = tail(file)
-  if (current === undefined) {
-    io.out(`No log file yet: ${file}`)
-    return
-  }
+  const { file, lines: current } = log
   let found = decisions(current)
-  if (found.length < count) found = [...decisions(tail(`${file}.1`) ?? []), ...found]
+  if (found.length < count) found = [...decisions(log.previous()), ...found]
   if (found.length === 0) {
     io.out(`No ask or deny in ${file}`)
     return

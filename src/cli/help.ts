@@ -23,6 +23,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "redaction --explain <format>", text: "one format: what it catches, its patterns, how to turn it off" },
       { usage: "show [--agent <name>]", text: "policy settings in force for the current directory, and where they come from" },
       { usage: "last [<count>]", text: `latest asks and denials of the plugin's log, in local time (default ${DEFAULT_LAST}, at most ${MAX_LAST})` },
+      { usage: "status [--offline]", text: "latest starts of the plugin, errors and warnings since, files not loaded yet, decision model answering" },
       { usage: "test [options] [--] <command>", text: "the verdict the plugin would give to a shell command here, with its rule and reason, never run" },
       { usage: "  --tool <name> '<json>'", text: "another tool call instead, its JSON input as OpenCode passes it (path, command…)" },
       { usage: "  --agent <name>", text: "as this main agent (default: build)" },
