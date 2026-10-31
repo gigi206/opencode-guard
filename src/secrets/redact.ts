@@ -33,6 +33,12 @@ export interface Redactor {
   containsSecret(value: unknown): boolean
 }
 
+/** The plugin's redactor: the formats turned off can change while it runs (`redactionOff` of the global guard.json). */
+export interface AdjustableRedactor extends Redactor {
+  /** Built-in formats turned off on top of `disabledTypes`, replacing the previous ones; unknown and OpenCode types do nothing. */
+  setDisabledTypes(types: readonly string[]): void
+}
+
 export interface RedactorOptions {
   readonly extraPatterns?: readonly SecretPattern[]
   /** Built-in formats turned off (`secretPatterns`, global configuration only): every pattern of these types. */
@@ -267,12 +273,19 @@ function presentKnown(known: KnownValues, text: string): Set<KnownValue> {
   return found
 }
 
-export function createRedactor(options: RedactorOptions = {}): Redactor {
+export function createRedactor(options: RedactorOptions = {}): AdjustableRedactor {
   const allow = new Set(options.allowlist ?? [])
   // OpenCode formats first: an identifier value that happens to contain the beginning of a known format (`sk-` in the
   // middle of a random key) is redacted and learned whole, instead of being cut by that format's pattern.
-  const off = new Set(options.disabledTypes ?? [])
-  const patterns = [...OPENCODE_PATTERNS, ...BUILTIN_PATTERNS.filter((pattern) => !off.has(pattern.type)), ...(options.extraPatterns ?? [])]
+  const built = (off: ReadonlySet<string>) => [...OPENCODE_PATTERNS, ...BUILTIN_PATTERNS.filter((pattern) => !off.has(pattern.type)), ...(options.extraPatterns ?? [])]
+  let patterns = built(new Set(options.disabledTypes ?? []))
+  let extraOff = ""
+  function setDisabledTypes(types: readonly string[]): void {
+    const key = [...new Set(types)].sort().join(",")
+    if (key === extraOff) return
+    extraOff = key
+    patterns = built(new Set([...(options.disabledTypes ?? []), ...types]))
+  }
   const fixed = [
     ...envSecretValues(options.env ?? {}).map((item) => ({ name: `env:${item.name}`, value: item.value })),
     ...(options.knownSecrets ?? []).filter((item) => item.value.length >= MIN_KNOWN_SECRET).map((item) => ({ name: `config:${item.name}`, value: item.value })),
@@ -541,7 +554,7 @@ export function createRedactor(options: RedactorOptions = {}): Redactor {
     return redactDeep(value).count > 0
   }
 
-  return { redactString, redactDeep, containsSecret }
+  return { redactString, redactDeep, containsSecret, setDisabledTypes }
 }
 
 /**

@@ -29,7 +29,8 @@ export function show(io: CliIo, agent: string | undefined): void {
   for (const file of files.filter((item) => !item.global)) read.push({ name: file.label, state: file.data ? "read" : `ignored, ${file.reason}`, style: file.data ? "good" : "warn" })
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
   const patterns = redactionSettings(io, sources)
-  const settings = [...(version.settings?.(agent) ?? []), ...patterns.rows]
+  const formatsOff = (version.redactionOff ?? []).map((type) => ({ key: `redactionOff.${type}`, value: "off", origin: "global guard.json" }))
+  const settings = [...(version.settings?.(agent) ?? []), ...patterns.rows, ...formatsOff]
   const warnings = [...version.warnings, ...patterns.warnings]
   if (io.pretty)
     return prettyShow(io.pretty, {
@@ -146,7 +147,7 @@ const RELAXES = "relaxes"
  */
 function relaxes(key: string, value: string): boolean {
   if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
-  if (key.startsWith("secretPatterns.")) return value === "off"
+  if (key.startsWith("secretPatterns.") || key.startsWith("redactionOff.")) return value === "off"
   if (PROTECTIVE.has(key)) return value === "false"
   if (key === "selfProtectionByModel") return value === "true"
   if (key === "localAsks") return value === "model"

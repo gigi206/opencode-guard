@@ -7,7 +7,7 @@
 import { randomBytes } from "node:crypto"
 import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import type { GuardFile, Version } from "../config.ts"
+import { parseConfig, REDACTION_OFF, type GuardFile, type Version } from "../config.ts"
 import { GUARD_FILE, guardIdentity, MAX_GUARD_FILE_BYTES, readGuardFiles } from "../guard-file.ts"
 import { CliError, projectDirectory, readSources, realOrUndefined, resolution, type CliIo, type Sources } from "./context.ts"
 
@@ -163,6 +163,41 @@ export function resetRule(io: CliIo, rule: string, target: Target): void {
   }
   const still = inForce(resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]), target, rule)
   if (still) io.out(`ruleOverrides.${rule} is still "${still.value}" there, set by ${still.origin}`)
+}
+
+/**
+ * A built-in redaction format turned off (`off`) or back on, in `redactionOff` of the global guard.json. Back on: a
+ * format that `secretPatterns` of the global or system configuration also turns off stays off, and the command says so.
+ */
+export function setRedaction(io: CliIo, type: string, off: boolean): void {
+  const sources = readSources(io)
+  const guard = globalGuard(sources)
+  const data = structuredClone(guard.data)
+  const listed = data[REDACTION_OFF]
+  if (listed !== undefined && !Array.isArray(listed)) throw new CliError(`${REDACTION_OFF} in the global guard.json is not a list: it is left as is (fix it by hand)`)
+  const list: unknown[] = listed ?? []
+  if (off) {
+    if (list.includes(type)) io.out(`${type} is already in ${REDACTION_OFF} of ${guard.path}: nothing changed`)
+    else {
+      data[REDACTION_OFF] = [...list, type]
+      check(io, sources, guard, data, undefined, (version) => (version.redactionOff ?? []).includes(type))
+      write(guard, data)
+      io.out(`${type} turned off: added to ${REDACTION_OFF} in ${guard.path}`)
+      io.err(`warning: ${type} values are no longer redacted (tool outputs, prompts, the wire, the log), the rules no longer see them as secrets, and the decision model receives them in clear`)
+    }
+    return
+  }
+  if (!list.includes(type)) io.out(`${type} is not in ${REDACTION_OFF} of ${guard.path}: nothing changed`)
+  else {
+    const kept = list.filter((entry) => entry !== type)
+    if (kept.length) data[REDACTION_OFF] = kept
+    else delete data[REDACTION_OFF]
+    write(guard, data)
+    io.out(`${type} turned back on: removed from ${REDACTION_OFF} in ${guard.path}`)
+  }
+  const { config } = parseConfig(sources.options, io.env, () => sources.declarations)
+  if (config.disabledPatterns.includes(type))
+    io.out(`${type} is still off: secretPatterns of the ${sources.origin ?? "global configuration"} turns it off ({ "type": "${type}", "enabled": false }); remove that entry by hand`)
 }
 
 /** Directory given (real path; `allowMissing`: absolute path), or the project of the current directory. */

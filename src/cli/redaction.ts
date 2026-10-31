@@ -2,7 +2,9 @@
 // with their state (on, or off when the global or system configuration turns them off: read as the plugin reads it),
 // OpenCode's own formats (always on), then the user's patterns (`secretPatterns` option), each with its regular
 // expression, and those set aside. `--explain <format>`: one format and every pattern of its type.
-import { parseConfig } from "../config.ts"
+import { join } from "node:path"
+import { parseConfig, REDACTION_OFF, redactionOffOption } from "../config.ts"
+import { GUARD_FILE, readGuardFiles } from "../guard-file.ts"
 import { OPENCODE_FORMAT_SUMMARIES, OPENCODE_PATTERNS } from "../secrets/opencode-service.ts"
 import { BUILTIN_PATTERNS, FORMAT_SUMMARIES, type SecretPattern } from "../secrets/patterns.ts"
 import { placeholder } from "../secrets/redact.ts"
@@ -15,7 +17,7 @@ const PATTERNS_WARNING = /^(?:secretPatterns\b)/
 const NOT_SHOWN =
   "Not shown: a project's opencode.json can add patterns of its own, and they then apply in that project (never turn a format off)."
 const TURN_OFF =
-  'Turned off by { "type": "<format>", "enabled": false } in secretPatterns of the global or system configuration (elsewhere: ignored, with a warning). Off, its patterns no longer redact anything: tool outputs, prompts (the prompt check may still mask such a value), the wire, the log; the rules no longer see it as a secret (secret-network and the like), and the decision model receives it in clear.'
+  'Turned off by guard redaction off <format> (redactionOff in the global guard.json, back on with guard redaction on <format>), or by { "type": "<format>", "enabled": false } in secretPatterns of the global or system configuration (elsewhere: ignored, with a warning). Off, its patterns no longer redact anything: tool outputs, prompts (the prompt check may still mask such a value), the wire, the log; the rules no longer see it as a secret (secret-network and the like), and the decision model receives it in clear.'
 
 const source = (pattern: SecretPattern) => `/${pattern.regex.source}/${pattern.regex.flags}`
 
@@ -41,13 +43,20 @@ function formats(io: CliIo): Formats {
     const { config, warnings } = parseConfig(sources.options, io.env, () => sources.declarations)
     return {
       origin,
-      off: new Set(config.disabledPatterns),
+      off: new Set([...config.disabledPatterns, ...guardOff(sources.globalDir)]),
       custom: config.secretPatterns.map((pattern) => ({ type: pattern.type, pattern: source(pattern) })),
       setAside: warnings.filter((warning) => PATTERNS_WARNING.test(warning)),
     }
   } catch (error) {
     return { unread: `the configuration could not be read (${error instanceof Error ? error.message : String(error)})`, off: new Set() }
   }
+}
+
+/** Formats turned off by the global guard.json (`redactionOff`), read like the plugin reads them; unreadable: none. */
+function guardOff(globalDir: string | undefined): string[] {
+  if (!globalDir) return []
+  const [file] = readGuardFiles({ global: join(globalDir, GUARD_FILE), projects: [], roots: [] })
+  return redactionOffOption(file?.data?.[REDACTION_OFF], "global guard.json", [])
 }
 
 /** Built-in formats then OpenCode's, with their state. */
@@ -143,7 +152,7 @@ export function explainFormat(io: CliIo, type: string): void {
   // A `secret` group: only the value is replaced, its prefix (`Bearer `, `name=`) kept.
   const part = patterns.every((pattern) => pattern.regex.source.includes("(?<secret>")) ? "the value (its prefix kept)" : patterns.some((pattern) => pattern.regex.source.includes("(?<secret>")) ? "the match, or only its value when the pattern names one" : "the whole match"
   const how = `${count(patterns.length, "pattern")}${patterns.length > 1 && !opencode ? ", all turned off together" : ""}; ${part} replaced by ${placeholder(type)}${checked ? ", once it passes the format's own checks (what it catches says which)" : ""}.`
-  const setting = opencode ? "Cannot be turned off: it protects OpenCode's own credentials." : TURN_OFF.replace("<format>", type)
+  const setting = opencode ? "Cannot be turned off: it protects OpenCode's own credentials." : TURN_OFF.replaceAll("<format>", type)
   if (io.pretty) {
     const pretty = io.pretty
     title(pretty, `Format ${pretty.clean(type)}`, opencode ? "OpenCode, always active" : `built-in, ${state}`, "builtins")

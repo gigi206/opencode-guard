@@ -2,6 +2,8 @@
 // force and its latest asks and denials. It asks for no confirmation: launched by the agent, it is itself a
 // self-protection ask of the plugin (`guard-cli`), the only thing that stops the agent.
 import { RULE_FEATURES } from "../rules/features.ts"
+import { OPENCODE_FORMAT_SUMMARIES } from "../secrets/opencode-service.ts"
+import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
 import { CliError, outputRedactor, type CliIo, type Pretty } from "./context.ts"
@@ -10,7 +12,7 @@ import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./reda
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
 import { paint } from "./style.ts"
-import { directoryOf, resetRule, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
+import { directoryOf, resetRule, setRedaction, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
 
 export const USAGE = `Usage: guard <command> [arguments]
 
@@ -18,6 +20,7 @@ export const USAGE = `Usage: guard <command> [arguments]
   rules --explain <rule>           one built-in rule: what it checks, how it decides, its typical reason and settings
   redaction [--builtins|--custom]  redaction formats (built-in ones and their state, OpenCode's), then your patterns
   redaction --explain <format>     one format: what it catches, its patterns, how to turn it off
+  redaction off|on <format>        turn a built-in format off, or back on, in the global guard.json
   show [--agent <name>]            policy settings in force for the current directory, and where they come from
   last [<count>]                   latest asks and denials of the plugin's log (default ${DEFAULT_LAST}, at most ${MAX_LAST})
   allow|off|ask|deny|model <rule>  set a built-in rule in the global guard.json ("allow" turns it off, like "off")
@@ -117,6 +120,14 @@ function run(command: string, args: readonly string[], io: CliIo): void {
     }
     case "redaction": {
       const parsed = parse(args, ["builtins", "custom", "explain"], "a format name")
+      const [word, type] = parsed.positionals
+      if (word === "off" || word === "on") {
+        if (parsed.builtins || parsed.custom || parsed.explain !== undefined) throw new UsageError(`redaction ${word} takes a format name only`)
+        expect(parsed, 2, 2, "a format name")
+        if (OPENCODE_FORMAT_SUMMARIES.has(type!)) throw new UsageError(`the format ${type} cannot be turned off: it protects OpenCode's own credentials`)
+        if (!FORMAT_SUMMARIES.has(type!)) throw new UsageError(`no built-in redaction format named ${type} (guard redaction lists them)`)
+        return setRedaction(io, type!, word === "off")
+      }
       expect(parsed, 0, 0, "")
       if (parsed.explain !== undefined) {
         if (parsed.builtins || parsed.custom) throw new UsageError("--explain cannot be combined with --builtins or --custom")

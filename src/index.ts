@@ -21,7 +21,7 @@ import { RULE_FEATURES } from "./rules/features.ts"
 import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
 import { serviceDirectories, serviceSecretSource } from "./secrets/opencode-service.ts"
-import { createRedactor } from "./secrets/redact.ts"
+import { createRedactor, type Redactor } from "./secrets/redact.ts"
 import { createLogger, type GuardContext } from "./types.ts"
 
 /** OpenCode system configuration directory (packages/core/src/config/discovery.ts, `systemDirectory`). */
@@ -159,7 +159,16 @@ export async function setupGuard(
   warnings.push(...unread)
   // OpenCode service password and remote access route: re-read from its files (`env` directories).
   const runtimeSecrets = serviceSecretSource(serviceDirectories(env))
-  const redactor = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
+  const formats = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
+  // Formats turned off by the global guard.json (`redactionOff`): every redaction first checks the guard.json files
+  // (at most every 2 seconds, like the tool calls), so that a format turned back on is redacted again without waiting
+  // for a tool call. Set once the settings are resolved (`createScopes` below); until then, nothing extra is turned off.
+  let refreshFormats = () => {}
+  const redactor: Redactor = {
+    redactString: (text) => (refreshFormats(), formats.redactString(text)),
+    redactDeep: (value, options) => (refreshFormats(), formats.redactDeep(value, options)),
+    containsSecret: (value) => (refreshFormats(), formats.containsSecret(value)),
+  }
   let home: string | undefined
   let homeError: unknown
   try {
@@ -233,8 +242,17 @@ export async function setupGuard(
     log.error("agent sections: main agents cannot be recorded, only the hardenings of the agent sections apply", error)
     degraded.push("main agents: UNAVAILABLE")
   }
-  const scopes = createScopes({ config, paths, ...(identity === undefined ? {} : { identity }), ...(agents ? { agents } : {}), log, ...(scopeClock ? { now: scopeClock.now, intervalMs: scopeClock.intervalMs } : {}) })
+  const scopes = createScopes({
+    config,
+    paths,
+    ...(identity === undefined ? {} : { identity }),
+    ...(agents ? { agents } : {}),
+    log,
+    ...(scopeClock ? { now: scopeClock.now, intervalMs: scopeClock.intervalMs } : {}),
+    onVersion: (version) => formats.setDisabledTypes(version.redactionOff ?? []),
+  })
   sectioned = () => scopes.sectioned()
+  refreshFormats = () => scopes.refresh()
   try {
     await registerGate(ctx, {
       decider,
@@ -338,7 +356,8 @@ export async function setupGuard(
   const modelText = model && config.decision ? `${config.decision.model} via ${displayURL(config.decision.baseURL)} (${config.decision.protocol})` : "disabled"
   const disabled = FEATURE_NAMES.filter((name) => !config.features[name])
   // Built-in redaction formats turned off: a relaxation, always shown.
-  const off = `${disabled.length ? `; disabled: ${disabled.join(", ")}` : ""}${config.disabledPatterns.length ? `; redaction formats off: ${config.disabledPatterns.join(", ")}` : ""}`
+  const formatsOff = [...new Set([...config.disabledPatterns, ...(config.version?.redactionOff ?? [])])]
+  const off = `${disabled.length ? `; disabled: ${disabled.join(", ")}` : ""}${formatsOff.length ? `; redaction formats off: ${formatsOff.join(", ")}` : ""}`
   // Profile and rule settings retained, only when they differ from the defaults.
   const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)

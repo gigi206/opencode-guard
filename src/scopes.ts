@@ -16,6 +16,8 @@ export interface ScopeResolver {
   sectioned(): boolean
   /** Some scope of the version in force checks scripts: the files written are tracked. */
   tracking(): boolean
+  /** guard.json files checked for a change (when due): for the hooks that redact without resolving a scope. */
+  refresh(): void
 }
 
 export interface ScopeDeps {
@@ -28,6 +30,8 @@ export interface ScopeDeps {
   readonly log: Logger
   readonly now?: () => number
   readonly intervalMs?: number
+  /** Called with the version in force at creation and with each new one (`redactionOff` for the redactor). */
+  readonly onVersion?: (version: Version) => void
 }
 
 export function createScopes(deps: ScopeDeps): ScopeResolver {
@@ -49,6 +53,7 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
   let current = config.version ?? plain
   let identity = deps.identity
   let checked = clock()
+  deps.onVersion?.(current)
 
   function reload() {
     const { layers } = config
@@ -61,6 +66,7 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
       // Started with a guard.json file: its removal is resolved by layers too (the startup settings held it).
       current = files.length > 0 || layers.keyed || config.version ? resolveVersion(layers, files) : plain
       identity = next
+      deps.onVersion?.(current)
       log.info(`guard.json re-read (${current.summary || "guard.json: none; startup settings"})`)
       for (const warning of current.warnings) log.warn(warning)
     } catch (error) {
@@ -86,5 +92,6 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
       return current.agents.size > 0
     },
     tracking: () => current.tracking,
+    refresh: reload,
   }
 }

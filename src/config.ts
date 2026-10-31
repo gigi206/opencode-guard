@@ -811,7 +811,9 @@ export function parseConfig(
   inputs?: ScopeInputs,
 ): { config: GuardConfig; warnings: string[] } {
   const warnings: string[] = []
-  warnUnknown(options, OPTION_KEYS, "", warnings)
+  warnUnknown(Object.fromEntries(Object.entries(options).filter(([key]) => key !== REDACTION_OFF)), OPTION_KEYS, "", warnings)
+  if (options[REDACTION_OFF] !== undefined)
+    warnings.push(`${REDACTION_OFF} ignored: it is a key of the global guard.json; in opencode.json, turn a format off with secretPatterns { "type": "<format>", "enabled": false }`)
   const thresholds = thresholdsOption(options.thresholds, warnings)
 
   const { patterns: secretPatterns, disabled: requestedOff } = secretPatternsOption(options.secretPatterns, warnings)
@@ -1021,6 +1023,25 @@ const POLICY_SWITCHES = ["dangerousCommands", "sensitiveFiles", "scripts", "deci
 type PolicySwitch = (typeof POLICY_SWITCHES)[number]
 /** Read only from the global sources (global file, system file, global guard.json): a project cannot trust itself. */
 const GLOBAL_ONLY_KEYS = ["trustedProjects", "projects"]
+/** Built-in formats turned off, a key of the global guard.json only (`guard redaction off <format>` writes it). */
+export const REDACTION_OFF = "redactionOff"
+
+/** `redactionOff` of the global guard.json: built-in format names; the others are reported and ignored. */
+export function redactionOffOption(value: unknown, label: string, warnings: string[]): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) {
+    warnings.push(`${label}: ${REDACTION_OFF} must be an array of built-in format names, ignored`)
+    return []
+  }
+  return value.flatMap((type, index) => {
+    const where = `${label}: ${REDACTION_OFF}[${index}]`
+    if (typeof type !== "string" || !type) warnings.push(`${where} ignored: a format name expected`)
+    else if (OPENCODE_FORMAT_SUMMARIES.has(type)) warnings.push(`${where} ignored: the built-in format ${type} cannot be turned off`)
+    else if (!FORMAT_SUMMARIES.has(type)) warnings.push(`${where} ignored: no built-in format named ${type}`)
+    else return [type]
+    return []
+  })
+}
 
 /** Settings of one call: rule policy, decision model, checks of scripts written then run. */
 export interface Scope {
@@ -1132,6 +1153,8 @@ export interface Version {
   readonly warnings: readonly string[]
   /** Sources, sections and trust, for the log. */
   readonly summary: string
+  /** Built-in formats turned off by the global guard.json (`redactionOff`), on top of `secretPatterns`; absent: none. */
+  readonly redactionOff?: readonly string[]
   /** Trusted directories listed by the global sources (real paths, or `*`); `resolveVersion` only. */
   readonly listed?: readonly string[]
   /** Policy settings in force for a main agent (none: the top level), with the source and section that set each one. */
@@ -1257,6 +1280,7 @@ function readSection(value: Readonly<Record<string, unknown>>, where: string, ru
   const local: string[] = []
   for (const key of Object.keys(value))
     if (accepted.includes(key)) continue
+    else if (key === REDACTION_OFF) local.push(`${REDACTION_OFF} ignored: it counts only at the top level of the global guard.json`)
     else if (GLOBAL_ONLY_KEYS.includes(key)) local.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
     else if (OPTION_KEYS.includes(key)) local.push(`${key} ignored: only the plugin options in opencode.json accept it`)
     else local.push(`unknown option ${key}, ignored`)
@@ -1294,7 +1318,7 @@ function readAgents(value: unknown, where: string, rules: readonly CustomRule[],
 /** Global source or guard.json; `report`: warnings of the top level and `agents` (the global file's repeat the effective options'). */
 function readSource(data: Readonly<Record<string, unknown>>, label: string, global: boolean, rules: readonly CustomRule[], warnings: string[], report = true): Source {
   const local = report ? warnings : []
-  const top = readSection(data, label, rules, local, [...POLICY_KEYS, "agents", ...(global ? GLOBAL_ONLY_KEYS : [])])
+  const top = readSection(data, label, rules, local, [...POLICY_KEYS, "agents", ...(global ? [...GLOBAL_ONLY_KEYS, REDACTION_OFF] : [])])
   const agents = readAgents(data.agents, label, rules, local)
   const projects: ProjectSection[] = []
   const trusted: string[] = []
@@ -1513,6 +1537,8 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
   if (profile !== effective.globalProfile) shownProfile = profile
   for (const source of projectGuards) if (source.top.profile === "standard" || (source.top.profile && source.trusted)) shownProfile = source.top.profile
   const read = sources.map((item) => item.source.label)
+  // Formats turned off by the global guard.json: its top level only (a project's file or section is reported by `readSection`).
+  const redactionOff = [...new Set(sources.filter((item) => item.file.global).flatMap((item) => redactionOffOption(item.file.data?.[REDACTION_OFF], item.file.label, warnings)))]
   return {
     base,
     scope: (main, sub, call) => scope(main, sub, call),
@@ -1532,6 +1558,7 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
         ...[...RULE_FEATURES.keys()].flatMap((rule) => (state.overrides.has(rule) ? [value(`rule:${rule}`, state.overrides.get(rule)!)] : [])),
       ]
     },
-    summary: `guard.json: ${read.length ? read.join(", ") : "none"}; agent sections: ${agents.size ? [...agents].join(", ") : "none"}; project sections: ${matched.length ? matched.map((section) => section.dir).join(", ") : "none"}; this project: ${trusted ? "trusted" : "not trusted"}`,
+    ...(redactionOff.length ? { redactionOff } : {}),
+    summary: `guard.json: ${read.length ? read.join(", ") : "none"}${redactionOff.length ? `; redaction formats off: ${redactionOff.join(", ")}` : ""}; agent sections: ${agents.size ? [...agents].join(", ") : "none"}; project sections: ${matched.length ? matched.map((section) => section.dir).join(", ") : "none"}; this project: ${trusted ? "trusted" : "not trusted"}`,
   }
 }
