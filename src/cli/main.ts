@@ -12,6 +12,7 @@ import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
+import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
 import { directoryOf, resetRule, setRedaction, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
 
@@ -73,7 +74,40 @@ function setting(word: string, args: readonly string[], io: CliIo): void {
   else setRule(io, word as SettingWord, parsed.positionals[0]!, target)
 }
 
-function run(command: string, args: readonly string[], io: CliIo): void {
+/**
+ * `guard test [--agent <name>] [--model] [--tool <name>] [--] <call>`: options first; the rest, from the first other
+ * argument or after `--`, is the call: a shell command (its words joined by spaces), or the JSON input of `--tool`.
+ */
+function testRequest(args: readonly string[]): TestRequest {
+  let agent: string | undefined
+  let tool: string | undefined
+  let model = false
+  let index = 0
+  for (; index < args.length; index++) {
+    const arg = args[index]!
+    if (arg === "--") {
+      index++
+      break
+    }
+    if (arg === "--model") model = true
+    else if (arg === "--agent" || arg === "--tool") {
+      const value = args[++index]
+      if (!value || value.startsWith("-")) throw new UsageError(`${arg} needs ${arg === "--agent" ? "an agent name" : "a tool name"}`)
+      if (arg === "--agent") agent = value
+      else tool = value
+    } else if (arg.startsWith("--")) throw new UsageError(`unknown option ${arg.split("=")[0]} (put the call after --)`)
+    else break
+  }
+  const rest = args.slice(index)
+  if (!rest.length) throw new UsageError(tool ? "the JSON input of the tool is required" : "a command is required")
+  if (tool) {
+    if (rest.length > 1) throw new UsageError("the input of --tool is one argument: quote the JSON")
+    return { tool, input: toolInput(rest[0]!), model, ...(agent ? { agent } : {}) }
+  }
+  return { tool: "shell", input: { command: rest.join(" ") }, model, ...(agent ? { agent } : {}) }
+}
+
+function run(command: string, args: readonly string[], io: CliIo): void | Promise<void> {
   if ((SETTINGS as readonly string[]).includes(command) || command === "reset" || command === "allow")
     throw new UsageError(`unknown command ${command} (a rule's setting: guard rules ${command === "allow" ? "off" : command} <rule>)`)
   switch (command) {
@@ -129,6 +163,8 @@ function run(command: string, args: readonly string[], io: CliIo): void {
       for (const line of redactionLines(io, builtins, custom)) io.out(line)
       return
     }
+    case "test":
+      return test(io, testRequest(args))
     case "show": {
       const parsed = parse(args, ["agent"])
       expect(parsed, 0, 0, "")
@@ -192,8 +228,8 @@ function redacted(io: CliIo): CliIo {
 
 const WITHHELD = "(line withheld: redaction failed)"
 
-/** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error. */
-export function main(argv: readonly string[], terminal: CliIo): number {
+/** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error. `test` is asynchronous. */
+export function main(argv: readonly string[], terminal: CliIo): number | Promise<number> {
   const io = redacted(terminal)
   const [command, ...args] = argv
   if (command === undefined || command === "help" || command === "--help" || command === "-h") {
@@ -202,10 +238,7 @@ export function main(argv: readonly string[], terminal: CliIo): number {
     else for (const line of USAGE.split("\n")) io.out(line)
     return command === undefined ? 2 : 0
   }
-  try {
-    run(command, args, io)
-    return 0
-  } catch (error) {
+  const failed = (error: unknown) => {
     if (error instanceof UsageError) {
       io.err(`guard: ${error.message}`)
       for (const line of USAGE.split("\n")) io.err(line)
@@ -213,5 +246,11 @@ export function main(argv: readonly string[], terminal: CliIo): number {
     }
     io.err(`guard: ${error instanceof CliError ? error.message : `internal error: ${String(error)}`}`)
     return 1
+  }
+  try {
+    const done = run(command, args, io)
+    return done ? done.then(() => 0, failed) : 0
+  } catch (error) {
+    return failed(error)
   }
 }

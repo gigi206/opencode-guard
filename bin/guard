@@ -13,7 +13,7 @@ for (const stream of [process.stdout, process.stderr])
     throw error
   })
 
-process.exitCode = main(process.argv.slice(2), {
+process.exitCode = await main(process.argv.slice(2), {
   env: process.env,
   cwd: process.cwd(),
   systemDir: systemConfigDirectory(),

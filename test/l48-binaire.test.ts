@@ -32,7 +32,7 @@ async function world(setup: { readonly global?: Json; readonly cli?: boolean } =
   const [globalDir, systemDir, home, data, project] = [join(root, "global"), join(root, "system"), join(root, "home"), join(root, "data"), join(root, "work", "app")]
   for (const dir of [globalDir, systemDir, home, data, join(project, ".git"), join(project, "sub", "deep")]) mkdirSync(dir, { recursive: true })
   if (setup.global) writeFileSync(join(globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: setup.global }] }))
-  const env = { HOME: home, OPENCODE_CONFIG_DIR: globalDir, XDG_DATA_HOME: data }
+  const env = { HOME: home, OPENCODE_CONFIG_DIR: globalDir, XDG_DATA_HOME: data, TZ: "UTC" }
   const main = setup.cli === false ? undefined : ((await import(new URL("../src/cli/main.ts", import.meta.url).href)) as { main: Main }).main
   const guardFile = join(globalDir, "guard.json")
   return {
@@ -432,13 +432,13 @@ describe("lot 48 step D: show and last", () => {
     assert.equal(r.code, 0, r.err)
     assert.deepEqual(r.out.split("\n"), [
       `Latest asks and denials (${log}):`,
-      "2026-10-28T10:00:04.000Z  deny  rm-critical  shell: recursive deletion of the home directory",
-      "2026-10-28T10:00:05.000Z  ask  privilege  shell sub-commands: privilege escalation",
+      "2026-10-28 10:00:04 +00:00  deny  rm-critical  shell: recursive deletion of the home directory",
+      "2026-10-28 10:00:05 +00:00  ask  privilege  shell sub-commands: privilege escalation",
     ])
     r = w.run(["last"])
     assert.deepEqual(r.out.split("\n").slice(1, 3), [
-      "2026-10-27T09:00:00.000Z  deny  secret-network  webfetch: secret in a web request",
-      "2026-10-28T10:00:02.000Z  ask  git-reset-hard  shell: git reset --hard discards uncommitted changes",
+      "2026-10-27 09:00:00 +00:00  deny  secret-network  webfetch: secret in a web request",
+      "2026-10-28 10:00:02 +00:00  ask  git-reset-hard  shell: git reset --hard discards uncommitted changes",
     ])
     for (const count of ["0", "201", "x", "1.5"]) assert.equal(w.run(["last", count]).code, 2, count)
     // logFile of the plugin's options; refused in a protected location (OpenCode's configuration), like the plugin.
@@ -446,9 +446,9 @@ describe("lot 48 step D: show and last", () => {
     mkdirSync(dirname(custom))
     writeFileSync(custom, "2026-10-28T11:00:00.000Z INFO edit → ask (local, rule self-protection): write to OpenCode's configuration\n")
     writeFileSync(join(w.globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { logFile: custom } }] }))
-    assert.match(w.run(["last", "1"]).out, /11:00:00\.000Z {2}ask {2}self-protection {2}edit: write/)
+    assert.match(w.run(["last", "1"]).out, /11:00:00 \+00:00 {2}ask {2}self-protection {2}edit: write/)
     writeFileSync(join(w.globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { logFile: join(w.globalDir, "x.log") } }] }))
-    assert.match(w.run(["last", "1"]).out, /10:00:05\.000Z {2}ask {2}privilege/)
+    assert.match(w.run(["last", "1"]).out, /10:00:05 \+00:00 {2}ask {2}privilege/)
     writeFileSync(join(w.globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { logFile: false } }] }))
     assert.equal(w.run(["last"]).out, "The plugin writes no log file (logFile: false).")
   })

@@ -22,7 +22,7 @@ function world(setup: { readonly global?: Json; readonly guard?: Json; readonly 
   writeFileSync(join(globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: setup.global ?? {} }] }))
   if (setup.guard) writeFileSync(join(globalDir, "guard.json"), JSON.stringify(setup.guard))
   if (setup.log) writeFileSync(join(data, "opencode", "log", "guard.log"), `${setup.log.join("\n")}\n`)
-  const env = { HOME: home, OPENCODE_CONFIG_DIR: globalDir, XDG_DATA_HOME: data }
+  const env = { HOME: home, OPENCODE_CONFIG_DIR: globalDir, XDG_DATA_HOME: data, TZ: "UTC" }
   return (terminal: { width: number; color: boolean } | undefined, ...args: string[]) => {
     const out: string[] = []
     const err: string[] = []
@@ -109,15 +109,15 @@ describe("guard show and guard last in a terminal", () => {
     assert.equal(out[0], " Latest asks and denials   4 entries")
     assert.equal(out[1], "─".repeat(70))
     assert.match(out[2]!, /^ {2}from .*guard\.log$|^ {2}from$/)
-    const days = out.filter((line) => /^ {2}\d{4}-\d{2}-\d{2}$/.test(line)).map((line) => line.trim())
-    assert.deepEqual(days, ["2026-10-27", "2026-10-28"])
+    const days = out.filter((line) => /^ {2}\d{4}-\d{2}-\d{2} \(UTC[+-]\d{2}:\d{2}\)$/.test(line)).map((line) => line.trim())
+    assert.deepEqual(days, ["2026-10-27 (UTC+00:00)", "2026-10-28 (UTC+00:00)"])
     const row = out.findIndex((line) => line.includes("rm-critical"))
-    assert.match(out[row]!, /^ {4}22:52:43Z {2}deny {2}rm-critical +shell$/)
-    const column = 4 + "22:52:43Z".length + 2
+    assert.match(out[row]!, /^ {4}22:52:43 {2}deny {2}rm-critical +shell$/)
+    const column = 4 + "22:52:43".length + 2
     assert.equal(out[row + 1]!.length - out[row + 1]!.trimStart().length, column)
     assert.ok(out[row + 2]!.startsWith(" ".repeat(column)), "a long reason continues at its column")
     assert.ok(!out.some((line) => line.includes("read-only tool")), "only asks and denials")
-    assert.ok(out.some((line) => /^ {4}22:53:30Z {2}ask {3}\(model\) +shell$/.test(line)), "a model verdict names its source")
+    assert.ok(out.some((line) => /^ {4}22:53:30 {2}ask {3}\(model\) +shell$/.test(line)), "a model verdict names its source")
     assert.ok(fits(out, 70))
   })
 
@@ -139,9 +139,9 @@ describe("guard show and guard last in a terminal", () => {
       ],
     })
     const out = run({ width: 160, color: false }, "last").out
-    const column = 4 + "08:00:00Z".length + 2
+    const column = 4 + "08:00:00".length + 2
     const row = out.findIndex((line) => line.includes("in-place-edit"))
-    assert.match(out[row]!, /^ {4}08:00:00Z {2}ask {3}in-place-edit {2}shell {2}model 540 ms$/)
+    assert.match(out[row]!, /^ {4}08:00:00 {2}ask {3}in-place-edit {2}shell {2}model 540 ms$/)
     assert.equal(out[row + 1], `${" ".repeat(column)}in-place file edit: the original content is overwritten`)
     assert.equal(out[row + 2], `${" ".repeat(column)}nox-4b opinion: allow (risk 0.95/3, highest: data destruction 0.29)`)
     const model = out.findIndex((line) => line.includes("(model)"))

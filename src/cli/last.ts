@@ -64,8 +64,34 @@ const decisions = (lines: readonly string[]): Decision[] =>
     return [{ time: time!, verdict: verdict!, rule: /(?:^|, )rule ([^,]+)/.exec(source!)?.[1] ?? "-", source: source!.split(",")[0]!.trim(), subject: subject!, reason: reason! }]
   })
 
+/**
+ * A log time (UTC) in the terminal's time zone (`TZ`, otherwise the system's), with its offset: `2026-10-31`,
+ * `22:08:39`, `+01:00` (an hour repeats when clocks go back). A time that cannot be read, or an unknown zone: as logged.
+ */
+export function localTime(iso: string, env: Record<string, string | undefined>): { day: string; time: string; offset: string } | undefined {
+  const date = new Date(iso)
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(iso) || Number.isNaN(date.getTime())) return undefined
+  const format = (timeZone: string | undefined) =>
+    new Intl.DateTimeFormat("en-CA", { ...(timeZone ? { timeZone } : {}), year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23", timeZoneName: "longOffset" }).formatToParts(date)
+  let parts: Intl.DateTimeFormatPart[]
+  try {
+    parts = format(env.TZ?.trim() || undefined)
+  } catch {
+    // `TZ` the runtime does not know (`:/etc/localtime`): the system's zone.
+    parts = format(undefined)
+  }
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? ""
+  const offset = part("timeZoneName").replace(/^GMT/, "") || "+00:00"
+  return { day: `${part("year")}-${part("month")}-${part("day")}`, time: `${part("hour")}:${part("minute")}:${part("second")}`, offset }
+}
+
+const shownTime = (entry: Decision, env: Record<string, string | undefined>) => {
+  const local = localTime(entry.time, env)
+  return local ? `${local.day} ${local.time} ${local.offset}` : entry.time
+}
+
 // Control characters are never printed to the terminal.
-const flat = (entry: Decision) => `${entry.time}  ${entry.verdict}  ${entry.rule}  ${entry.subject}: ${entry.reason}`.replace(CONTROL_CHARACTERS, " ")
+const flat = (entry: Decision, env: Record<string, string | undefined>) => `${shownTime(entry, env)}  ${entry.verdict}  ${entry.rule}  ${entry.subject}: ${entry.reason}`.replace(CONTROL_CHARACTERS, " ")
 
 export function last(io: CliIo, count: number): void {
   const sources = readSources(io)
@@ -90,9 +116,9 @@ export function last(io: CliIo, count: number): void {
     return
   }
   const shown = found.slice(-count)
-  if (io.pretty) return prettyLast(io.pretty, file, shown)
+  if (io.pretty) return prettyLast(io.pretty, file, shown, io.env)
   io.out(`Latest asks and denials (${file}):`)
-  for (const entry of shown) io.out(flat(entry))
+  for (const entry of shown) io.out(flat(entry, io.env))
 }
 
 /** The duration of the model calls that ends a decision line (`[model 540 ms]`, `, 2 attempts` after a retry). */
@@ -102,16 +128,16 @@ const OPINION = / — (\S+ opinion: .*)$/
 
 /**
  * `guard last` in a terminal: by day, each entry on a line (time, verdict, rule, tool, duration of the model calls), its
- * reason wrapped below it, then the model's opinion, dimmed. The time is the log's (UTC), without its fraction of a
- * second. The reason is split once redacted.
+ * reason wrapped below it, then the model's opinion, dimmed. The time is the terminal's local time (the day's heading
+ * gives its offset), without its fraction of a second. The reason is split once redacted.
  */
-function prettyLast(pretty: Pretty, file: string, entries: readonly Decision[]): void {
+function prettyLast(pretty: Pretty, file: string, entries: readonly Decision[], env: Record<string, string | undefined>): void {
   title(pretty, "Latest asks and denials", `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`, "log")
   for (const line of rowLines(pretty, [["  "]], 2, `from ${pretty.clean(file)}`, "dim")) pretty.line(line)
   const rows = entries.map((entry) => {
-    const [, day = "", time = entry.time] = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/.exec(entry.time) ?? []
+    const local = localTime(entry.time, env)
     const rule = entry.rule === "-" ? `(${entry.source})` : entry.rule
-    return { day: pretty.clean(day), time: pretty.clean(time === entry.time ? entry.time : `${time}Z`), verdict: entry.verdict, rule: pretty.clean(rule), byRule: entry.rule !== "-", subject: pretty.clean(entry.subject), reason: pretty.clean(entry.reason) }
+    return { day: pretty.clean(local ? `${local.day} (UTC${local.offset})` : ""), time: pretty.clean(local ? local.time : entry.time), verdict: entry.verdict, rule: pretty.clean(rule), byRule: entry.rule !== "-", subject: pretty.clean(entry.subject), reason: pretty.clean(entry.reason) }
   })
   const [time, rule] = [Math.max(0, ...rows.map((row) => row.time.length)), Math.max(0, ...rows.map((row) => row.rule.length))]
   const column = 4 + time + 2

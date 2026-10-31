@@ -112,6 +112,21 @@ export function checkedLogFile(
   return fallback
 }
 
+/** Directories the rules protect, from the server's environment; also read by `guard test` (cli/test.ts). */
+export function guardDirectories(env: Record<string, string | undefined>, globalDir: string | undefined) {
+  // The plugin directory is hot-reloaded: modifying it would disable the guardrail. Real form too (plugin loaded
+  // through a path containing a symbolic link).
+  const pluginDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
+  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir)])]
+  // OpenCode global configuration directory resolved from the server environment (`OPENCODE_CONFIG_DIR`,
+  // `XDG_CONFIG_HOME`): protected like the default directory, which the rules recognize by name only.
+  const configDir = globalDir ? resolve(globalDir) : undefined
+  const protectedDirs = [...new Set([...pluginDirs, ...(configDir ? [configDir, realPath(configDir)] : [])])]
+  // Directories of the service files (`service.json`: server password), resolved the same way.
+  const serviceDirs = [...new Set(serviceDirectories(env).map((dir) => resolve(dir)))]
+  return { pluginDir, pluginDirs, protectedDirs, serviceDirs }
+}
+
 export async function setupGuard(
   ctx: GuardContext,
   env: Record<string, string | undefined> = process.env,
@@ -119,10 +134,7 @@ export async function setupGuard(
   globalDir: string | undefined = globalConfigDirectory(env),
   scopeClock?: { readonly now: () => number; readonly intervalMs: number },
 ) {
-  // The plugin directory is hot-reloaded: modifying it would disable the guardrail. Real form too (plugin loaded
-  // through a path containing a symbolic link).
-  const pluginDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
-  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir)])]
+  const { pluginDir, pluginDirs, protectedDirs, serviceDirs } = guardDirectories(env, globalDir)
   // Settings by agent and by project: guard.json files (global, and each `.opencode` OpenCode reads for the session
   // directory), identity taken before reading (a change in between is seen at the next check). Never throws.
   const paths = guardPaths(ctx.location.directory, globalDir, systemDir)
@@ -176,12 +188,6 @@ export async function setupGuard(
   } catch (error) {
     homeError = error
   }
-  // OpenCode global configuration directory resolved from the server environment (`OPENCODE_CONFIG_DIR`,
-  // `XDG_CONFIG_HOME`): protected like the default directory, which the rules recognize by name only.
-  const configDir = globalDir ? resolve(globalDir) : undefined
-  const protectedDirs = [...new Set([...pluginDirs, ...(configDir ? [configDir, realPath(configDir)] : [])])]
-  // Directories of the service files (`service.json`: server password), resolved the same way.
-  const serviceDirs = [...new Set(serviceDirectories(env).map((dir) => resolve(dir)))]
   // Created after the redactor: every log line is redacted.
   // Unusable configured file: falls back to the default log (the service's error output cannot be consulted).
   const fallback = defaultLogFile(env)
