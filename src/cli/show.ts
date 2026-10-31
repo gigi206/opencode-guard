@@ -2,6 +2,7 @@
 // section it comes from, the project's trust and the settings set aside with the reason (the warnings of the plugin's
 // resolution). Only from the files read faithfully here; no other option of the configuration is ever printed.
 import { resolve } from "node:path"
+import { parseConfig } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
@@ -27,7 +28,9 @@ export function show(io: CliIo, agent: string | undefined): void {
     read.push({ name: `global guard.json (${paths.global})`, state: !global ? "absent" : global.data ? "read" : `ignored, ${global.reason}`, style: !global ? "dim" : global.data ? "good" : "warn" })
   for (const file of files.filter((item) => !item.global)) read.push({ name: file.label, state: file.data ? "read" : `ignored, ${file.reason}`, style: file.data ? "good" : "warn" })
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
-  const settings = version.settings?.(agent) ?? []
+  const patterns = redactionSettings(io, sources)
+  const settings = [...(version.settings?.(agent) ?? []), ...patterns.rows]
+  const warnings = [...version.warnings, ...patterns.warnings]
   if (io.pretty)
     return prettyShow(io.pretty, {
       title: `${directory}${agent === undefined ? "" : `, main agent ${agent}`}`,
@@ -35,7 +38,7 @@ export function show(io: CliIo, agent: string | undefined): void {
       trusted: Boolean(version.trusted),
       listed,
       settings,
-      warnings: version.warnings,
+      warnings,
     })
   io.out(`Settings for ${directory}${agent === undefined ? "" : ` with the main agent ${agent}`}, read from:`)
   for (const source of read) io.out(`  ${source.name}: ${source.state}`)
@@ -45,9 +48,27 @@ export function show(io: CliIo, agent: string | undefined): void {
   const width = (pick: (row: (typeof settings)[number]) => string) => Math.max(...settings.map((row) => pick(row).length))
   const [key, value] = [width((row) => row.key), width((row) => String(row.value))]
   for (const row of settings) io.out(`  ${row.key.padEnd(key)}  ${String(row.value).padEnd(value)}  ${row.origin}`)
-  if (version.warnings.length) {
+  if (warnings.length) {
     io.out("Set aside:")
-    for (const warning of version.warnings) io.out(`  ${warning}`)
+    for (const warning of warnings) io.out(`  ${warning}`)
+  }
+}
+
+/**
+ * Redaction settings of the global or system entry, read as the plugin reads them: the number of your patterns, each
+ * built-in format turned off, and the `secretPatterns` entries set aside (`guard redaction` lists them all).
+ */
+function redactionSettings(io: CliIo, sources: ReturnType<typeof readSources>): { rows: Array<{ key: string; value: unknown; origin: string }>; warnings: string[] } {
+  try {
+    const { config, warnings } = parseConfig(sources.options, io.env, () => sources.declarations)
+    const origin = sources.origin ?? "global configuration"
+    const rows = [
+      ...(config.secretPatterns.length ? [{ key: "secretPatterns", value: `${config.secretPatterns.length} pattern${config.secretPatterns.length === 1 ? "" : "s"}`, origin }] : []),
+      ...config.disabledPatterns.map((type) => ({ key: `secretPatterns.${type}`, value: "off", origin })),
+    ]
+    return { rows, warnings: warnings.filter((warning) => warning.startsWith("secretPatterns")) }
+  } catch {
+    return { rows: [], warnings: [] }
   }
 }
 
@@ -121,10 +142,11 @@ const RELAXES = "relaxes"
 
 /**
  * Does the setting relax a protection: a protective switch off, self-protection or local confirmations left to the
- * decision model, a rule turned off or left to the model?
+ * decision model, a rule turned off or left to the model, a redaction format turned off?
  */
 function relaxes(key: string, value: string): boolean {
   if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
+  if (key.startsWith("secretPatterns.")) return value === "off"
   if (PROTECTIVE.has(key)) return value === "false"
   if (key === "selfProtectionByModel") return value === "true"
   if (key === "localAsks") return value === "model"

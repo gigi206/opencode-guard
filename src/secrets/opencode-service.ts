@@ -145,6 +145,13 @@ function acceptToken(value: string): boolean {
   return upper || (digit && value.split(/[-_.:]/).some((part) => part.length >= 12 && /\d/.test(part)))
 }
 
+/** What each OpenCode format catches (`guard redaction`); they cannot be turned off. */
+export const OPENCODE_FORMAT_SUMMARIES: ReadonlyMap<string, string> = new Map([
+  ["opencode_credential", "OpenCode's stored provider credentials (key, OAuth refresh and access tokens)"],
+  ["opencode_pairing", "OpenCode's pairing code (connection link and API response)"],
+  ["qr_code", "OpenCode's pairing QR code drawn in the terminal (replaced whole)"],
+])
+
 /**
  * OpenCode 2.1.1 formats whose value is learned (`learn`):
  * - credential entry of the export and of the API list (`schema/src/credential.ts`): `key` in an object of type

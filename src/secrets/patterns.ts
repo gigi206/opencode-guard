@@ -218,6 +218,36 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   },
 ]
 
+/**
+ * What each built-in format catches (`guard redaction`, docs/rules.md: a test compares them). A type may group several
+ * patterns (`private_key`, `generic_secret`): turning it off (`secretPatterns`, global configuration only) turns them
+ * all off.
+ */
+export const FORMAT_SUMMARIES: ReadonlyMap<string, string> = new Map([
+  ["private_key", "private keys in PEM blocks (whole or truncated) and PGP private key blocks"],
+  ["anthropic_key", "Anthropic API keys (sk-ant-…)"],
+  ["openai_key", "OpenAI API keys (sk-…, sk-proj-…, sk-svcacct-…, sk-admin-…)"],
+  ["google_api_key", "Google API keys (AIza…)"],
+  ["aws_access_key", "AWS access key identifiers (AKIA…, ASIA…)"],
+  ["github_token", "GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)"],
+  ["github_pat", "GitHub fine-grained personal access tokens (github_pat_…)"],
+  ["gitlab_token", "GitLab personal access tokens (glpat-…)"],
+  ["slack_token", "Slack tokens (xoxa-, xoxb-, xoxp-, xoxo-, xoxs-, xoxr-)"],
+  ["slack_webhook", "Slack incoming webhook addresses"],
+  ["stripe_key", "Stripe secret and restricted keys (sk_live_, rk_test_…)"],
+  ["npm_token", "npm access tokens (npm_…)"],
+  ["huggingface_token", "Hugging Face tokens (hf_…)"],
+  ["jwt", "JSON Web Tokens (three base64url segments starting with eyJ)"],
+  ["bearer_token", "the token after Bearer, unless it reads as an ordinary word"],
+  ["basic_auth", "the value after Basic, when it decodes to user:password"],
+  ["url_credentials", "the password of an address that carries a user and a password before the host, unless it is a placeholder or code"],
+  ["passphrase", "a quoted phrase assigned to an upper-case PASSWORD, PASSWD, PASSPHRASE, SECRET or PASS variable"],
+  [
+    "generic_secret",
+    "a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass (name = value, name: value), or given to a command-line option such as --password or --token; only a value that looks like a secret (not code, a variable or a placeholder)",
+  ],
+])
+
 /** Minimum length of a configuration secret replaced as is (`knownSecrets` of `createRedactor`). */
 export const MIN_KNOWN_SECRET = 8
 

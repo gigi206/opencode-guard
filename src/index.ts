@@ -159,7 +159,7 @@ export async function setupGuard(
   warnings.push(...unread)
   // OpenCode service password and remote access route: re-read from its files (`env` directories).
   const runtimeSecrets = serviceSecretSource(serviceDirectories(env))
-  const redactor = createRedactor({ extraPatterns: config.secretPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
+  const redactor = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
   let home: string | undefined
   let homeError: unknown
   try {
@@ -337,7 +337,8 @@ export async function setupGuard(
   const enforced = enforcedBySystemConfig(protectedDirs[0]!, systemDir) ? "enforced" : "not enforced"
   const modelText = model && config.decision ? `${config.decision.model} via ${displayURL(config.decision.baseURL)} (${config.decision.protocol})` : "disabled"
   const disabled = FEATURE_NAMES.filter((name) => !config.features[name])
-  const off = disabled.length ? `; disabled: ${disabled.join(", ")}` : ""
+  // Built-in redaction formats turned off: a relaxation, always shown.
+  const off = `${disabled.length ? `; disabled: ${disabled.join(", ")}` : ""}${config.disabledPatterns.length ? `; redaction formats off: ${config.disabledPatterns.join(", ")}` : ""}`
   // Profile and rule settings retained, only when they differ from the defaults.
   const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)

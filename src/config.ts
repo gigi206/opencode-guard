@@ -1,6 +1,7 @@
 import type { ModelConfig } from "./model/client.ts"
 import { DEFAULT_OUTPUT_QUESTIONS, DEFAULT_PROMPT_QUESTIONS, DEFAULT_THRESHOLDS, type CheckQuestion, type OutputQuestionTexts, type PromptQuestionTexts, type Thresholds } from "./model/questions.ts"
-import { MIN_KNOWN_SECRET, type SecretPattern } from "./secrets/patterns.ts"
+import { OPENCODE_FORMAT_SUMMARIES } from "./secrets/opencode-service.ts"
+import { FORMAT_SUMMARIES, MIN_KNOWN_SECRET, type SecretPattern } from "./secrets/patterns.ts"
 import { DENY_ONLY_RULES, RULE_FEATURES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
 import { INTERNAL_ERROR_RULE, type CustomRule, type Finding } from "./rules/types.ts"
 
@@ -57,6 +58,11 @@ export interface GuardConfig {
   readonly cacheTtlMs: number
   readonly cacheMax: number
   readonly secretPatterns: readonly SecretPattern[]
+  /**
+   * Built-in formats turned off (`{ "type": …, "enabled": false }` in `secretPatterns`): only those the global or
+   * system configuration turns off too.
+   */
+  readonly disabledPatterns: readonly string[]
   readonly allowlist: readonly string[]
   readonly rules: readonly CustomRule[]
   /** Primary agent with no checks and no redaction (chosen by the user, e.g. Shift+Tab); absent = disabled. */
@@ -260,6 +266,8 @@ interface ModelSettings {
   readonly thresholds: Thresholds
   /** Extra patterns: they redact what the model receives, so a project's own could hide data from it. */
   readonly secretPatterns: readonly SecretPattern[]
+  /** Built-in formats turned off: what the model receives changes too. */
+  readonly disabledPatterns: readonly string[]
 }
 
 /**
@@ -286,19 +294,34 @@ function undeclaredModel(declarations: readonly PluginDeclaration[] | string, ef
   return reasons.join("; ")
 }
 
-/** `secretPatterns` option: each entry an object `{ type, pattern }` or the pattern source alone (type `custom`). */
-function secretPatternsOption(value: unknown, warnings: string[]): SecretPattern[] {
-  const secretPatterns: SecretPattern[] = []
+/**
+ * `secretPatterns` option: each entry an object `{ type, pattern }` or the pattern source alone (type `custom`), or
+ * `{ type, enabled: false }`, which turns off a built-in format (every pattern of that type). An entry with a pattern and
+ * `enabled: false` is a pattern of yours kept aside. Turning a format off is checked by `parseConfig` (global only).
+ */
+function secretPatternsOption(value: unknown, warnings: string[]): { patterns: SecretPattern[]; disabled: string[] } {
+  const patterns: SecretPattern[] = []
+  const disabled: string[] = []
   // A single value (object or string) instead of an array: reported, never silently ignored.
   if (value !== undefined && !Array.isArray(value)) warnings.push("secretPatterns must be an array, ignored")
   if (Array.isArray(value)) {
     value.forEach((item, index) => {
       const entry: Record<string, unknown> = isRecord(item) ? item : { pattern: item }
-      const compiled = regex(entry.pattern, "g", `secretPatterns[${index}]`, warnings)
-      if (compiled) secretPatterns.push({ type: typeof entry.type === "string" ? entry.type : "custom", regex: compiled })
+      const name = `secretPatterns[${index}]`
+      if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") return warnings.push(`${name}: enabled must be true or false, entry ignored`)
+      if (entry.enabled === false && entry.pattern === undefined) {
+        const type = entry.type
+        if (typeof type !== "string" || !type) return warnings.push(`${name}: the built-in format to turn off is missing (type)`)
+        if (OPENCODE_FORMAT_SUMMARIES.has(type)) return warnings.push(`${name}: the built-in format ${type} cannot be turned off`)
+        if (!FORMAT_SUMMARIES.has(type)) return warnings.push(`${name}: no built-in format named ${type}`)
+        if (!disabled.includes(type)) disabled.push(type)
+        return
+      }
+      const compiled = regex(entry.pattern, "g", name, warnings)
+      if (compiled && entry.enabled !== false) patterns.push({ type: typeof entry.type === "string" ? entry.type : "custom", regex: compiled })
     })
   }
-  return secretPatterns
+  return { patterns, disabled }
 }
 
 /** Settings besides the address and model whose value, read from a plugin entry, differs from the effective one. */
@@ -308,6 +331,7 @@ function otherModelSettings(options: Readonly<Record<string, unknown>>, raw: Rea
   // As the client sends them: names in lowercase, the last one wins.
   const headers = (config: ModelConfig) => JSON.stringify(Object.entries(Object.fromEntries(Object.entries(config.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]))).sort())
   const thresholds = thresholdsOption(options.thresholds, [])
+  const declaredPatterns = secretPatternsOption(options.secretPatterns, [])
   const patterns = (list: readonly SecretPattern[]) => JSON.stringify(list.map(({ type, regex }) => [type, regex.source, regex.flags]))
   const differences: Array<[string, boolean]> = [
     ["decision.protocol", declared.protocol !== effective.decision.protocol],
@@ -315,7 +339,7 @@ function otherModelSettings(options: Readonly<Record<string, unknown>>, raw: Rea
     ["decision.apiKey", declared.apiKey !== effective.decision.apiKey],
     ["decision.headers", headers(declared) !== headers(effective.decision)],
     ["maxStateChars", maxStateCharsOption(options.maxStateChars, []) !== effective.maxStateChars],
-    ["secretPatterns", patterns(secretPatternsOption(options.secretPatterns, [])) !== patterns(effective.secretPatterns)],
+    ["secretPatterns", patterns(declaredPatterns.patterns) !== patterns(effective.secretPatterns) || [...declaredPatterns.disabled].sort().join() !== [...effective.disabledPatterns].sort().join()],
     ["thresholds", (Object.keys(DEFAULT_THRESHOLDS) as Array<keyof Thresholds>).some((key) => thresholds[key] !== effective.thresholds[key])],
   ]
   return differences.flatMap(([name, differs]) => (differs ? [name] : []))
@@ -790,7 +814,7 @@ export function parseConfig(
   warnUnknown(options, OPTION_KEYS, "", warnings)
   const thresholds = thresholdsOption(options.thresholds, warnings)
 
-  const secretPatterns = secretPatternsOption(options.secretPatterns, warnings)
+  const { patterns: secretPatterns, disabled: requestedOff } = secretPatternsOption(options.secretPatterns, warnings)
 
   const rules: CustomRule[] = []
   // A single rule (object) instead of an array: reported (a deny rule silently lost would be a hole).
@@ -885,7 +909,14 @@ export function parseConfig(
   // The decision model allows an ask only with the global sources' address and model (user's decision): read here.
   const decision = decisionOption(options, warnings)
   const maxStateChars = maxStateCharsOption(options.maxStateChars, warnings)
-  const modelUndeclared = decision ? undeclaredModel(loaded(), { decision, maxStateChars, thresholds, secretPatterns }) : "no decision model"
+  // Built-in formats turned off: a relaxation (rules, wire, the model's view), counted only when the global or system
+  // configuration turns them off too.
+  const disabledPatterns = requestedOff.filter((type) => {
+    const why = refusal((declared) => secretPatternsOption(declared.secretPatterns, []).disabled.includes(type))
+    if (why) warnings.push(`secretPatterns: turning off the built-in format ${type} ignored: ${why}`)
+    return !why
+  })
+  const modelUndeclared = decision ? undeclaredModel(loaded(), { decision, maxStateChars, thresholds, secretPatterns, disabledPatterns }) : "no decision model"
   const layers = inputs && scopeLayers(options, { rules, overrides: new Map(overrides), profile, refusal, declarations: loaded(), modelUndeclared }, inputs, warnings)
   const version = layers && (inputs!.files.length > 0 || layers.keyed) ? resolveVersion(layers, inputs!.files) : undefined
   const certification = version ? [] : warnings
@@ -963,6 +994,7 @@ export function parseConfig(
       cacheTtlMs: num(options.cacheTtlMs, 600_000, "cacheTtlMs", warnings, 0, MAX_CACHE_TTL_MS),
       cacheMax: num(options.cacheMax, 500, "cacheMax", warnings, 0, MAX_CACHE_ENTRIES),
       secretPatterns,
+      disabledPatterns,
       allowlist: allowlistOption(options.allowlist, warnings),
       rules,
       unprotectedAgent: unprotectedAgentOption(options.unprotectedAgent, warnings),

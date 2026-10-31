@@ -30,6 +30,8 @@ export interface Redactor {
 
 export interface RedactorOptions {
   readonly extraPatterns?: readonly SecretPattern[]
+  /** Built-in formats turned off (`secretPatterns`, global configuration only): every pattern of these types. */
+  readonly disabledTypes?: readonly string[]
   readonly allowlist?: readonly string[]
   readonly env?: Record<string, string | undefined>
   /** Configuration secrets (decision model key, headers): redacted identically. */
@@ -264,7 +266,8 @@ export function createRedactor(options: RedactorOptions = {}): Redactor {
   const allow = new Set(options.allowlist ?? [])
   // OpenCode formats first: an identifier value that happens to contain the beginning of a known format (`sk-` in the
   // middle of a random key) is redacted and learned whole, instead of being cut by that format's pattern.
-  const patterns = [...OPENCODE_PATTERNS, ...BUILTIN_PATTERNS, ...(options.extraPatterns ?? [])]
+  const off = new Set(options.disabledTypes ?? [])
+  const patterns = [...OPENCODE_PATTERNS, ...BUILTIN_PATTERNS.filter((pattern) => !off.has(pattern.type)), ...(options.extraPatterns ?? [])]
   const fixed = [
     ...envSecretValues(options.env ?? {}).map((item) => ({ name: `env:${item.name}`, value: item.value })),
     ...(options.knownSecrets ?? []).filter((item) => item.value.length >= MIN_KNOWN_SECRET).map((item) => ({ name: `config:${item.name}`, value: item.value })),

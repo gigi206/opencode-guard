@@ -143,6 +143,37 @@ Secrets are replaced with `[[GUARD_REDACTED:<type>]]`, for example `[[GUARD_REDA
 
 **Placeholder protection.** Any attempt to write the placeholder into a file (`edit`, `write`, `patch`, shell, CodeMode, MCP) is denied, because it would overwrite the real secret. The agent is asked to make a targeted edit that does not include the placeholder. This includes a placeholder encoded in base64 (up to two levels), such as the `data:` values of a Kubernetes Secret or a `.dockerconfigjson`, which would otherwise be written back over the real values.
 
+### Redaction formats
+
+The patterns behind the detection above, by type (the type names the placeholder). `guard redaction` lists them with their state and your own `secretPatterns`; `guard redaction --explain <format>` prints every regular expression of a type.
+
+| Format | Kind | What it catches |
+|---|---|---|
+| `private_key` | built-in | private keys in PEM blocks (whole or truncated) and PGP private key blocks |
+| `anthropic_key` | built-in | Anthropic API keys (sk-ant-…) |
+| `openai_key` | built-in | OpenAI API keys (sk-…, sk-proj-…, sk-svcacct-…, sk-admin-…) |
+| `google_api_key` | built-in | Google API keys (AIza…) |
+| `aws_access_key` | built-in | AWS access key identifiers (AKIA…, ASIA…) |
+| `github_token` | built-in | GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_) |
+| `github_pat` | built-in | GitHub fine-grained personal access tokens (github_pat_…) |
+| `gitlab_token` | built-in | GitLab personal access tokens (glpat-…) |
+| `slack_token` | built-in | Slack tokens (xoxa-, xoxb-, xoxp-, xoxo-, xoxs-, xoxr-) |
+| `slack_webhook` | built-in | Slack incoming webhook addresses |
+| `stripe_key` | built-in | Stripe secret and restricted keys (sk_live_, rk_test_…) |
+| `npm_token` | built-in | npm access tokens (npm_…) |
+| `huggingface_token` | built-in | Hugging Face tokens (hf_…) |
+| `jwt` | built-in | JSON Web Tokens (three base64url segments starting with eyJ) |
+| `bearer_token` | built-in | the token after Bearer, unless it reads as an ordinary word |
+| `basic_auth` | built-in | the value after Basic, when it decodes to user:password |
+| `url_credentials` | built-in | the password of an address that carries a user and a password before the host, unless it is a placeholder or code |
+| `passphrase` | built-in | a quoted phrase assigned to an upper-case PASSWORD, PASSWD, PASSPHRASE, SECRET or PASS variable |
+| `generic_secret` | built-in | a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass (name = value, name: value), or given to a command-line option such as --password or --token; only a value that looks like a secret (not code, a variable or a placeholder) |
+| `opencode_credential` | OpenCode, always active | OpenCode's stored provider credentials (key, OAuth refresh and access tokens) |
+| `opencode_pairing` | OpenCode, always active | OpenCode's pairing code (connection link and API response) |
+| `qr_code` | OpenCode, always active | OpenCode's pairing QR code drawn in the terminal (replaced whole) |
+
+**Turning a built-in format off.** An entry `{ "type": "<format>", "enabled": false }` in `secretPatterns` turns off every pattern of that type (`generic_secret` and `private_key` are three patterns each). It counts only when the global or system configuration sets it: from a project's `opencode.json` it is ignored, with a warning, and the format stays on. Off, its patterns no longer redact anything (tool outputs, prompts, the wire, the log; in a prompt, the [prompt check](decision-model.md#prompt-check-promptcheck) may still mask such a value), the rules no longer treat it as a secret (`secret-network` and the like no longer deny it), and the decision model receives it in clear. The start line names the formats turned off (`redaction formats off: …`), and `guard show` marks each one as a relaxation. OpenCode's formats cannot be turned off. To leave one value alone rather than a whole format, use `allowlist`.
+
 ## Confirmations and run modes
 
 - **`--auto`** (and its hidden aliases `--yolo` and `--dangerously-skip-permissions`) is handled **by the client**: OpenCode's server still raises every confirmation request, and the CLI (or the TUI in "autoaccept" mode) answers "allow once" automatically. All of the plugin's confirmations are therefore approved; only `deny` verdicts still protect you. The plugin cannot detect this mode, hence the unattended mode below.

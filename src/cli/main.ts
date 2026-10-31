@@ -6,6 +6,7 @@ import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
 import { CliError, outputRedactor, type CliIo, type Pretty } from "./context.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
+import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { show } from "./show.ts"
 import { paint } from "./style.ts"
@@ -15,6 +16,8 @@ export const USAGE = `Usage: guard <command> [arguments]
 
   rules [--builtins|--custom]      built-in rules (identifier, group, own verdict, what they check), then yours
   rules --explain <rule>           one built-in rule: what it checks, how it decides, its typical reason and settings
+  redaction [--builtins|--custom]  redaction formats (built-in ones and their state, OpenCode's), then your patterns
+  redaction --explain <format>     one format: what it catches, its patterns, how to turn it off
   show [--agent <name>]            policy settings in force for the current directory, and where they come from
   last [<count>]                   latest asks and denials of the plugin's log (default ${DEFAULT_LAST}, at most ${MAX_LAST})
   allow|off|ask|deny|model <rule>  set a built-in rule in the global guard.json ("allow" turns it off, like "off")
@@ -41,7 +44,7 @@ interface Parsed {
 }
 
 /** Options allowed by a command; `--project` takes the next argument as its directory unless it is an option. */
-function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "all" | "builtins" | "custom" | "explain">): Parsed {
+function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "all" | "builtins" | "custom" | "explain">, explained = "a rule identifier"): Parsed {
   const parsed: Parsed = { positionals: [] }
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!
@@ -59,7 +62,7 @@ function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "projec
     else if (arg === "--custom" && allowed.includes("custom")) parsed.custom = true
     else if (name === "--explain" && allowed.includes("explain")) {
       const value = inline ?? args[++index]
-      if (!value || value.startsWith("-")) throw new UsageError("--explain needs a rule identifier")
+      if (!value || value.startsWith("-")) throw new UsageError(`--explain needs ${explained}`)
       parsed.explain = value
     } else if (arg.startsWith("-") && arg !== "-") throw new UsageError(`unknown option ${arg}`)
     else parsed.positionals.push(arg)
@@ -110,6 +113,19 @@ function run(command: string, args: readonly string[], io: CliIo): void {
         for (const line of ruleLines()) io.out(`  ${line}`)
         for (const line of customRuleLines(io)) io.out(line)
       }
+      return
+    }
+    case "redaction": {
+      const parsed = parse(args, ["builtins", "custom", "explain"], "a format name")
+      expect(parsed, 0, 0, "")
+      if (parsed.explain !== undefined) {
+        if (parsed.builtins || parsed.custom) throw new UsageError("--explain cannot be combined with --builtins or --custom")
+        if (!isFormat(parsed.explain)) throw new UsageError(`no redaction format named ${parsed.explain}`)
+        return explainFormat(io, parsed.explain)
+      }
+      const [builtins, custom] = parsed.builtins === parsed.custom ? [true, true] : [Boolean(parsed.builtins), Boolean(parsed.custom)]
+      if (io.pretty) return prettyRedaction(io, io.pretty, builtins, custom)
+      for (const line of redactionLines(io, builtins, custom)) io.out(line)
       return
     }
     case "show": {
