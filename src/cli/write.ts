@@ -66,9 +66,9 @@ function sectionOf(data: Json, target: Target, create: boolean): Json | undefine
   return current
 }
 
-/** Removes the objects emptied along the section's keys, from the deepest. */
-function prune(data: Json, target: Target): void {
-  const keys = [...(target.project === undefined ? [] : ["projects", target.project]), ...(target.agent === undefined ? [] : ["agents", target.agent]), "ruleOverrides"]
+/** Removes the objects emptied along the section's keys (and `ruleOverrides` unless told otherwise), from the deepest. */
+function prune(data: Json, target: Target, leaf: string | undefined = "ruleOverrides"): void {
+  const keys = [...(target.project === undefined ? [] : ["projects", target.project]), ...(target.agent === undefined ? [] : ["agents", target.agent]), ...(leaf ? [leaf] : [])]
   for (let depth = keys.length; depth > 0; depth--) {
     const parent = keys.slice(0, depth - 1).reduce<Json>((node, key) => node[key] as Json, data)
     const value = parent[keys[depth - 1]!]
@@ -263,4 +263,70 @@ export function untrust(io: CliIo, dir: string): void {
   if (dir === "*") return
   const after = resolution(io, sources, dir, [{ label: "global guard.json", global: true, data }])
   if (after.trusted) io.out(`${dir} is still trusted (trustedProjects of the global sources: ${after.listed?.join(", ")})`)
+}
+
+/** Policy settings `guard set` writes, and the values each takes (`ruleOverrides`: `guard rules`). */
+export const SWITCHES: Readonly<Record<string, readonly string[]>> = {
+  profile: ["standard", "credentials-only"],
+  localAsks: ["ask", "model"],
+  selfProtectionByModel: ["true", "false"],
+  dangerousCommands: ["true", "false"],
+  sensitiveFiles: ["true", "false"],
+  scripts: ["true", "false"],
+  decisionModel: ["true", "false"],
+}
+
+/** The value as written in guard.json: a boolean for a switch, otherwise the word. */
+function switchValue(key: string, raw: string): string | boolean {
+  const word = raw.trim().toLowerCase()
+  const allowed = SWITCHES[key]!
+  if (allowed[0] === "true") {
+    if (word === "true" || word === "on") return true
+    if (word === "false" || word === "off") return false
+  } else if (allowed.includes(word)) return word
+  throw new CliError(`invalid value for ${key}: ${allowed.join(" or ")} expected${allowed[0] === "true" ? " (or on, off)" : ""}`)
+}
+
+/** New warnings of the plugin's resolution that name the key: the setting would not hold there. */
+function refusedFor(io: CliIo, sources: Sources, guard: GlobalGuard, data: Json, target: Target, key: string): string[] {
+  const after = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).warnings
+  const before = resolution(io, sources, target.project, guard.file ? [guard.file] : []).warnings
+  return after.filter((line) => !before.includes(line) && line.includes(key))
+}
+
+/** A policy setting (`guard set <key> <value>`) at the target, refused when the plugin would not apply it there. */
+export function setSwitch(io: CliIo, key: string, raw: string, target: Target): void {
+  const value = switchValue(key, raw)
+  const sources = readSources(io)
+  const guard = globalGuard(sources)
+  const data = structuredClone(guard.data)
+  const section = sectionOf(data, target, true)!
+  if (section[key] === value) {
+    io.out(`${key} is already ${JSON.stringify(value)} in ${placeOf(target)} of ${guard.path}: nothing changed`)
+    return
+  }
+  section[key] = value
+  const refused = refusedFor(io, sources, guard, data, target, key)
+  if (refused.length) throw new CliError(`refused, nothing written: ${refused.join("; ")}`)
+  write(guard, data)
+  io.out(`${key} set to ${JSON.stringify(value)} in ${placeOf(target)} of ${guard.path}`)
+  const still = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).settings?.(target.agent).find((item) => item.key === key)
+  if (still && String(still.value) !== String(value)) io.out(`${key} is still ${JSON.stringify(still.value)} there, set by ${still.origin}`)
+}
+
+/** Removal of a policy setting at the target (`guard unset <key>`), and what is then in force there. */
+export function unsetSwitch(io: CliIo, key: string, target: Target): void {
+  const sources = readSources(io)
+  const guard = globalGuard(sources)
+  const data = structuredClone(guard.data)
+  const section = sectionOf(data, target, false)
+  if (!section || !Object.hasOwn(section, key)) io.out(`${key} is not set in ${placeOf(target)} of ${guard.path}: nothing changed`)
+  else {
+    delete section[key]
+    prune(data, target, "")
+    write(guard, data)
+    io.out(`${key} removed from ${placeOf(target)} of ${guard.path}`)
+  }
+  const now = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).settings?.(target.agent).find((item) => item.key === key)
+  if (now) io.out(`${key} is now ${JSON.stringify(now.value)} there, set by ${now.origin}`)
 }

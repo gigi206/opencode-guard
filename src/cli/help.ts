@@ -36,7 +36,9 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
     entries: [
       { usage: "rules off|ask|deny|model <rule>", text: 'set a built-in rule ("off" turns it off, "model" leaves its asks to the decision model)' },
       { usage: "rules reset <rule>", text: "remove the rule's setting there: it applies with its own verdict again" },
-      { usage: "  --agent <name>", text: "in the section of this agent (main agent, or subagent)" },
+      { usage: "set <setting> <value>", text: "a policy setting: profile, localAsks, selfProtectionByModel, dangerousCommands, sensitiveFiles, scripts, decisionModel" },
+      { usage: "unset <setting>", text: "remove that setting there" },
+      { usage: "  --agent <name>", text: "rules, set, unset: in the section of this agent (main agent, or subagent)" },
       { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
       { usage: "redaction off|on <format>", text: "turn a built-in redaction format off, or back on (top level only)" },
       { usage: "trust [<dir>|--all]", text: "add a project to trustedProjects (default: the git repository of the current directory)" },

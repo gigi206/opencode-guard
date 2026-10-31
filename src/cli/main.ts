@@ -15,7 +15,7 @@ import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
-import { directoryOf, resetRule, setRedaction, setRule, SETTINGS, trust, untrust, type SettingWord, type Target } from "./write.ts"
+import { directoryOf, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
 
 export { USAGE } from "./help.ts"
 
@@ -166,6 +166,19 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
     }
     case "test":
       return test(io, testRequest(args))
+    case "set":
+    case "unset": {
+      const parsed = parse(args, ["agent", "project"])
+      expect(parsed, command === "set" ? 2 : 1, command === "set" ? 2 : 1, command === "set" ? "a setting and its value" : "a setting")
+      const key = parsed.positionals[0]!
+      if (key === "ruleOverrides") throw new UsageError("a rule's setting is changed with guard rules off|ask|deny|model|reset <rule>")
+      if (!Object.hasOwn(SWITCHES, key)) throw new UsageError(`unknown setting ${key} (one of ${Object.keys(SWITCHES).join(", ")})`)
+      const target: Target = {
+        ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
+        ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, command === "unset") }),
+      }
+      return command === "set" ? setSwitch(io, key, parsed.positionals[1]!, target) : unsetSwitch(io, key, target)
+    }
     case "status": {
       if (args.some((arg) => arg !== "--offline")) throw new UsageError(`unexpected argument ${args.find((arg) => arg !== "--offline")}`)
       return status(io, { offline: args.includes("--offline") })
