@@ -2904,12 +2904,122 @@ function outranksSelfProtection(active: ActiveRules | undefined): boolean {
 /**
  * The plugin's command line (`bin/guard`, which writes its settings): `guard` as the launched program, or a path to its
  * launcher (`…/bin/guard`, in any directory: a link installed elsewhere) or to a module of the plugin's `src/cli/`
- * anywhere in the command (run directly or by an interpreter, or only named). Lexical forms from the command's
- * directories; only words that can name them are resolved.
+ * anywhere in the command (run directly or by an interpreter, or only named), unless the command only reads files
+ * (`onlyReads`). Lexical forms from the command's directories; only words that can name them are resolved.
  */
 const GUARD_COMMAND = commandRegex("guard")
 
+/** Constructions not modelled by `readOnlyWords`: substitutions, expansions, process substitution, heredocs, groups. */
+const UNMODELLED = /\$|`|<\(|>\(|<<|[(){}]/
+/** Programs that run code or another program, anywhere in the raw command (even quoted): never a plain reading then. */
+const RUNS_SOMETHING =
+  /(?:^|[^\w.-])(?:sh|bash|zsh|dash|ksh|mksh|ash|yash|fish|csh|tcsh|python[\d.]*|node|nodejs|bun|bunx|deno|tsx|ts-node|npx|npm|pnpm|yarn|ruby[\d.]*|perl[\d.]*|php[\d.]*|eval|source|exec|xargs|parallel|watch|ssh|su|sudo|doas|env|nohup|setsid|script|awk|gawk|nawk|mawk|find)(?![\w.-])/
+
+/**
+ * Words of each simple command, as the shell reads them (quotes removed, `\` escapes), when the command holds only
+ * plain words, quotes and separators; `undefined` otherwise (a construction above, an unbalanced quote, a comment).
+ */
+function readOnlyWords(command: string): string[][] | undefined {
+  if (UNMODELLED.test(command.replace(/'[^']*'/g, "''"))) return undefined
+  const segments: string[][] = [[]]
+  let word: string | undefined
+  const end = () => {
+    if (word !== undefined) segments.at(-1)!.push(word)
+    word = undefined
+  }
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!
+    if (c === "\\") {
+      if (i + 1 >= command.length) return undefined
+      word = (word ?? "") + command[++i]
+    } else if (c === "'") {
+      const close = command.indexOf("'", i + 1)
+      if (close < 0) return undefined
+      word = (word ?? "") + command.slice(i + 1, close)
+      i = close
+    } else if (c === '"') {
+      let j = i + 1
+      let value = ""
+      for (; j < command.length && command[j] !== '"'; j++) value += command[j] === "\\" && j + 1 < command.length ? command[++j] : command[j]
+      if (j >= command.length) return undefined
+      word = (word ?? "") + value
+      i = j
+    } else if (c === "#" && word === undefined) return undefined
+    else if (/\s/.test(c) && c !== "\n") end()
+    else if (c === ";" || c === "|" || c === "\n" || (c === "&" && !/[<>]$/.test(command.slice(0, i)))) {
+      end()
+      if (segments.at(-1)!.length) segments.push([])
+    } else word = (word ?? "") + c
+  }
+  end()
+  return segments.filter((words) => words.length)
+}
+
+/** Options of `git` that run a program or a pager, before or after its subcommand. */
+const GIT_RUNS = new Set(["-c", "-p", "--paginate", "--exec-path", "--config-env", "--ext-diff", "--textconv", "--output"])
+
+/** One simple command that only reads files: a reader of a closed list, without an option that runs something. */
+function readsOnly(words: readonly string[]): boolean {
+  const [name, ...args] = words
+  switch (name) {
+    case "cat":
+    case "head":
+    case "tail":
+    case "wc":
+    case "ls":
+    case "stat":
+    case "nl":
+    case "diff":
+    case "grep":
+    case "egrep":
+    case "fgrep":
+      return true
+    case "rg":
+      return !args.some((arg) => arg.startsWith("--pre"))
+    case "git": {
+      if (args.some((arg) => GIT_RUNS.has(arg.split("=")[0]!))) return false
+      let i = 0
+      while (i < args.length && args[i]!.startsWith("-")) i += args[i] === "-C" || args[i] === "--git-dir" || args[i] === "--work-tree" ? 2 : 1
+      return ["show", "log", "diff", "blame", "status"].includes(args[i] ?? "")
+    }
+    case "sed": {
+      // `sed -n '1,80p' file`: addresses and `p` only (GNU sed's `e` and `w` run or write).
+      let script = false
+      for (let i = 0; i < args.length; i++) {
+        const arg = args[i]!
+        if (arg === "-n" || arg === "--quiet" || arg === "--silent" || arg === "-E" || arg === "-r") continue
+        if (arg === "-e") {
+          if (!/^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(args[++i] ?? "")) return false
+          script = true
+        } else if (arg.startsWith("-")) return false
+        else if (!script) {
+          if (!/^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(arg)) return false
+          script = true
+        }
+      }
+      return script && args.includes("-n")
+    }
+    default:
+      return false
+  }
+}
+
+/**
+ * A command that only reads files: plain words (no substitution, expansion, heredoc or group), no program that runs code
+ * named anywhere, and each simple command a reader of a closed list (`readsOnly`). Then the word `guard` in a quoted
+ * string (`grep 'a\|guard off'`) or a path of the command line only named (`git show HEAD -- src/cli/main.ts`) is not a
+ * launch of it. Anything else keeps the lexical reading below. A reader made to run a program by configuration planted
+ * beforehand (a repository's git config or attributes, `RIPGREP_CONFIG_PATH`, an alias of a startup file) does so
+ * whether or not the command names the command line: that never depended on this rule.
+ */
+export function onlyReads(command: string): boolean {
+  if (RUNS_SOMETHING.test(command)) return false
+  const segments = readOnlyWords(command)
+  return segments !== undefined && segments.length > 0 && segments.every(readsOnly)
+}
+
 function namesGuardCli(command: string, ctx: ShellRuleContext): boolean {
+  if (onlyReads(command)) return false
   if (GUARD_COMMAND.test(command)) return true
   const plugins = ctx.pluginDirs ?? ctx.protectedDirs ?? []
   const bases = ctx.cwds?.length ? ctx.cwds : ctx.cwd ? [ctx.cwd] : []
