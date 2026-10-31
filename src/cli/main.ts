@@ -11,6 +11,7 @@ import { prettyHelp, USAGE } from "./help.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
+import { completionScript, SHELLS } from "./completion.ts"
 import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
@@ -178,6 +179,13 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
         ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, command === "unset") }),
       }
       return command === "set" ? setSwitch(io, key, parsed.positionals[1]!, target) : unsetSwitch(io, key, target)
+    }
+    case "completion": {
+      const [shell, extra] = args
+      if (!shell || !(SHELLS as readonly string[]).includes(shell)) throw new UsageError(`completion needs a shell: ${SHELLS.join(" or ")}`)
+      if (extra !== undefined) throw new UsageError(`unexpected argument ${extra}`)
+      for (const line of completionScript(shell as (typeof SHELLS)[number]).trimEnd().split("\n")) io.out(line)
+      return
     }
     case "status": {
       if (args.some((arg) => arg !== "--offline")) throw new UsageError(`unexpected argument ${args.find((arg) => arg !== "--offline")}`)

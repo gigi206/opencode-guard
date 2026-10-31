@@ -52,11 +52,14 @@ const NOTES = [
   "The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.",
 ]
 
+const COMPLETION = 'completion script for the shell: eval "$(guard completion zsh)" in its startup file'
+
 const COLUMN = Math.max(...GROUPS.flatMap((group) => group.entries.map((entry) => entry.usage.length))) + 4
 
 export const USAGE = [
   "Usage: guard <command> [arguments]",
   ...GROUPS.flatMap((group) => ["", `${group.name} (${group.detail}):`, ...group.entries.map((entry) => `  ${entry.usage.padEnd(COLUMN - 2)}${entry.text}`)]),
+  "  completion bash|zsh".padEnd(COLUMN) + COMPLETION,
   "  help".padEnd(COLUMN) + "this help",
   "",
   ...NOTES,
@@ -91,6 +94,7 @@ export function prettyHelp(pretty: Pretty): void {
     for (const entry of group.entries) row(pretty, entry.usage, entry.text)
   }
   pretty.line([])
+  row(pretty, "completion bash|zsh", COMPLETION)
   row(pretty, "help", "this help")
   pretty.line([])
   for (const note of NOTES) for (const line of rowLines(pretty, [["  "]], 2, note, "dim")) pretty.line(line)
