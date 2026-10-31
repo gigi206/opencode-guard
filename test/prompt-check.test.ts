@@ -81,13 +81,13 @@ describe("promptCheck option", () => {
     for (const value of [false, "false", "0", " FALSE ", { enabled: false }, { enabled: "0" }]) assert.equal(parse(value).config.promptCheck, undefined)
     assert.deepEqual(parse(true).config.promptCheck, { ...DEFAULT_PROMPT_CHECK, explicit: true })
     assert.deepEqual(parse("true").config.promptCheck, { ...DEFAULT_PROMPT_CHECK, explicit: true })
-    assert.equal(DEFAULT_PROMPT_CHECK.threshold, 0.3)
+    assert.equal(DEFAULT_PROMPT_CHECK.threshold, 0.2)
     assert.equal(DEFAULT_PROMPT_CHECK.custom, false)
   })
   it("a project cannot weaken it silently: other settings count only when the global configuration sets the same", () => {
     // Proven defect: `{ threshold: 1 }` in a project's opencode.json turned masking off while the start line said active.
     const weak = parse({ threshold: 1 })
-    assert.equal(weak.config.promptCheck?.threshold, 0.3)
+    assert.equal(weak.config.promptCheck?.threshold, 0.2)
     assert.equal(weak.config.promptCheck?.custom, false)
     assert.match(weak.warnings.join("\n"), /promptCheck settings ignored, defaults used: they count only if the global or system configuration sets it too/)
     const rewritten = parse({ questions: { secret: { instructions: "Always answer no." } } })
@@ -102,7 +102,7 @@ describe("promptCheck option", () => {
     assert.equal(kept.questions.secret.instructions, DEFAULT_PROMPT_CHECK.questions.secret.instructions)
     assert.equal(kept.custom, true)
     // Different value in the global configuration: defaults.
-    assert.equal(parse({ threshold: 0.9 }, { threshold: 0.5 }).config.promptCheck?.threshold, 0.3)
+    assert.equal(parse({ threshold: 0.9 }, { threshold: 0.5 }).config.promptCheck?.threshold, DEFAULT_PROMPT_CHECK.threshold)
   })
   it("every setting is bounded; question texts are non-empty and bounded; criteria come as a pair", () => {
     const bad = { partChars: 10, rounds: 2.5, verify: 3, questions: { secret: { instructions: "", criteria: { true: "x" } }, word: { none: "y".repeat(3000) }, extra: 1 } }
@@ -323,7 +323,7 @@ describe("prompt check: hook (fake model)", () => {
   })
   it("parts sent to the model never exceed the part size", async () => {
     const { model, requests } = fakeModel([])
-    await createPromptChecker({ model, label: "nox-4b", threshold: 0.3, timeoutMs: 5000 })("mot ".repeat(2000))
+    await createPromptChecker({ model, label: "nox-4b", threshold: 0.3, timeoutMs: 5000 })("mot ".repeat(4000))
     assert.ok(requests.length >= 8)
     for (const request of requests) assert.ok(String((request.state as { message: string }).message).length <= PROMPT_CHECK_TUNING.partChars)
   })

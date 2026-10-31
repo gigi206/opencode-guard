@@ -151,12 +151,12 @@ export interface PromptCheckTuning {
 }
 
 export const DEFAULT_PROMPT_TUNING: PromptCheckTuning = {
-  partChars: 1000,
+  partChars: 2000,
   maxChars: 32_000,
-  candidates: 3,
+  candidates: 1,
   minCandidate: 0.1,
-  verify: 0.7,
-  askScore: 0.7,
+  verify: 0.6,
+  askScore: 0.6,
   rounds: 3,
   wordsPerQuestion: 16,
   minWord: 4,
@@ -183,7 +183,7 @@ const PROMPT_TUNING_BOUNDS: Record<keyof PromptCheckTuning, readonly [number, nu
  * Calibrated on 2026-10-31 for nox-4b (dev/plans/prompt-secrets/plan.md): on 1,591 real prompts, 18 at 0.3 or above;
  * ordinary test prompts at 0.14 at most, typed passwords at 0.69 and above but for an ambiguous one (0.18).
  */
-export const DEFAULT_PROMPT_CHECK: PromptCheckConfig = { threshold: 0.3, explicit: false, tuning: DEFAULT_PROMPT_TUNING, questions: DEFAULT_PROMPT_QUESTIONS, custom: false }
+export const DEFAULT_PROMPT_CHECK: PromptCheckConfig = { threshold: 0.2, explicit: false, tuning: DEFAULT_PROMPT_TUNING, questions: DEFAULT_PROMPT_QUESTIONS, custom: false }
 
 type Options = Readonly<Record<string, unknown>>
 
