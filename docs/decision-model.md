@@ -61,6 +61,47 @@ On by default when the decision model is configured: what you type is sent to it
 - **Log.** The number of words masked, the model's score, the number of calls and the duration; never a word of the prompt, nor the message of a model error (a gateway may copy the request into it).
 - **Calibration.** The default threshold (0.3) is set for `nox-4b`. A value that reads as an ordinary word with nothing around it (`connecte-toi avec admin et soleil`) may pass. Nothing is checked for the [unprotected agent](rules.md#unprotected-agent-unprotectedagent).
 
+## Settings and questions of the checks
+
+Every setting of the two checks, and the text of each question they ask the model, can be changed under `outputCheck` and `promptCheck`, for example to use another decision model. They count only if your global configuration file or the system configuration sets **the same value** for the plugin (compared exactly): otherwise the defaults apply, the check stays on, and a warning says so. A project's `opencode.json` can thus turn a check off (`false`, shown on the start line), but cannot weaken it silently, with a threshold of 1 or a rewritten question. When settings other than the defaults are in force, the start line says `(custom settings)`. Changing a question changes the model's scores: run `dev/tools/prompt-check-calibrate.ts` (with `--questions` and, for a local model, `--local`) to find the thresholds that go with it; it prints the `promptCheck` block to paste.
+
+`promptCheck` settings (number, default, bounds):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `threshold` | 0.3 | Stage 1: probability from which a part holds a secret (0–1). |
+| `partChars` | 1000 | Characters per part sent to the model (200–20000). |
+| `maxChars` | 32000 | Longer prompts are not checked: confirmation (1000–1000000). |
+| `candidates` | 3 | Stage 2: at most this many words, each checked by stage 3 (1–10). |
+| `minCandidate` | 0.1 | Stage 2: smallest probability of a candidate (0–1). |
+| `verify` | 0.7 | Stage 3: probability from which a word is masked (0–1). |
+| `askScore` | 0.7 | Stage 1 probability from which a part with no confirmed word leads to a confirmation; below, the prompt is sent (0–2; above 1: never). |
+| `rounds` | 3 | Stage 2 and stage 1 again, to find a second secret, at most this many times (1–10). |
+| `wordsPerQuestion` | 16 | Words offered in one stage-2 question (2–50). |
+| `minWord` | 4 | Shortest word offered (1–20). |
+| `parallel` | 4 | Simultaneous calls of the checks (1–16). |
+| `deadlineCalls` | 3 | The whole check takes at most this many times `decision.timeoutMs` (1–20). |
+
+Questions: texts of 1 to 2,000 characters; a text left out keeps its default, and an invalid one too, with a warning. Only the texts change: the kind of each question and the names the code reads stay. In a question, `` `message` `` is the part of the prompt (or the output), `` `value` `` the word checked.
+
+```jsonc
+"promptCheck": {
+  "questions": {
+    "secret": { "instructions": "…", "criteria": { "true": "…", "false": "…" } }, // stage 1, yes/no
+    "word": { "instructions": "…", "none": "…" },                              // stage 2, a choice among the words; `none`: the last option
+    "value": { "instructions": "…", "criteria": { "true": "…", "false": "…" } }   // stage 3, yes/no
+  }
+},
+"outputCheck": {
+  "questions": {
+    "note": "…",                                                                  // sent with the output: untrusted data
+    "secret": { "instructions": "…", "criteria": { "true": "…", "false": "…" } }  // yes/no
+  }
+}
+```
+
+The questions that decide actions (risk, destruction, exfiltration…) are not settings: they may allow an action.
+
 ## Thresholds
 
 | Threshold | Default | `thresholds` option |

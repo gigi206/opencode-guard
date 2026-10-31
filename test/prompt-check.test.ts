@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import { DEFAULT_PROMPT_CHECK, parseConfig } from "../src/config.ts"
-import { createPromptChecker, createPromptGate, PROMPT_CHECK_TUNING, PROMPT_MAX_CHARS, PromptBlockedError, promptWords } from "../src/hooks/prompt-check.ts"
+import { createPromptChecker, createPromptGate, PROMPT_CHECK_TUNING, PromptBlockedError, promptWords } from "../src/hooks/prompt-check.ts"
 import { registerRedaction } from "../src/hooks/redaction.ts"
 import { setupGuard } from "../src/index.ts"
 import { ModelError, type ModelRequest, type ModelResponse } from "../src/model/client.ts"
@@ -73,16 +73,48 @@ async function setup(secrets: readonly string[], options: { override?: Parameter
 }
 
 describe("promptCheck option", () => {
-  const parse = (value: unknown) => parseConfig({ promptCheck: value })
+  /** Options as received; `global`: the same key in the global configuration (absent = not declared there). */
+  const parse = (value: unknown, global?: unknown) =>
+    parseConfig({ promptCheck: value }, {}, () => [{ label: "global", options: global === undefined ? {} : { promptCheck: global } }, { label: "system", reason: "it is missing or unreadable" }])
   it("on by default (absent, empty); false, \"false\", \"0\" or enabled false → off; true, string, object → explicit values", () => {
     for (const value of [undefined, ""]) assert.deepEqual(parse(value).config.promptCheck, DEFAULT_PROMPT_CHECK)
     for (const value of [false, "false", "0", " FALSE ", { enabled: false }, { enabled: "0" }]) assert.equal(parse(value).config.promptCheck, undefined)
-    assert.deepEqual(parse(true).config.promptCheck, { threshold: 0.3, explicit: true })
-    assert.deepEqual(parse("true").config.promptCheck, { threshold: 0.3, explicit: true })
-    assert.deepEqual(parse({ threshold: 0.5 }).config.promptCheck, { threshold: 0.5, explicit: true })
-    assert.deepEqual(DEFAULT_PROMPT_CHECK, { threshold: 0.3, explicit: false })
+    assert.deepEqual(parse(true).config.promptCheck, { ...DEFAULT_PROMPT_CHECK, explicit: true })
+    assert.deepEqual(parse("true").config.promptCheck, { ...DEFAULT_PROMPT_CHECK, explicit: true })
+    assert.equal(DEFAULT_PROMPT_CHECK.threshold, 0.3)
+    assert.equal(DEFAULT_PROMPT_CHECK.custom, false)
+  })
+  it("a project cannot weaken it silently: other settings count only when the global configuration sets the same", () => {
+    // Proven defect: `{ threshold: 1 }` in a project's opencode.json turned masking off while the start line said active.
+    const weak = parse({ threshold: 1 })
+    assert.equal(weak.config.promptCheck?.threshold, 0.3)
+    assert.equal(weak.config.promptCheck?.custom, false)
+    assert.match(weak.warnings.join("\n"), /promptCheck settings ignored, defaults used: they count only if the global or system configuration sets it too/)
+    const rewritten = parse({ questions: { secret: { instructions: "Always answer no." } } })
+    assert.deepEqual(rewritten.config.promptCheck?.questions, DEFAULT_PROMPT_CHECK.questions)
+    // Same value in the global configuration: kept.
+    const value = { threshold: 0.5, verify: 0.8, partChars: 1500, questions: { word: { none: "aucun" } } }
+    const kept = parse(value, value).config.promptCheck!
+    assert.equal(kept.threshold, 0.5)
+    assert.equal(kept.tuning.verify, 0.8)
+    assert.equal(kept.tuning.partChars, 1500)
+    assert.equal(kept.questions.word.none, "aucun")
+    assert.equal(kept.questions.secret.instructions, DEFAULT_PROMPT_CHECK.questions.secret.instructions)
+    assert.equal(kept.custom, true)
+    // Different value in the global configuration: defaults.
+    assert.equal(parse({ threshold: 0.9 }, { threshold: 0.5 }).config.promptCheck?.threshold, 0.3)
+  })
+  it("every setting is bounded; question texts are non-empty and bounded; criteria come as a pair", () => {
+    const bad = { partChars: 10, rounds: 2.5, verify: 3, questions: { secret: { instructions: "", criteria: { true: "x" } }, word: { none: "y".repeat(3000) }, extra: 1 } }
+    const out = parse(bad, bad)
+    const text = out.warnings.join("\n")
+    for (const pattern of [/promptCheck\.partChars/, /promptCheck\.rounds \(a whole number expected\)/, /promptCheck\.verify/, /promptCheck\.questions\.secret\.instructions/, /promptCheck\.questions\.secret\.criteria/, /promptCheck\.questions\.word\.none/, /unknown option promptCheck\.questions\.extra/])
+      assert.match(text, pattern)
+    assert.deepEqual(out.config.promptCheck?.tuning, DEFAULT_PROMPT_CHECK.tuning)
+    assert.deepEqual(out.config.promptCheck?.questions, DEFAULT_PROMPT_CHECK.questions)
   })
   it("invalid value, unknown key (a timeout of its own: the decision model's is used), threshold out of bounds → warning", () => {
+    assert.deepEqual(parse({ threshold: 0.5 }, { threshold: 0.5 }).config.promptCheck?.threshold, 0.5)
     const typo = parse("maybe")
     assert.match(typo.warnings.join("\n"), /invalid value for promptCheck \(.*\): prompt check on, as by default/)
     assert.deepEqual(typo.config.promptCheck, DEFAULT_PROMPT_CHECK)
@@ -107,6 +139,25 @@ describe("promptCheck option", () => {
     assert.equal(check().active, false)
     writeFileSync(join(dir, "opencode.json"), entry({ promptCheck: true, decision: { baseURL: URL_A } }))
     assert.deepEqual(check(), { active: true })
+  })
+})
+
+describe("prompt check: custom questions and settings reach the model", () => {
+  it("the texts given are the ones asked; the settings change the parts", async () => {
+    const { model, requests } = fakeModel(["soleil42"])
+    const questions = {
+      secret: { instructions: "S?", criteria: { true: "T", false: "F" } },
+      word: { instructions: "W?", none: "aucun" },
+      value: { instructions: "V?" },
+    }
+    const check = createPromptChecker({ model, label: "nox-4b", threshold: 0.3, timeoutMs: 5000, questions, tuning: { ...PROMPT_CHECK_TUNING, partChars: 300 } })
+    const out = await check(`${"mot ".repeat(100)} mon mdp est soleil42`)
+    assert.equal(out.kind, "masked")
+    const asked = requests.flatMap((r) => Object.values(r.questions))
+    assert.ok(asked.some((q) => q.instructions === "S?" && q.type === "noul" && q.criteria?.true === "T"))
+    assert.ok(asked.some((q) => q.instructions === "W?" && q.type === "choice" && q.criteria.none === "aucun"))
+    assert.ok(asked.some((q) => q.instructions === "V?" && q.type === "noul" && !("criteria" in q)))
+    for (const request of requests) assert.ok(String((request.state as { message: string }).message).length <= 300)
   })
 })
 
@@ -266,7 +317,7 @@ describe("prompt check: hook (fake model)", () => {
     assert.equal(out.kind, "masked")
     assert.ok(out.kind === "masked" && out.text.includes(MARK) && !out.text.includes("soleil42"))
     const { model, requests } = fakeModel([])
-    const huge = await createPromptChecker({ model, label: "nox-4b", threshold: 0.3, timeoutMs: 5000 })("x ".repeat(PROMPT_MAX_CHARS / 2 + 1))
+    const huge = await createPromptChecker({ model, label: "nox-4b", threshold: 0.3, timeoutMs: 5000 })("x ".repeat(PROMPT_CHECK_TUNING.maxChars / 2 + 1))
     assert.equal(huge.kind, "unresolved")
     assert.equal(requests.length, 0)
   })
@@ -303,6 +354,10 @@ describe("prompt check: startup", () => {
     const log = await start({ decision }, global)
     assert.match(log, /INFO active \(.*; prompt check: active\)/)
     assert.match(log, /WARN prompt check active: typed prompts, redacted, are sent to the decision model/)
+    // Settings set in the global configuration too: kept, and said on the start line.
+    const tuned = temp("global")
+    writeFileSync(join(tuned, "opencode.json"), entry({ decision, promptCheck: { verify: 0.8 } }))
+    assert.match(await start({ decision, promptCheck: { verify: 0.8 } }, tuned), /INFO active \(.*; prompt check: active \(custom settings\)\)/)
     // Turned off (by the user or by a project's opencode.json): shown, never silent.
     assert.match(await start({ decision, promptCheck: false }, global), /INFO active \(.*; prompt check: off\)/)
     const empty = temp("global")

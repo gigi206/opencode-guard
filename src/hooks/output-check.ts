@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto"
 import { truncateInput } from "../decide.ts"
 import { ModelError, type ModelClient } from "../model/client.ts"
-import { OUTPUT_NOTE, OUTPUT_QUESTION_ID, OUTPUT_QUESTIONS } from "../model/questions.ts"
+import { DEFAULT_OUTPUT_QUESTIONS, OUTPUT_QUESTION_ID, outputQuestions, type OutputQuestionTexts } from "../model/questions.ts"
 import { redactToolError } from "../secrets/errors.ts"
 import { PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
@@ -27,6 +27,8 @@ export interface OutputCheckDeps {
   readonly log: Logger
   readonly unprotected?: UnprotectedGate
   readonly now?: () => number
+  /** Note and question texts (`outputCheck.questions`); absent = the defaults. */
+  readonly questions?: OutputQuestionTexts
 }
 
 /**
@@ -151,6 +153,8 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
   const { log } = deps
   const now = deps.now ?? Date.now
   const cache = new Map<string, { p: number; expires: number }>()
+  const texts = deps.questions ?? DEFAULT_OUTPUT_QUESTIONS
+  const questions = outputQuestions(texts)
   /** `execute` (CodeMode) calls in progress: their internal calls carry the same identifier and are not checked. */
   const codeMode = timedMap<true>(now)
   /** A single WARN line per series of failures (gateway down: not one line per output). */
@@ -167,11 +171,11 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
 
   /** Probability that an output contains a secret in clear; throws a `ModelError` on failure. */
   async function judge(tool: string, redacted: unknown): Promise<number> {
-    const state = { note: OUTPUT_NOTE, tool, output: truncateInput(redacted, deps.maxStateChars) }
+    const state = { note: texts.note, tool, output: truncateInput(redacted, deps.maxStateChars) }
     const id = createHash("sha256").update(JSON.stringify(state)).digest("hex")
     const cached = cache.get(id)
     if (cached && cached.expires > now()) return cached.p
-    const response = await deps.model({ state, questions: OUTPUT_QUESTIONS })
+    const response = await deps.model({ state, questions })
     const answer = response.answers[OUTPUT_QUESTION_ID]
     if (answer?.error) throw new ModelError(`question \`${OUTPUT_QUESTION_ID}\` refused`)
     if (!isNumber(answer?.noul)) throw new ModelError(`invalid answer: \`${OUTPUT_QUESTION_ID}.noul\` missing`)

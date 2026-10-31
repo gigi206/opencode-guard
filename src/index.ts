@@ -273,6 +273,8 @@ export async function setupGuard(
           model: createModelClient(config.decision),
           label: config.decision.model,
           threshold: config.promptCheck.threshold,
+          tuning: config.promptCheck.tuning,
+          questions: config.promptCheck.questions,
           timeoutMs: config.decision.timeoutMs,
           askAs: config.askAs,
           log,
@@ -314,6 +316,7 @@ export async function setupGuard(
           model: createModelClient({ ...config.decision, timeoutMs: config.outputCheck.timeoutMs }),
           label: config.decision.model,
           threshold: config.outputCheck.threshold,
+          questions: config.outputCheck.questions,
           maxStateChars: config.maxStateChars,
           askAs: config.askAs,
           cacheTtlMs: config.cacheTtlMs,
@@ -340,8 +343,9 @@ export async function setupGuard(
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)
   const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}`
   // Prompt check: its state whenever the decision model is on (`off` when turned off, so that a project doing it shows).
-  const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}` : model && !config.promptCheck ? "; prompt check: off" : ""
-  const outputs = outputCheck !== undefined ? `; output check: ${outputCheck.active ? "active" : "inactive"}` : model && !config.outputCheck ? "; output check: off" : ""
+  const custom = (settings: { custom: boolean } | undefined) => (settings?.custom ? " (custom settings)" : "")
+  const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}${custom(config.promptCheck)}` : model && !config.promptCheck ? "; prompt check: off" : ""
+  const outputs = outputCheck !== undefined ? `; output check: ${outputCheck.active ? "active" : "inactive"}${custom(config.outputCheck)}` : model && !config.outputCheck ? "; output check: off" : ""
   const checked = `${outputs}${prompted}`
   log.info(`active (decision model: ${modelText}; confirmations: ${confirmations}; system config: ${enforced}${profile}${overrides}${off}${checked}${degraded.map((item) => `; ${item}`).join("")})`)
   if (config.version) log.info(`settings by agent and by project (${config.version.summary})`)

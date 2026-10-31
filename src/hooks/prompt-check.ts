@@ -1,4 +1,4 @@
-// Checking of the typed prompt by the decision model (`promptCheck` option, disabled by default). Complement to
+// Checking of the typed prompt by the decision model (`promptCheck` option, on by default with the decision model). Complement to
 // technical redaction, for a secret written in plain words in any language (`mon mot de passe est soleil42`): no
 // keyword in the code, the model reads every language. Stage 1 asks whether a part of the prompt gives a credential's
 // value; stage 2, only for a part that does, which of its words is the value; the words found are masked. A secret
@@ -6,43 +6,15 @@
 // prompt is sent with what was masked; otherwise it is blocked (never sent). The decision model is the trusted zone (it
 // may see a value in clear); the conversation model never does. Calibration: dev/plans/prompt-secrets/plan.md.
 import { ModelError, type ModelClient } from "../model/client.ts"
-import { PROMPT_QUESTION_ID, PROMPT_QUESTIONS, PROMPT_VERIFY_QUESTION_ID, PROMPT_VERIFY_QUESTIONS, PROMPT_WORD_QUESTION_ID, promptWordQuestion } from "../model/questions.ts"
+import { DEFAULT_PROMPT_TUNING, type PromptCheckTuning } from "../config.ts"
+import { DEFAULT_PROMPT_QUESTIONS, PROMPT_QUESTION_ID, PROMPT_VERIFY_QUESTION_ID, PROMPT_WORD_QUESTION_ID, promptQuestions, type PromptQuestionTexts } from "../model/questions.ts"
 import { placeholder, PLACEHOLDER_RE, type Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PromptEvent } from "../types.ts"
 import { guardAction } from "./gate.ts"
 
-/** Longer prompts (in parts of 1,000 characters) are not checked: confirmation. */
-export const PROMPT_MAX_CHARS = 32_000
-/** Simultaneous model calls of one check (the gateway answers them one by one: more only adds queued timeouts). */
-const PARALLEL = 4
-/** Options of one stage-2 question (the words, then `none`). */
-const WORDS_PER_QUESTION = 16
-/** Stage 2 then stage 1 again on the part without the words found, at most this many times. */
-const ROUNDS = 3
-/** Whole check: this many times the timeout of one call. */
-const DEADLINE_CALLS = 3
-/** Shortest word proposed in stage 2. */
-const MIN_WORD = 4
-/**
- * Settings of the check, calibrated on 2026-10-31 for nox-4b (dev/tools/prompt-check-calibrate.ts): replaced only by the
- * calibration tool, never by an option.
- */
-export interface PromptCheckTuning {
-  /** Characters per part sent to the model: a secret buried in a longer part (a pasted log) goes unseen (measured). */
-  readonly partChars: number
-  /** Stage 2 names at most this many candidates (probability at least `minCandidate`), each checked by stage 3. */
-  readonly candidates: number
-  readonly minCandidate: number
-  /** Stage 3: a candidate is masked from this probability. */
-  readonly verify: number
-  /**
-   * A part seen as holding a secret where no candidate passes stage 3: confirmation from this stage-1 probability, below
-   * it the prompt is sent (a weak stage 1 with no word confirmed is mostly a false alarm: measured on real prompts).
-   */
-  readonly askScore: number
-}
-
-export const PROMPT_CHECK_TUNING: PromptCheckTuning = { partChars: 1000, candidates: 3, minCandidate: 0.1, verify: 0.7, askScore: 0.7 }
+/** Settings of the check (`promptCheck.<name>`, `config.ts`); the defaults are calibrated for nox-4b. */
+export type { PromptCheckTuning }
+export const PROMPT_CHECK_TUNING = DEFAULT_PROMPT_TUNING
 
 /**
  * What the model sees in place of a masked secret: a `[[GUARD_REDACTED:…]]` placeholder or a removed word reads as a
@@ -57,10 +29,13 @@ export interface PromptCheckDeps {
   /** Model name, in reasons. */
   readonly label: string
   readonly threshold: number
-  /** Timeout of one call (the whole check: `DEADLINE_CALLS` times it). */
+  /** Timeout of one call (the whole check: `tuning.deadlineCalls` times it). */
   readonly timeoutMs: number
   readonly askAs: "ask" | "deny"
   readonly log: Logger
+  /** Settings and question texts (`promptCheck`); absent = the defaults. */
+  readonly tuning?: PromptCheckTuning
+  readonly questions?: PromptQuestionTexts
 }
 
 /** Outcome of the model's check of a (technically redacted) text; never a word in `cause`. */
@@ -118,13 +93,14 @@ function parts(text: string, size: number): Array<[number, number]> {
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
 
-export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label" | "threshold" | "timeoutMs"> & { readonly tuning?: PromptCheckTuning }) {
-  const tuning = deps.tuning ?? PROMPT_CHECK_TUNING
+export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label" | "threshold" | "timeoutMs" | "tuning" | "questions">) {
+  const tuning = deps.tuning ?? DEFAULT_PROMPT_TUNING
+  const questions = promptQuestions(deps.questions ?? DEFAULT_PROMPT_QUESTIONS)
   let running = 0
   const waiting: Array<() => void> = []
-  /** At most `PARALLEL` calls at once (shared by the checks of every session). */
+  /** At most `tuning.parallel` calls at once (shared by the checks of every session). */
   async function call(request: Parameters<ModelClient>[0]) {
-    if (running >= PARALLEL) await new Promise<void>((resolve) => waiting.push(resolve))
+    if (running >= tuning.parallel) await new Promise<void>((resolve) => waiting.push(resolve))
     running++
     try {
       return await deps.model(request)
@@ -148,7 +124,7 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
 
   /** Stage 1: probability that the part gives a credential's value; throws a `ModelError` on failure. */
   async function stage1(message: string): Promise<number> {
-    const answer = (await call({ state: { message }, questions: PROMPT_QUESTIONS })).answers[PROMPT_QUESTION_ID]
+    const answer = (await call({ state: { message }, questions: questions.secret })).answers[PROMPT_QUESTION_ID]
     if (answer?.error) throw new ModelError(`question \`${PROMPT_QUESTION_ID}\` refused`)
     if (!isNumber(answer?.noul)) throw new ModelError(`invalid answer: \`${PROMPT_QUESTION_ID}.noul\` missing`)
     return Math.min(Math.max(answer.noul, 0), 1)
@@ -157,10 +133,10 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
   /** Stage 2: the words of the part most likely to be the value, best first (at most `tuning.candidates`). */
   async function stage2(message: string, words: readonly string[]): Promise<{ candidates: string[]; calls: number }> {
     const batches: string[][] = []
-    for (let at = 0; at < words.length; at += WORDS_PER_QUESTION) batches.push(words.slice(at, at + WORDS_PER_QUESTION))
+    for (let at = 0; at < words.length; at += tuning.wordsPerQuestion) batches.push(words.slice(at, at + tuning.wordsPerQuestion))
     const answers = await Promise.all(
       batches.map(async (batch) => {
-        const answer = (await call({ state: { message }, questions: promptWordQuestion(batch) })).answers[PROMPT_WORD_QUESTION_ID]
+        const answer = (await call({ state: { message }, questions: questions.word(batch) })).answers[PROMPT_WORD_QUESTION_ID]
         if (answer?.error) throw new ModelError(`question \`${PROMPT_WORD_QUESTION_ID}\` refused`)
         const probabilities = answer?.probabilities
         if (!probabilities || typeof probabilities !== "object") throw new ModelError(`invalid answer: \`${PROMPT_WORD_QUESTION_ID}.probabilities\` missing`)
@@ -178,7 +154,7 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
   async function stage3(message: string, candidates: readonly string[]): Promise<string[]> {
     const verdicts = await Promise.all(
       candidates.map(async (value) => {
-        const answer = (await call({ state: { message, value }, questions: PROMPT_VERIFY_QUESTIONS })).answers[PROMPT_VERIFY_QUESTION_ID]
+        const answer = (await call({ state: { message, value }, questions: questions.value })).answers[PROMPT_VERIFY_QUESTION_ID]
         if (answer?.error) throw new ModelError(`question \`${PROMPT_VERIFY_QUESTION_ID}\` refused`)
         if (!isNumber(answer?.noul)) throw new ModelError(`invalid answer: \`${PROMPT_VERIFY_QUESTION_ID}.noul\` missing`)
         return answer.noul >= tuning.verify
@@ -204,7 +180,7 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
 
   /** Check of a technically redacted text. Throws only a `ModelError` (failure, refusal, invalid answer). */
   async function run(text: string, state: { calls: number; found: Set<string> }): Promise<CheckOutcome> {
-    if (text.length > PROMPT_MAX_CHARS) return { kind: "unresolved", text, count: 0, cause: "too long to check", calls: 0 }
+    if (text.length > tuning.maxChars) return { kind: "unresolved", text, count: 0, cause: "too long to check", calls: 0 }
     const ranges = parts(text, tuning.partChars)
     state.calls += ranges.length
     const scores = await Promise.all(ranges.map((range) => stage1(shown(text, range, state.found))))
@@ -215,8 +191,8 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
       ranges.map(async (range, i) => {
         if (scores[i]! < deps.threshold) return
         let score = scores[i]!
-        for (let round = 0; round < ROUNDS; round++) {
-          const words = [...new Set(promptWords(text, ...range).map((token) => token.word))].filter((word) => [...word].length >= MIN_WORD && word !== SHOWN_MASK && !state.found.has(word))
+        for (let round = 0; round < tuning.rounds; round++) {
+          const words = [...new Set(promptWords(text, ...range).map((token) => token.word))].filter((word) => [...word].length >= tuning.minWord && word !== SHOWN_MASK && !state.found.has(word))
           const message = shown(text, range, state.found)
           const { candidates, calls } = words.length ? await stage2(message, words) : { candidates: [], calls: 0 }
           state.calls += calls + candidates.length
@@ -245,7 +221,7 @@ export function createPromptChecker(deps: Pick<PromptCheckDeps, "model" | "label
     const state = { calls: 0, found: new Set<string>() }
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<"deadline">((resolve) => {
-      timer = setTimeout(() => resolve("deadline"), DEADLINE_CALLS * deps.timeoutMs)
+      timer = setTimeout(() => resolve("deadline"), tuning.deadlineCalls * deps.timeoutMs)
       timer.unref?.()
     })
     try {

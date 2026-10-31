@@ -1,5 +1,5 @@
 import type { ModelConfig } from "./model/client.ts"
-import { DEFAULT_THRESHOLDS, type Thresholds } from "./model/questions.ts"
+import { DEFAULT_OUTPUT_QUESTIONS, DEFAULT_PROMPT_QUESTIONS, DEFAULT_THRESHOLDS, type CheckQuestion, type OutputQuestionTexts, type PromptQuestionTexts, type Thresholds } from "./model/questions.ts"
 import { MIN_KNOWN_SECRET, type SecretPattern } from "./secrets/patterns.ts"
 import { DENY_ONLY_RULES, RULE_FEATURES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
 import { INTERNAL_ERROR_RULE, type CustomRule, type Finding } from "./rules/types.ts"
@@ -93,26 +93,91 @@ export interface OutputCheckConfig {
   readonly timeoutMs: number
   /** Set by the user (`true` or an object); absent = on by default, without a warning when it cannot be. */
   readonly explicit: boolean
+  readonly questions: OutputQuestionTexts
+  /** Settings or questions other than the defaults (kept only when the global or system configuration sets the same). */
+  readonly custom: boolean
 }
 
 /**
  * Calibrated on 2026-10-17 for nox-4b on 100 real shell outputs (planted fake secrets): at threshold 0.45, 2% false
  * positives (upper bound) and 90% of fake secrets detected at the start and middle; timeout ≈ 1.5 × the 99th percentile (722 ms).
  */
-export const DEFAULT_OUTPUT_CHECK: OutputCheckConfig = { threshold: 0.45, timeoutMs: 1100, explicit: false }
+export const DEFAULT_OUTPUT_CHECK: OutputCheckConfig = { threshold: 0.45, timeoutMs: 1100, explicit: false, questions: DEFAULT_OUTPUT_QUESTIONS, custom: false }
 
 export interface PromptCheckConfig {
   /** Probability from which a part of the prompt gives a secret (stage 1). */
   readonly threshold: number
   /** Set by the user (`true` or an object); absent = on by default, without a warning when it cannot be. */
   readonly explicit: boolean
+  readonly tuning: PromptCheckTuning
+  readonly questions: PromptQuestionTexts
+  /** Settings or questions other than the defaults (kept only when the global or system configuration sets the same). */
+  readonly custom: boolean
+}
+
+/** Settings of the prompt check other than its threshold (`promptCheck.<name>`), calibrated with dev/tools/prompt-check-calibrate.ts. */
+export interface PromptCheckTuning {
+  /** Characters per part sent to the model: a secret buried in a longer part (a pasted log) goes unseen (measured). */
+  readonly partChars: number
+  /** Longer prompts are not checked: confirmation. */
+  readonly maxChars: number
+  /** Stage 2 names at most this many candidates (probability at least `minCandidate`), each checked by stage 3. */
+  readonly candidates: number
+  readonly minCandidate: number
+  /** Stage 3: a candidate is masked from this probability. */
+  readonly verify: number
+  /**
+   * A part seen as holding a secret where no candidate passes stage 3: confirmation from this stage-1 probability, below
+   * it the prompt is sent (a weak stage 1 with no word confirmed is mostly a false alarm: measured on real prompts).
+   * Above 1: never.
+   */
+  readonly askScore: number
+  /** Stage 2 then stage 1 again on the part without the words found, at most this many times. */
+  readonly rounds: number
+  /** Options of one stage-2 question (the words, then `none`). */
+  readonly wordsPerQuestion: number
+  /** Shortest word proposed in stage 2. */
+  readonly minWord: number
+  /** Simultaneous model calls of the checks (the gateway answers them one by one: more only adds queued timeouts). */
+  readonly parallel: number
+  /** Whole check: this many times `decision.timeoutMs`. */
+  readonly deadlineCalls: number
+}
+
+export const DEFAULT_PROMPT_TUNING: PromptCheckTuning = {
+  partChars: 1000,
+  maxChars: 32_000,
+  candidates: 3,
+  minCandidate: 0.1,
+  verify: 0.7,
+  askScore: 0.7,
+  rounds: 3,
+  wordsPerQuestion: 16,
+  minWord: 4,
+  parallel: 4,
+  deadlineCalls: 3,
+}
+
+/** Bounds of each setting: [min, max, integer]. */
+const PROMPT_TUNING_BOUNDS: Record<keyof PromptCheckTuning, readonly [number, number, boolean]> = {
+  partChars: [200, 20_000, true],
+  maxChars: [1000, 1_000_000, true],
+  candidates: [1, 10, true],
+  minCandidate: [0, 1, false],
+  verify: [0, 1, false],
+  askScore: [0, 2, false],
+  rounds: [1, 10, true],
+  wordsPerQuestion: [2, 50, true],
+  minWord: [1, 20, true],
+  parallel: [1, 16, true],
+  deadlineCalls: [1, 20, true],
 }
 
 /**
  * Calibrated on 2026-10-31 for nox-4b (dev/plans/prompt-secrets/plan.md): on 1,591 real prompts, 18 at 0.3 or above;
  * ordinary test prompts at 0.14 at most, typed passwords at 0.69 and above but for an ambiguous one (0.18).
  */
-export const DEFAULT_PROMPT_CHECK: PromptCheckConfig = { threshold: 0.3, explicit: false }
+export const DEFAULT_PROMPT_CHECK: PromptCheckConfig = { threshold: 0.3, explicit: false, tuning: DEFAULT_PROMPT_TUNING, questions: DEFAULT_PROMPT_QUESTIONS, custom: false }
 
 type Options = Readonly<Record<string, unknown>>
 
@@ -489,7 +554,80 @@ export function checkRequested(value: unknown): boolean {
   return !(off(value) || (isRecord(value) && off(value.enabled)))
 }
 
-const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs"]
+/** Longest text of a check question (each instruction, criterion, label or note). */
+const MAX_QUESTION_TEXT = 2000
+
+/** A question text: a non-empty string of at most `MAX_QUESTION_TEXT` characters, or the default with a warning. */
+function questionText(value: unknown, fallback: string, name: string, warnings: string[]): string {
+  if (value === undefined) return fallback
+  if (typeof value === "string" && value.trim() && value.length <= MAX_QUESTION_TEXT) return value.trim()
+  warnings.push(`invalid value for ${name} (a non-empty text of at most ${MAX_QUESTION_TEXT} characters expected), using the default`)
+  return fallback
+}
+
+/** One `noul` question: `instructions`, and `criteria` `{ true, false }` (both or neither). */
+function checkQuestion(value: unknown, fallback: CheckQuestion, name: string, warnings: string[]): CheckQuestion {
+  if (value === undefined) return fallback
+  if (!isRecord(value)) {
+    warnings.push(`invalid value for ${name} (object expected), using the default`)
+    return fallback
+  }
+  warnUnknown(value, ["instructions", "criteria"], `${name}.`, warnings)
+  const instructions = questionText(value.instructions, fallback.instructions, `${name}.instructions`, warnings)
+  if (value.criteria === undefined) return { instructions, ...(fallback.criteria ? { criteria: fallback.criteria } : {}) }
+  if (!isRecord(value.criteria) || typeof value.criteria.true !== "string" || typeof value.criteria.false !== "string") {
+    warnings.push(`invalid value for ${name}.criteria (an object { "true", "false" } of texts expected), using the default`)
+    return { instructions, ...(fallback.criteria ? { criteria: fallback.criteria } : {}) }
+  }
+  warnUnknown(value.criteria, ["true", "false"], `${name}.criteria.`, warnings)
+  const criteria = { true: questionText(value.criteria.true, fallback.criteria?.true ?? "", `${name}.criteria.true`, warnings), false: questionText(value.criteria.false, fallback.criteria?.false ?? "", `${name}.criteria.false`, warnings) }
+  return { instructions, ...(criteria.true && criteria.false ? { criteria } : {}) }
+}
+
+function outputQuestionsOption(value: unknown, warnings: string[]): OutputQuestionTexts {
+  const fallback = DEFAULT_OUTPUT_QUESTIONS
+  if (value === undefined) return fallback
+  if (!isRecord(value)) {
+    warnings.push("invalid value for outputCheck.questions (object expected), using the defaults")
+    return fallback
+  }
+  warnUnknown(value, ["note", "secret"], "outputCheck.questions.", warnings)
+  return { note: questionText(value.note, fallback.note, "outputCheck.questions.note", warnings), secret: checkQuestion(value.secret, fallback.secret, "outputCheck.questions.secret", warnings) }
+}
+
+function promptQuestionsOption(value: unknown, warnings: string[]): PromptQuestionTexts {
+  const fallback = DEFAULT_PROMPT_QUESTIONS
+  if (value === undefined) return fallback
+  if (!isRecord(value)) {
+    warnings.push("invalid value for promptCheck.questions (object expected), using the defaults")
+    return fallback
+  }
+  warnUnknown(value, ["secret", "word", "value"], "promptCheck.questions.", warnings)
+  let word = fallback.word
+  if (value.word !== undefined) {
+    if (!isRecord(value.word)) warnings.push("invalid value for promptCheck.questions.word (object expected), using the default")
+    else {
+      warnUnknown(value.word, ["instructions", "none"], "promptCheck.questions.word.", warnings)
+      word = {
+        instructions: questionText(value.word.instructions, fallback.word.instructions, "promptCheck.questions.word.instructions", warnings),
+        none: questionText(value.word.none, fallback.word.none, "promptCheck.questions.word.none", warnings),
+      }
+    }
+  }
+  return {
+    secret: checkQuestion(value.secret, fallback.secret, "promptCheck.questions.secret", warnings),
+    word,
+    value: checkQuestion(value.value, fallback.value, "promptCheck.questions.value", warnings),
+  }
+}
+
+/** Settings other than the switch differ from the defaults. */
+const customized = (settings: object, defaults: object) => {
+  const strip = ({ explicit: _explicit, custom: _custom, ...rest }: Record<string, unknown>) => rest
+  return JSON.stringify(strip(settings as Record<string, unknown>)) !== JSON.stringify(strip(defaults as Record<string, unknown>))
+}
+
+const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs", "questions"]
 
 /** `outputCheck`: on by default; an invalid value keeps it on, with a warning. */
 function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfig | undefined {
@@ -497,18 +635,21 @@ function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfi
   if (value === undefined || isEmpty(value)) return DEFAULT_OUTPUT_CHECK
   if (isRecord(value)) {
     warnUnknown(value, OUTPUT_CHECK_KEYS, "outputCheck.", warnings)
-    return {
+    const settings = {
       threshold: num(value.threshold, DEFAULT_OUTPUT_CHECK.threshold, "outputCheck.threshold", warnings, 0, 1),
       timeoutMs: num(value.timeoutMs, DEFAULT_OUTPUT_CHECK.timeoutMs, "outputCheck.timeoutMs", warnings, 100, 60_000),
       explicit: true,
+      questions: outputQuestionsOption(value.questions, warnings),
+      custom: false,
     }
+    return { ...settings, custom: customized(settings, DEFAULT_OUTPUT_CHECK) }
   }
   if (explicitlyOn(value)) return { ...DEFAULT_OUTPUT_CHECK, explicit: true }
   warnings.push(`invalid value for outputCheck (${shown(value)}): output check on, as by default`)
   return DEFAULT_OUTPUT_CHECK
 }
 
-const PROMPT_CHECK_KEYS = ["enabled", "threshold"]
+const PROMPT_CHECK_KEYS = ["enabled", "threshold", "questions", ...Object.keys(DEFAULT_PROMPT_TUNING)]
 
 /** `promptCheck`: on by default; an invalid value keeps it on, with a warning. */
 function promptCheckOption(value: unknown, warnings: string[]): PromptCheckConfig | undefined {
@@ -516,7 +657,25 @@ function promptCheckOption(value: unknown, warnings: string[]): PromptCheckConfi
   if (value === undefined || isEmpty(value)) return DEFAULT_PROMPT_CHECK
   if (isRecord(value)) {
     warnUnknown(value, PROMPT_CHECK_KEYS, "promptCheck.", warnings)
-    return { threshold: num(value.threshold, DEFAULT_PROMPT_CHECK.threshold, "promptCheck.threshold", warnings, 0, 1), explicit: true }
+    const tuning = Object.fromEntries(
+      (Object.keys(DEFAULT_PROMPT_TUNING) as Array<keyof PromptCheckTuning>).map((key) => {
+        const [min, max, integer] = PROMPT_TUNING_BOUNDS[key]
+        const n = num(value[key], DEFAULT_PROMPT_TUNING[key], `promptCheck.${key}`, warnings, min, max)
+        if (integer && !Number.isInteger(n)) {
+          warnings.push(`invalid value for promptCheck.${key} (a whole number expected), using the default`)
+          return [key, DEFAULT_PROMPT_TUNING[key]]
+        }
+        return [key, n]
+      }),
+    ) as unknown as PromptCheckTuning
+    const settings = {
+      threshold: num(value.threshold, DEFAULT_PROMPT_CHECK.threshold, "promptCheck.threshold", warnings, 0, 1),
+      explicit: true,
+      tuning,
+      questions: promptQuestionsOption(value.questions, warnings),
+      custom: false,
+    }
+    return { ...settings, custom: customized(settings, DEFAULT_PROMPT_CHECK) }
   }
   if (explicitlyOn(value)) return { ...DEFAULT_PROMPT_CHECK, explicit: true }
   warnings.push(`invalid value for promptCheck (${shown(value)}): prompt check on, as by default`)
@@ -710,6 +869,16 @@ export function parseConfig(
     const found = declarations.map((entry) => `${entry.label} configuration: ${entry.options ? "it does not set this value" : entry.reason}`)
     return `a relaxation counts only if the global or system configuration sets it too (${found.join("; ")})`
   }
+  // Settings and questions of the output and prompt checks: a project's opencode.json could weaken a check without it
+  // showing (a threshold of 1, a question rewritten): kept only when the global or system configuration sets the same
+  // value; otherwise the defaults, with the check still on. Turning a check off (`false`) is shown on the start line.
+  const guardedCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", parsed: T | undefined, defaults: T): T | undefined => {
+    if (!parsed?.custom) return parsed
+    const why = refusal((declared) => JSON.stringify(declared[name]) === JSON.stringify(options[name]))
+    if (why === undefined) return parsed
+    warnings.push(`${name} settings ignored, defaults used: ${why.replace("a relaxation counts", "they count")}`)
+    return { ...defaults, explicit: parsed.explicit }
+  }
   // Settings by agent and by project: inputs read once (global and system files read now); when a guard.json file,
   // `agents`, `projects` or `trustedProjects` exists, the layered resolution replaces the checks below, whose warnings
   // are then dropped.
@@ -797,8 +966,8 @@ export function parseConfig(
       allowlist: allowlistOption(options.allowlist, warnings),
       rules,
       unprotectedAgent: unprotectedAgentOption(options.unprotectedAgent, warnings),
-      outputCheck: outputCheckOption(options.outputCheck, warnings),
-      promptCheck: promptCheckOption(options.promptCheck, warnings),
+      outputCheck: guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK),
+      promptCheck: guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), DEFAULT_PROMPT_CHECK),
       ...(layers ? { layers } : {}),
       ...(version ? { version } : {}),
       modelGrants,

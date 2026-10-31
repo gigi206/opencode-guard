@@ -28,10 +28,17 @@ describe("batch 32: outputCheck option", () => {
     for (const value of [false, "false", "0", { enabled: false }, { enabled: "false" }]) assert.equal(parse(value).config.outputCheck, undefined)
     assert.deepEqual(parse(true).config.outputCheck, { ...DEFAULT_OUTPUT_CHECK, explicit: true })
     assert.deepEqual(parse("TRUE").config.outputCheck, { ...DEFAULT_OUTPUT_CHECK, explicit: true })
-    assert.deepEqual(parse({ threshold: "0,8", timeoutMs: 1500 }).config.outputCheck, { threshold: 0.8, timeoutMs: 1500, explicit: true })
+    // Other settings: kept only when the global configuration sets the same (a project could weaken the check).
+    const value = { threshold: "0,8", timeoutMs: 1500, questions: { note: "N", secret: { instructions: "S?", criteria: { true: "T", false: "F" } } } }
+    const declared = () => [{ label: "global", options: { outputCheck: value } }]
+    const kept = parseConfig({ outputCheck: value }, {}, declared).config.outputCheck!
+    assert.deepEqual([kept.threshold, kept.timeoutMs, kept.questions.note, kept.questions.secret.criteria?.true, kept.custom], [0.8, 1500, "N", "T", true])
+    const weak = parseConfig({ outputCheck: { timeoutMs: 100 } }, {}, declared)
+    assert.equal(weak.config.outputCheck?.timeoutMs, 1100)
+    assert.match(weak.warnings.join("\n"), /outputCheck settings ignored, defaults used/)
   })
   it("default values calibrated for nox-4b (2026-10-17): threshold 0.45, timeout 1100 ms", () => {
-    assert.deepEqual(DEFAULT_OUTPUT_CHECK, { threshold: 0.45, timeoutMs: 1100, explicit: false })
+    assert.deepEqual([DEFAULT_OUTPUT_CHECK.threshold, DEFAULT_OUTPUT_CHECK.timeoutMs, DEFAULT_OUTPUT_CHECK.explicit, DEFAULT_OUTPUT_CHECK.custom], [0.45, 1100, false, false])
   })
   it("invalid value (kept on), unknown key, threshold out of bounds → warning", () => {
     const typo = parse("maybe")
@@ -332,6 +339,16 @@ describe("batch 32: output check (fake model)", () => {
     const { fake, states } = await setup(() => noul(0.1))
     await fake.trigger("tool.execute.after", done("shell", { output: "unique-line-xyz", content: [{ type: "text", text: "unique-line-xyz" }] }))
     assert.equal(JSON.stringify(states[0]).split("unique-line-xyz").length - 1, 1)
+  })
+  it("custom note and question: the ones sent to the model", async () => {
+    const questions = { note: "NOTE", secret: { instructions: "S?", criteria: { true: "T", false: "F" } } }
+    const fake = fakeContext()
+    const asked: ModelRequest[] = []
+    const model = async (request: ModelRequest) => (asked.push(request), noul(0.1))
+    await registerOutputCheck(fake.ctx, { redactor: createRedactor(), model, label: "nox-4b", threshold: 0.7, maxStateChars: 4000, askAs: "ask", cacheTtlMs: 0, cacheMax: 0, log: capture().log, questions })
+    await fake.trigger("tool.execute.after", done("webfetch", { output: "some page" }))
+    assert.equal((asked[0]!.state as { note: string }).note, "NOTE")
+    assert.deepEqual(asked[0]!.questions[OUTPUT_QUESTION_ID], { type: "noul", instructions: "S?", criteria: { true: "T", false: "F" } })
   })
   it("cache: same output → a single model call", async () => {
     const { fake, states } = await setup(() => noul(0.1))
