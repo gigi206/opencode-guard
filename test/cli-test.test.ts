@@ -10,7 +10,7 @@ import { describe, it } from "node:test"
 import { localTime } from "../src/cli/last.ts"
 import { main } from "../src/cli/main.ts"
 import { serverEnv, testCall } from "../src/cli/test.ts"
-import type { ModelRequest, ModelResponse } from "../src/model/client.ts"
+import { ModelError, type ModelRequest, type ModelResponse } from "../src/model/client.ts"
 import { FAKE } from "./fixtures.ts"
 
 const PLUGIN_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)))
@@ -107,6 +107,26 @@ describe("guard test: the verdict of a call, without running it", () => {
     assert.ok(!bad.err.join("\n").includes(FAKE.openai), bad.err.join("\n"))
     const secret = await w.run(["test", "--", "echo", FAKE.openai])
     assert.ok(!secret.out.join("\n").includes(FAKE.openai), secret.out.join("\n"))
+  })
+})
+
+describe("guard test: the decision model's key from service.json", () => {
+  it("TS-8: a key known only to service.json, echoed by the gateway, is never printed (decider and printed lines redact it)", async () => {
+    const w = world()
+    const key = "opaque-k3y-value-7Qm"
+    writeFileSync(join(w.globalDir, "service.json"), JSON.stringify({ env: { TEST_KEY: key } }))
+    const env = { ...w.env } as Record<string, string | undefined>
+    delete env.TEST_KEY
+    const out: string[] = []
+    const io = { ...w.io(out, out), env }
+    const outcome = await testCall(io, { tool: "shell", input: { command: "make test" }, model: true }, async () => {
+      throw new ModelError(`HTTP 401: bad key ${key}`)
+    })
+    assert.ok(!JSON.stringify(outcome).includes(key), outcome.reason)
+    // The printed lines go through the CLI's redactor, which now reads service.json too.
+    const code = await main(["test", "--", "echo", key], io)
+    assert.equal(code, 0)
+    assert.ok(!out.join("\n").includes(key), out.join("\n"))
   })
 })
 

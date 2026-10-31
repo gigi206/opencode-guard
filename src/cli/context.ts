@@ -2,7 +2,7 @@
 // environment, which may differ from the server's), the system one, the plugin's entry in their opencode.json, the
 // guard.json files and their layered resolution (config.ts). A project's opencode.json is never read: OpenCode merges it
 // into the options the plugin receives, and its discovery is not reimplemented here.
-import { lstatSync, realpathSync } from "node:fs"
+import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { parseConfig, resolveVersion, type GuardFile, type PluginDeclaration, type Version } from "../config.ts"
@@ -67,11 +67,16 @@ export function readSources(io: CliIo): Sources {
 }
 
 /**
- * The plugin's redactor for every line printed: its default patterns, the `secretPatterns` and the decision model's key
+ * The plugin's redactor for every line printed (with the server's environment): its default patterns, the `secretPatterns` and the decision model's key
  * and headers of the global and system configurations, the terminal's environment. Configuration that cannot be read:
  * the default patterns (never a line in clear).
  */
-export function outputRedactor(io: CliIo): Redactor {
+export function outputRedactor(terminal: CliIo): Redactor {
+  // The server's environment: the decision model's key may be only in service.json (`guard test`, `guard status`).
+  let io = terminal
+  try {
+    io = { ...terminal, env: serverEnv(terminal.env, readSources(terminal).globalDir) }
+  } catch {}
   try {
     const configs = readSources(io).declarations.flatMap((entry) => (entry.options ? [parseConfig(entry.options, io.env).config] : []))
     return createRedactor({ extraPatterns: configs.flatMap((config) => config.secretPatterns), env: io.env, knownSecrets: configs.flatMap(knownSecrets) })
@@ -102,3 +107,19 @@ export function projectDirectory(cwd: string): string {
     if (dirname(dir) === dir) return start
   }
 }
+
+/**
+ * The server's environment: the terminal's, completed by the `env` of OpenCode's `service.json` in the global directory
+ * (the service starts the server with it: the decision model's key is often only there). Unreadable: the terminal's.
+ */
+export function serverEnv(env: Record<string, string | undefined>, globalDir: string | undefined): Record<string, string | undefined> {
+  if (!globalDir) return env
+  try {
+    const service = JSON.parse(readFileSync(join(globalDir, "service.json"), "utf8")) as { env?: unknown }
+    const extra = service.env && typeof service.env === "object" ? Object.entries(service.env).filter((entry): entry is [string, string] => typeof entry[1] === "string") : []
+    return { ...Object.fromEntries(extra), ...env }
+  } catch {
+    return env
+  }
+}
+

@@ -4,9 +4,7 @@
 // The decision model is asked only with `--model` (the call is then sent to it); otherwise, a call no local rule decides
 // is said to be the model's. Not replayed: OpenCode's own permission rules, its second check of the shell sub-commands
 // (the plugin's rules already split the command), and the scripts written earlier in a session.
-import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
 import { parseConfig, resolveVersion } from "../config.ts"
 import { createDecider, type Decision } from "../decide.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
@@ -14,7 +12,7 @@ import { guardDirectories, knownSecrets } from "../index.ts"
 import { createModelClient, ModelError, type ModelClient } from "../model/client.ts"
 import { shellDirectories } from "../scripts.ts"
 import { createRedactor } from "../secrets/redact.ts"
-import { CliError, readSources, realOrUndefined, type CliIo } from "./context.ts"
+import { CliError, readSources, realOrUndefined, serverEnv, type CliIo } from "./context.ts"
 import { title } from "./pretty.ts"
 import type { Segment } from "./style.ts"
 
@@ -35,20 +33,7 @@ export interface TestOutcome {
   readonly notes: readonly string[]
 }
 
-/**
- * The server's environment: the terminal's, completed by the `env` of OpenCode's `service.json` in the global directory
- * (the service starts the server with it: the decision model's key is often only there). Unreadable: the terminal's.
- */
-export function serverEnv(env: Record<string, string | undefined>, globalDir: string | undefined): Record<string, string | undefined> {
-  if (!globalDir) return env
-  try {
-    const service = JSON.parse(readFileSync(join(globalDir, "service.json"), "utf8")) as { env?: unknown }
-    const extra = service.env && typeof service.env === "object" ? Object.entries(service.env).filter((entry): entry is [string, string] => typeof entry[1] === "string") : []
-    return { ...Object.fromEntries(extra), ...env }
-  } catch {
-    return env
-  }
-}
+export { serverEnv } from "./context.ts"
 
 /** Default main agent of a session. */
 const DEFAULT_AGENT = "build"
