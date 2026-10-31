@@ -10,7 +10,7 @@ PORT=8099
 LOG="$DIR/server-$(basename "$OUT" .jsonl).log"
 mkdir -p "$(dirname "$OUT")"
 
-"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -ub 4096 -np 1 --no-webui > "$LOG" 2>&1 &
+"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -b 4096 -ub 4096 -np 1 --no-webui > "$LOG" 2>&1 &
 pid=$!
 ready=""
 for _ in $(seq 1 180); do

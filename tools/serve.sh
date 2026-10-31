@@ -20,9 +20,13 @@
 #                      vllm-sr status and the container logs. On CPU, the package's
 #                      golden check fails: see the note below.
 #   llama             `llama-server` + a quantized GGUF (Q4_K_M, Q8_0 or BF16), no venv
-#                     or kernels. d3-mini Q4_K_M fits entirely in 4 GB
-#                     (-ngl 32 -ub 512, ~3.6 GB); d3-flash Q4_K_M is partially offloaded
-#                     (-ngl 14 -ub 1024). The script downloads the GGUF from
+#                     or kernels. A request must fit whole in one batch: the batch
+#                     (-ub, and -b set to the same value) is 4096 tokens by default,
+#                     enough for the plugin's requests (input up to 4000 characters,
+#                     prompt parts of 2000); a smaller one rejects them (the model then
+#                     fails and the plugin asks for confirmation). On a 4 GB card,
+#                     d3-mini Q4_K_M runs with 26 of its 32 layers on the GPU (~3.7 GB)
+#                     and d3-flash Q4_K_M with 8. The script downloads the GGUF from
 #                     ggml-org/vllm-d3-<model>-GGUF, automatically stops a recognized
 #                     local service on the port, checks VRAM, starts, then tests
 #                     /v1/systemone. --keep leaves the existing service running,
@@ -52,8 +56,8 @@
 #                    d3-edge (d3 has no validated GGUF).
 #   --quant Q        llama: Q4_K_M, Q8_0 or BF16 (default: Q4_K_M for d3-mini and
 #                    d3-flash, Q8_0 for the others)
-#   --ngl N          llama: layers on the GPU (default: 32 mini, 14 flash, 99 otherwise)
-#   --ub N           llama: micro-batch (default: 512 mini, 1024 flash, 4096 otherwise)
+#   --ngl N          llama: layers on the GPU (default: 26 mini, 8 flash, 99 otherwise)
+#   --ub N           llama: batch, -ub and -b (default 4096; below, long requests are rejected)
 #   --ctx N          llama: context size (default 8192)
 #   --gguf FILE      llama: local GGUF file instead of downloading
 #   --keep           llama: do not stop the local service already on the port
@@ -190,13 +194,13 @@ if [ "$MODE" = llama ]; then
   case "$MODEL_NAME" in
     d3-mini)
       [ -n "$QUANT" ] || QUANT="Q4_K_M"
-      [ -n "$NGL" ] || NGL=32
-      [ -n "$UB" ] || UB=512
+      [ -n "$NGL" ] || NGL=26
+      [ -n "$UB" ] || UB=4096
       ;;
     d3-flash)
       [ -n "$QUANT" ] || QUANT="Q4_K_M"
-      [ -n "$NGL" ] || NGL=14
-      [ -n "$UB" ] || UB=1024
+      [ -n "$NGL" ] || NGL=8
+      [ -n "$UB" ] || UB=4096
       ;;
     d3-nano|d3-lite|d3-edge)
       [ -n "$QUANT" ] || QUANT="Q8_0"
@@ -222,6 +226,8 @@ if [ "$MODE" = llama ]; then
   case "$UB" in ''|*[!0-9]*) die "--ub expects an integer." ;; esac
   case "$CTX" in ''|*[!0-9]*) die "--ctx expects an integer." ;; esac
   [ "$UB" -gt 0 ] || die "--ub must be greater than 0."
+  [ "$UB" -ge 4096 ] || warn "--ub $UB: a request must fit whole in one batch; the plugin sends up to about 4096 tokens, longer ones will be rejected (confirmations)."
+  [ "$CTX" -ge "$UB" ] || die "--ctx must be at least --ub ($UB)."
   [ "$CTX" -gt 0 ] || die "--ctx must be greater than 0."
   [ "$MODEL_NAME" = "d3-flash" ] && CLIENT_TIMEOUT_MS=8000
   GGUF_DIR="$HOME_DIR/models/ggml-org/$MODEL_NAME"
@@ -824,8 +830,8 @@ preflight_llama() {
   say "VRAM: ~$need MiB estimated (weights $weights + overhead $overhead), $free MiB free."
   if [ "$need" -gt $(( free - 32 )) ]; then
     case "$MODEL_NAME" in
-      d3-mini) hint="--ngl 30 --ub 1024 (~3.5 GiB) or --ngl 26 --ub 4096 (~3.3 GiB)" ;;
-      d3-flash) hint="--ngl 14 --ub 1024 (~3.5 GiB)" ;;
+      d3-mini) hint="--ngl 24 (~3.5 GiB) or --ngl 20 (~3.2 GiB)" ;;
+      d3-flash) hint="--ngl 6" ;;
     esac
     if [ "$soft" = "1" ]; then
       warn "this configuration does not fit in currently free VRAM (the existing service will be stopped before launch)."
@@ -845,7 +851,7 @@ run_llama() {
     say "Command that would run:"
     printf '  %q' "$LLAMA_BIN"
     printf ' %q' -m "$GGUF_PATH" --alias "$SERVED_MODEL" --host "$HOST" --port "$PORT" \
-      -c "$CTX" -ub "$UB" -np 1 -ngl "$NGL" --no-webui
+      -c "$CTX" -b "$UB" -ub "$UB" -np 1 -ngl "$NGL" --no-webui
     printf '\n'
     exit 0
   fi
@@ -861,7 +867,7 @@ run_llama() {
   local log="$log_dir/llama-$MODEL_NAME-$QUANT.log"
   mkdir -p "$log_dir"
   local args=(-m "$GGUF_PATH" --alias "$SERVED_MODEL" --host "$HOST" --port "$PORT"
-    -c "$CTX" -ub "$UB" -np 1 -ngl "$NGL" --no-webui)
+    -c "$CTX" -b "$UB" -ub "$UB" -np 1 -ngl "$NGL" --no-webui)
   step "Starting (llama.cpp, $DEVICE, $MODEL_NAME $QUANT, -ngl $NGL -ub $UB, ctx $CTX) on http://$HOST:$PORT"
   say "Command: $LLAMA_BIN ${args[*]}"
   "$LLAMA_BIN" "${args[@]}" >"$log" 2>&1 &
@@ -1159,6 +1165,15 @@ verify() {
   done
   [ -n "${out:-}" ] || { warn "no response after ${wait_s} s (see the service logs)."; return 1; }
   printf '%s\n' "$out"
+  # A request as long as the plugin's (about 4000 characters): llama-server rejects it if it does not fit in one batch.
+  local long
+  long="$(printf 'step %d: compute the value of field %d and keep the order of the records; ' $(seq 1 110))"
+  body="{\"model\":\"$SERVED_MODEL\",\"state\":\"$long\",\"questions\":{\"v7\":{\"type\":\"noul\",\"instructions\":\"Does this text contain a password?\"}}}"
+  if ! curl -fsS -m 120 -H 'content-type: application/json' -d "$body" "http://$HOST:$PORT/v1/systemone" >/dev/null 2>&1; then
+    warn "a request of ${#long} characters was rejected: the batch is too small for the plugin's requests (llama: raise --ub)."
+    return 1
+  fi
+  say "Long request (${#long} characters): accepted."
   say ""
   say "Corresponding opencode.json configuration:"
   cat <<JSON

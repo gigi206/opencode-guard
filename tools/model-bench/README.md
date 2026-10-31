@@ -22,7 +22,8 @@ locally".
 - `run_local.sh` — full bench against a local `llama-server` (`systemone` path):
   `bash run_local.sh <alias> <gguf> <out.jsonl> [timeout_s]` (CPU, 60 s timeout by default).
 - `run_local_gpu.sh` — same bench with CUDA offload:
-  `bash run_local_gpu.sh <alias> <gguf> <ngl> <out.jsonl> [ub]` (ub 4096 by default).
+  `bash run_local_gpu.sh <alias> <gguf> <ngl> <out.jsonl> [ub]` (ub 4096 by default, also passed as `-b`:
+  these models read a request in one batch, so a smaller batch rejects the longer ones).
 - `run_chat.py` — bench against any remote model via the plugin's `chat`
   protocol: `python3 run_chat.py --base <url> --model <name> --out out/model.jsonl`
   (`--key-env <VAR>` if the service requires a key).
@@ -58,8 +59,8 @@ locally".
 # d3-edge Q8_0: full CPU bench (~1.4 s/case)
 bash run_local.sh d3-edge ~/models/d3-edge-gguf/vllm-d3-edge-Q8_0.gguf /tmp/edge.jsonl
 
-# d3-mini Q4_K_M: whole model on GPU (32 layers, ub 512)
-bash run_local_gpu.sh d3-mini ~/models/d3-mini-gguf/vllm-d3-mini-Q4_K_M.gguf 32 /tmp/mini-gpu.jsonl 512
+# d3-mini Q4_K_M: 26 of 32 layers on GPU, batch of 4096 tokens (the plugin's longest requests fit whole)
+bash run_local_gpu.sh d3-mini ~/models/d3-mini-gguf/vllm-d3-mini-Q4_K_M.gguf 26 /tmp/mini-gpu.jsonl 4096
 
 # scores (defaults, ★ 405 combos, + rules) and agreements
 python3 tune.py mini=/tmp/mini-gpu.jsonl

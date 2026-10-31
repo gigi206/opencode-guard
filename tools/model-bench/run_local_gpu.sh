@@ -9,7 +9,7 @@ PORT=8099
 LOG="$DIR/server-gpu-$(basename "$OUT" .jsonl).log"
 mkdir -p "$(dirname "$OUT")"
 
-"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -ub "$UB" -np 1 -ngl "$NGL" --no-webui > "$LOG" 2>&1 &
+"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -b "$UB" -ub "$UB" -np 1 -ngl "$NGL" --no-webui > "$LOG" 2>&1 &
 pid=$!
 ready=""
 for _ in $(seq 1 180); do
