@@ -107,7 +107,7 @@ All options live under `options` in the plugin entry.
 | `outputCheck` | on | Also ask the decision model whether an output still holds a secret in clear. |
 | `promptCheck` | on | Also ask the decision model for a secret typed in plain words in the prompt, in any language, and mask it. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
-| `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"` (or `"allow"`), `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"allow"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
+| `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"`, `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `localAsks` | `"ask"` | `"model"`: the confirmations of the built-in rules without a setting are decided by the decision model (self-protection only with `selfProtectionByModel: true`); must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `profile` | `"standard"` | `"credentials-only"` turns `dangerousCommands`, `decisionModel` and `scripts` off by default; must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `debug` | `false` | Also log allowed actions and redaction counts; confirmations, refusals and local confirmations decided by the model are always logged. |
@@ -115,7 +115,7 @@ All options live under `options` in the plugin entry.
 
 Full reference, defaults, environment substitutions and edge cases: [Configuration](docs/configuration.md). Model choices, thresholds and local serving: [Decision model](docs/decision-model.md).
 
-The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the built-in rules and your own (`guard rules --explain <rule>` explains one in words), the redaction formats with their regular expressions (`guard redaction`), shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard rules off|on <rule>`, `--agent`, `--project`, `guard redaction off|on <format>`, `guard trust`), applied without a restart; `guard help` lists the commands, in color in a terminal.
+The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the built-in rules and your own (`guard rules --explain <rule>` explains one in words), the redaction formats with their regular expressions (`guard redaction`), shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard rules off|reset <rule>`, `--agent`, `--project`, `guard redaction off|on <format>`, `guard trust`), applied without a restart; `guard help` lists the commands, in color in a terminal.
 
 ## Logs
 

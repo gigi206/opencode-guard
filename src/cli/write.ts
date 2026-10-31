@@ -16,7 +16,7 @@ type Json = Record<string, unknown>
 const isObject = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value)
 
 /** Words of the setting commands, written as is (`allow` is read as `off` by the plugin). */
-export const SETTINGS = ["allow", "off", "ask", "deny", "model"] as const
+export const SETTINGS = ["off", "ask", "deny", "model"] as const
 export type SettingWord = (typeof SETTINGS)[number]
 
 /** Section written: the top level, an agent's, a project's (real path), or an agent's inside a project's. */
@@ -136,15 +136,12 @@ export function setRule(io: CliIo, word: SettingWord, rule: string, target: Targ
   if (section.ruleOverrides !== undefined && !isObject(section.ruleOverrides))
     throw new CliError(`ruleOverrides in ${placeOf(target)} of the global guard.json is not an object: it is left as is (fix it by hand)`)
   const overrides = (section.ruleOverrides ??= {}) as Json
-  // "allow" is read as "off": one replacing the other changes nothing.
-  const read = (value: unknown) => (value === "allow" ? "off" : value)
-  if (read(overrides[rule]) === read(word)) {
-    io.out(`ruleOverrides.${rule} is already "${String(overrides[rule])}" in ${placeOf(target)} of ${guard.path}: nothing changed`)
+  if (overrides[rule] === word) {
+    io.out(`ruleOverrides.${rule} is already "${word}" in ${placeOf(target)} of ${guard.path}: nothing changed`)
     return
   }
   overrides[rule] = word
-  const setting = word === "allow" ? "off" : word
-  check(io, sources, guard, data, target.project, (version) => (target.agent === undefined ? version.base : version.scope(target.agent, undefined, undefined)).policy.overrides?.get(rule) === setting)
+  check(io, sources, guard, data, target.project, (version) => (target.agent === undefined ? version.base : version.scope(target.agent, undefined, undefined)).policy.overrides?.get(rule) === word)
   write(guard, data)
   io.out(`ruleOverrides.${rule} set to "${word}" in ${placeOf(target)} of ${guard.path}`)
 }
@@ -177,7 +174,7 @@ export function resetRule(io: CliIo, rule: string, target: Target): void {
 
 /**
  * A built-in redaction format turned off (`off`) or back on, in `redactionOff` of the global guard.json. Back on: a
- * format that `secretPatterns` of the global or system configuration also turns off stays off, and the command says so.
+ * format that `redactionOff` of the global or system configuration also turns off stays off, and the command says so.
  */
 export function setRedaction(io: CliIo, type: string, off: boolean): void {
   const sources = readSources(io)
@@ -207,7 +204,7 @@ export function setRedaction(io: CliIo, type: string, off: boolean): void {
   }
   const { config } = parseConfig(sources.options, io.env, () => sources.declarations)
   if (config.disabledPatterns.includes(type))
-    io.out(`${type} is still off: secretPatterns of the ${sources.origin ?? "global configuration"} turns it off ({ "type": "${type}", "enabled": false }); remove that entry by hand`)
+    io.out(`${type} is still off: ${REDACTION_OFF} of the ${sources.origin ?? "global configuration"} (opencode.json) turns it off; remove "${type}" there by hand`)
 }
 
 /** Directory given (real path; `allowMissing`: absolute path), or the project of the current directory. */

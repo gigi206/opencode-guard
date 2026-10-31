@@ -42,7 +42,8 @@ describe("guard help and guard rules <setting> <rule>", () => {
     assert.ok(!ESCAPES.some((escape) => plain.includes(escape)))
     assert.ok(ESCAPES.some((escape) => colored.includes(escape)))
     assert.equal(strip(colored), plain)
-    for (const word of ["rules off|ask|deny|model", "rules on", "redaction off|on", "--project", "untrust", "Also accepted"]) assert.ok(plain.includes(word), word)
+    for (const word of ["rules off|ask|deny|model", "rules reset", "redaction off|on", "--project", "untrust"]) assert.ok(plain.includes(word), word)
+    for (const word of ["Also accepted", "allow", "rules on"]) assert.ok(!plain.includes(word), word)
     for (const line of w.run(["help"], { width: 60, color: false }).out) assert.ok(line.length <= 60, line)
     const error = w.run(["rules", "off"], { width: 100, color: true })
     assert.equal(error.code, 2)
@@ -50,38 +51,47 @@ describe("guard help and guard rules <setting> <rule>", () => {
     assert.equal(terminalOf({ NO_COLOR: "1" }, true, 100)?.color, false)
   })
 
-  it("HL-2: rules off|ask|deny|model|on write like the top-level commands; allow and off are the same", () => {
+  it("HL-2: rules off|ask|deny|model|reset write the global guard.json; the former forms are usage errors that name the new one", () => {
     const w = world()
     assert.equal(w.run(["rules", "off", "eval"]).code, 0)
     assert.deepEqual(w.guard(), { ruleOverrides: { eval: "off" } })
     assert.match(w.run(["rules", "off", "eval"]).out.join("\n"), /already "off".*nothing changed/)
-    assert.match(w.run(["allow", "eval"]).out.join("\n"), /already "off".*nothing changed/)
     assert.equal(w.run(["rules", "ask", "eval", "--agent", "build"]).code, 0)
     assert.deepEqual(w.guard(), { ruleOverrides: { eval: "off" }, agents: { build: { ruleOverrides: { eval: "ask" } } } })
-    assert.equal(w.run(["rules", "on", "eval"]).code, 0)
-    assert.equal(w.run(["rules", "on", "eval", "--agent", "build"]).code, 0)
+    assert.equal(w.run(["rules", "reset", "eval"]).code, 0)
+    assert.equal(w.run(["rules", "reset", "eval", "--agent", "build"]).code, 0)
     assert.deepEqual(w.guard(), {})
-    writeFileSync(w.guardFile, JSON.stringify({ ruleOverrides: { eval: "allow" } }))
-    assert.match(w.run(["rules", "off", "eval"]).out.join("\n"), /already "allow".*nothing changed/)
+    for (const [args, hint] of [
+      [["allow", "eval"], "guard rules off <rule>"],
+      [["off", "eval"], "guard rules off <rule>"],
+      [["reset", "eval"], "guard rules reset <rule>"],
+      [["rules", "on", "eval"], "guard rules reset <rule>"],
+      [["rules", "allow", "eval"], "guard rules off <rule>"],
+    ] as const) {
+      const r = w.run([...args])
+      assert.equal(r.code, 2, args.join(" "))
+      assert.ok(r.err[0]!.includes(hint), r.err[0])
+    }
+    assert.deepEqual(w.guard(), {})
     assert.equal(w.run(["rules", "off", "eval", "--builtins"]).code, 2)
     assert.equal(w.run(["rules", "off"]).code, 2)
   })
 
-  it("HL-3: back on, a rule whose group is off there still does not apply, and the command says why", () => {
+  it("HL-3: after reset, a rule whose group is off there still does not apply, and the command says why", () => {
     const w = world({ dangerousCommands: false })
     w.run(["rules", "deny", "git-clean"])
-    const on = w.run(["rules", "on", "git-clean"])
+    const on = w.run(["rules", "reset", "git-clean"])
     assert.equal(on.code, 0)
     assert.match(on.out.join("\n"), /git-clean still does not apply there: its group dangerousCommands is off, set by global configuration/)
     const fine = world()
     fine.run(["rules", "deny", "git-clean"])
-    assert.ok(!fine.run(["rules", "on", "git-clean"]).out.join("\n").includes("still does not apply"))
+    assert.ok(!fine.run(["rules", "reset", "git-clean"]).out.join("\n").includes("still does not apply"))
   })
 
   it("HL-4: the agent running guard rules <setting> is always asked, never left to the model", () => {
     const active = { dangerousCommands: true, sensitiveFiles: true, localAsksByModel: true, selfProtectionByModel: true }
     const ctx = { redactor: createRedactor(), home: "/home/test", cwd: "/home/test/app", active }
-    for (const command of ["guard rules on git-clean", "guard rules off eval", "guard help"]) {
+    for (const command of ["guard rules reset git-clean", "guard rules off eval", "guard help"]) {
       const finding = toolFinding("shell", { command }, ctx)
       assert.equal(`${finding?.verdict}/${finding?.rule}`, "ask/guard-cli", command)
       assert.equal(finding?.modelDecides, undefined, command)

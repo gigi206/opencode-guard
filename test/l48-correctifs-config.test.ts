@@ -211,7 +211,7 @@ describe("lot 48 step F2: the guard command line", () => {
 
   it("CF2-8: refusals and log lines are redacted, with the global configuration's secretPatterns", async () => {
     const w = await world({ secretPatterns: ["TESTCORP-[0-9]{8}"] })
-    const refused = w.run(["deny", FAKE.github])
+    const refused = w.run(["rules", "deny", FAKE.github])
     assert.equal(refused.code, 1)
     assert.match(refused.err, /unknown rule/)
     assert.ok(!refused.err.includes(FAKE.github), "rule name printed in clear")

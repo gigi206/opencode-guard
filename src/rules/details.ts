@@ -314,10 +314,10 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
 export function ruleSettings(id: string, group: "always" | "sensitiveFiles" | "dangerousCommands"): string {
   if (group === "always") {
     if (DENY_ONLY_RULES.has(id))
-      return `Always active and refuse-only: ruleOverrides.${id} accepts only "deny"; "off", "allow", "ask" and "model" are ignored, and localAsks does not reach it. The rule cannot be turned off, and no setting can make it ask.`
+      return `Always active and refuse-only: ruleOverrides.${id} accepts only "deny"; "off", "ask" and "model" are ignored, and localAsks does not reach it. The rule cannot be turned off, and no setting can make it ask.`
     if (USER_ONLY_RULES.has(id))
-      return `Always active: ruleOverrides.${id} accepts only "deny"; "off", "allow", "ask" and "model" are ignored, and localAsks does not reach it. The group cannot be turned off.`
-    const common = `Always active: ruleOverrides.${id} accepts "deny" (and "model" only with selfProtectionByModel); "off", "allow" and "ask" are ignored, and localAsks: "model" reaches it only with selfProtectionByModel.`
+      return `Always active: ruleOverrides.${id} accepts only "deny"; "off", "ask" and "model" are ignored, and localAsks does not reach it. The group cannot be turned off.`
+    const common = `Always active: ruleOverrides.${id} accepts "deny" (and "model" only with selfProtectionByModel); "off" and "ask" are ignored, and localAsks: "model" reaches it only with selfProtectionByModel.`
     if (id === "self-protection")
       return `${common} A write to the plugin's settings (a guard.json, an opencode.json or opencode.jsonc, an OpenCode configuration directory or its plugin directory, the service file), and a write whose links could not all be followed, are never left to the decision model. The group cannot be turned off.`
     if (id === "nested-opencode")
@@ -327,5 +327,5 @@ export function ruleSettings(id: string, group: "always" | "sensitiveFiles" | "d
     return `${common} The group cannot be turned off.`
   }
   const switchName = group === "sensitiveFiles" ? "sensitiveFiles" : "dangerousCommands"
-  return `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off" (or "allow"), "ask", "deny" or "model"; "model" leaves its confirmations to the decision model, and so does localAsks: "model" when the rule has no setting. A value that relaxes the rule must also be declared in the global configuration, unless the project is trusted.`
+  return `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off", "ask", "deny" or "model"; "model" leaves its confirmations to the decision model, and so does localAsks: "model" when the rule has no setting. A value that relaxes the rule must also be declared in the global configuration, unless the project is trusted.`
 }

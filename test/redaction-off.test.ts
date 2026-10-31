@@ -18,7 +18,6 @@ import { fakeContext } from "./fake-ctx.ts"
 const PLUGIN_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)))
 type Json = Record<string, unknown>
 const FAKE_JWT = `eyJ${"a".repeat(12)}.eyJ${"b".repeat(12)}.${"c".repeat(12)}`
-const JWT_OFF = { type: "jwt", enabled: false }
 const DECISION = { baseURL: "https://decision.local/v1", model: "nox-4b" }
 
 function world(global: Json = {}) {
@@ -80,11 +79,11 @@ describe("redaction formats turned off by the global guard.json", () => {
     assert.throws(() => readFileSync(w.guardFile))
   })
 
-  it("RO-3: back on, a format that secretPatterns of the global configuration also turns off stays off, and the command says so", () => {
-    const w = world({ secretPatterns: [JWT_OFF] })
+  it("RO-3: back on, a format that redactionOff of the global configuration also turns off stays off, and the command says so", () => {
+    const w = world({ redactionOff: ["jwt"] })
     w.run("redaction", "off", "jwt")
     const on = w.run("redaction", "on", "jwt")
-    assert.match(on.out.join("\n"), /jwt is still off: secretPatterns of the global configuration turns it off/)
+    assert.match(on.out.join("\n"), /jwt is still off: redactionOff of the global configuration \(opencode\.json\) turns it off/)
     assert.ok(w.run("redaction", "--explain", "jwt").out.includes("  State: off"))
   })
 
@@ -113,7 +112,7 @@ describe("redaction formats turned off by the global guard.json", () => {
     assert.equal(await p.output(), "redacted")
   })
 
-  it("RO-6: ignored, with a warning, in a project's guard.json, in a section, in opencode.json, and for names that are not built-in formats", () => {
+  it("RO-6: ignored, with a warning, in a project's guard.json, in a section, and for names that are not built-in formats", () => {
     const layersOf = (options: Json = {}) => parseConfig(options, {}, () => [{ label: "global", options }] as never, { files: [], realPath: (path: string) => path }).config.layers!
     const version = resolveVersion(layersOf(), [
       { label: "global guard.json", global: true, data: { redactionOff: ["jwt", "nope", "qr_code", 3], agents: { build: { redactionOff: ["npm_token"] } }, projects: { "/x": { redactionOff: ["npm_token"] } } } },
@@ -124,10 +123,10 @@ describe("redaction formats turned off by the global guard.json", () => {
     assert.match(warnings, /redactionOff\[1\] ignored: no built-in format named nope/)
     assert.match(warnings, /redactionOff\[2\] ignored: the built-in format qr_code cannot be turned off/)
     assert.match(warnings, /redactionOff\[3\] ignored: a format name expected/)
-    assert.match(warnings, /agents\.build: redactionOff ignored: it counts only at the top level of the global guard\.json/)
-    assert.match(warnings, /projects\["\/x"\]: redactionOff ignored: it counts only at the top level/)
-    assert.match(warnings, /project guard\.json .*: redactionOff ignored: it counts only at the top level/)
-    assert.match(parseConfig({ redactionOff: ["jwt"] }).warnings.join("\n"), /redactionOff ignored: it is a key of the global guard\.json; in opencode\.json, turn a format off with secretPatterns/)
+    const elsewhere = "redactionOff ignored: it counts only in the global configuration (global opencode.json, system configuration) and at the top level of the global guard.json"
+    assert.ok(warnings.includes(`global guard.json, agents.build: ${elsewhere}`), warnings)
+    assert.ok(warnings.includes(`global guard.json, projects["/x"]: ${elsewhere}`), warnings)
+    assert.ok(warnings.includes(`project guard.json (/p/.opencode/guard.json): ${elsewhere}`), warnings)
   })
 
   it("RO-7: the agent running guard redaction off|on is always asked, never left to the model", () => {

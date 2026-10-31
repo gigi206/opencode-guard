@@ -52,7 +52,7 @@ function world(setup: { readonly global?: Json; readonly system?: Json } = {}) {
   )
 }
 
-const JWT_OFF = { type: "jwt", enabled: false }
+const JWT_OFF = ["jwt"]
 const FAKE_JWT = `eyJ${"a".repeat(12)}.eyJ${"b".repeat(12)}.${"c".repeat(12)}`
 const declared = (global: Json | undefined): (() => readonly PluginDeclaration[]) => () => [{ label: "global", options: global }, { label: "system", reason: "absent" }] as unknown as readonly PluginDeclaration[]
 
@@ -82,37 +82,42 @@ describe("redaction formats", () => {
   })
 
   it("RF-4: a format turned off by the global configuration is no longer redacted; elsewhere ignored, with a warning", () => {
-    const global = { secretPatterns: [JWT_OFF] }
+    const global = { redactionOff: JWT_OFF }
     const own = parseConfig(global, {}, declared(global))
     assert.deepEqual(own.config.disabledPatterns, ["jwt"])
     assert.deepEqual(own.warnings, [])
     assert.equal(createRedactor({ disabledTypes: own.config.disabledPatterns }).redactString(FAKE_JWT).value, FAKE_JWT)
     assert.notEqual(createRedactor({}).redactString(FAKE_JWT).value, FAKE_JWT)
     // A project's opencode.json (effective options that the global entry does not share): refused.
-    const project = parseConfig({ secretPatterns: [JWT_OFF] }, {}, declared({}))
+    const project = parseConfig({ redactionOff: JWT_OFF }, {}, declared({}))
     assert.deepEqual(project.config.disabledPatterns, [])
-    assert.ok(project.warnings.some((warning) => /^secretPatterns: turning off the built-in format jwt ignored: a relaxation counts only if the global or system configuration sets it too/.test(warning)))
+    assert.ok(project.warnings.some((warning) => /^redactionOff: turning off the built-in format jwt ignored: a relaxation counts only if the global or system configuration sets it too/.test(warning)))
     // Without the declarations (unknown): refused too.
-    assert.deepEqual(parseConfig({ secretPatterns: [JWT_OFF] }).config.disabledPatterns, [])
+    assert.deepEqual(parseConfig({ redactionOff: JWT_OFF }).config.disabledPatterns, [])
   })
 
-  it("RF-5: strict entries: enabled only a boolean, unknown or OpenCode formats reported, a pattern of yours kept aside", () => {
-    const { config, warnings } = parseConfig({
-      secretPatterns: [{ type: "jwt", enabled: "false" }, { type: "nope", enabled: false }, { type: "opencode_credential", enabled: false }, { enabled: false }, { type: "corp", pattern: "corp-[0-9]{6}", enabled: false }, { type: "vide" }],
-    })
-    assert.deepEqual(config.disabledPatterns, [])
+  it("RF-5: strict entries: enabled only a boolean, a pattern of yours kept aside, a built-in format named in secretPatterns pointed to redactionOff; unknown or OpenCode formats in redactionOff reported", () => {
+    const global = {
+      secretPatterns: [{ type: "corp", pattern: "corp-[0-9]{6}", enabled: "false" }, { type: "jwt", enabled: false }, { type: "qr_code" }, { type: "corp", pattern: "corp-[0-9]{6}", enabled: false }, { type: "vide" }],
+      redactionOff: ["nope", "opencode_credential", 3, "npm_token"],
+    }
+    const { config, warnings } = parseConfig(global, {}, declared(global))
+    assert.deepEqual(config.disabledPatterns, ["npm_token"])
     assert.deepEqual(config.secretPatterns, [])
     assert.deepEqual(warnings, [
       "secretPatterns[0]: enabled must be true or false, entry ignored",
-      "secretPatterns[1]: no built-in format named nope",
-      "secretPatterns[2]: the built-in format opencode_credential cannot be turned off",
-      "secretPatterns[3]: the built-in format to turn off is missing (type)",
-      "secretPatterns[5]: missing pattern",
+      'secretPatterns[1]: no pattern; jwt is a built-in format: turn it off with "redactionOff": ["jwt"], entry ignored',
+      'secretPatterns[2]: no pattern; qr_code is a built-in format: turn it off with "redactionOff": ["qr_code"], entry ignored',
+      "secretPatterns[4]: missing pattern",
+      "redactionOff[0] ignored: no built-in format named nope",
+      "redactionOff[1] ignored: the built-in format opencode_credential cannot be turned off",
+      "redactionOff[2] ignored: a format name expected",
     ])
+    assert.match(parseConfig({ redactionOff: "jwt" }).warnings.join("\n"), /^redactionOff must be an array of built-in format names, ignored$/m)
   })
 
   it("RF-6: guard redaction lists the formats with their state, then the user's patterns and those set aside", () => {
-    const run = world({ global: { secretPatterns: [JWT_OFF, { type: "corp", pattern: "corp-[0-9]{6}" }, { type: "nope", enabled: false }] } })
+    const run = world({ global: { redactionOff: ["jwt", "nope"], secretPatterns: [{ type: "corp", pattern: "corp-[0-9]{6}" }] } })
     const r = run("redaction")
     assert.equal(r.code, 0)
     assert.equal(r.out[0], "Built-in redaction formats:")
@@ -123,7 +128,7 @@ describe("redaction formats", () => {
     assert.ok(own > 0)
     assert.match(r.out[own + 1]!, /^ {2}corp +\/corp-\[0-9\]\{6\}\/g$/)
     assert.equal(r.out[own + 2], "  Set aside:")
-    assert.equal(r.out[own + 3], "    secretPatterns[2]: no built-in format named nope")
+    assert.equal(r.out[own + 3], "    redactionOff[1] ignored: no built-in format named nope")
     assert.deepEqual(run("redaction", "--builtins").out, r.out.slice(0, own))
     assert.deepEqual(run("redaction", "--custom").out, r.out.slice(own))
     // Terminal layout: same content, grouped.
@@ -151,21 +156,21 @@ describe("redaction formats", () => {
   })
 
   it("RF-8: guard show lists the formats turned off (relaxes) and the entries set aside", () => {
-    const run = world({ global: { secretPatterns: [JWT_OFF, "corp-[0-9]{6}", { type: "nope", enabled: false }] } })
+    const run = world({ global: { redactionOff: ["jwt", "nope"], secretPatterns: ["corp-[0-9]{6}"] } })
     const r = run("show")
     assert.equal(r.code, 0)
     assert.ok(r.out.some((line) => /^ {2}secretPatterns +1 pattern +global configuration$/.test(line)), r.out.join("\n"))
-    assert.ok(r.out.some((line) => /^ {2}secretPatterns\.jwt +off +global configuration$/.test(line)))
-    assert.ok(r.out.includes("  secretPatterns[2]: no built-in format named nope"))
-    assert.match(run.pretty("show").out.join("\n"), /secretPatterns\.jwt +off +relaxes/)
+    assert.ok(r.out.some((line) => /^ {2}redactionOff\.jwt +off +global configuration$/.test(line)))
+    assert.ok(r.out.includes("  redactionOff[1] ignored: no built-in format named nope"))
+    assert.match(run.pretty("show").out.join("\n"), /redactionOff\.jwt +off +relaxes/)
   })
 
   it("RF-9: turning a format off changes what the decision model sees: compared with the global declaration", () => {
     const decision = { baseURL: "https://decision.local/v1", model: "nox-4b" }
     const grants = (effective: Json, global: Json) => parseConfig(effective, {}, declared(global)).config.modelGrants
-    assert.equal(grants({ decision, secretPatterns: [JWT_OFF] }, { decision, secretPatterns: [JWT_OFF] }), true)
+    assert.equal(grants({ decision, redactionOff: JWT_OFF }, { decision, redactionOff: JWT_OFF }), true)
     // The global file turns jwt off, the effective options do not: the model would not see what the global one sees.
-    assert.equal(grants({ decision }, { decision, secretPatterns: [JWT_OFF] }), false)
+    assert.equal(grants({ decision }, { decision, redactionOff: JWT_OFF }), false)
   })
   it("RF-10: the plugin applies a format turned off by the global configuration and says so on its start line; a project's is refused", async () => {
     const start = async (options: Json, global: Json) => {
@@ -179,12 +184,12 @@ describe("redaction formats", () => {
       const event = await fake.trigger("tool.execute.after", { sessionID: "s", agent: "build", messageID: "m", id: "c", tool: "bash", input: { command: "cat token" }, status: "completed", result: { output: FAKE_JWT, content: [{ type: "text", text: FAKE_JWT }] } })
       return { log: readFileSync(logFile, "utf8"), output: JSON.stringify(event.result) }
     }
-    const off = await start({ secretPatterns: [JWT_OFF] }, { secretPatterns: [JWT_OFF] })
+    const off = await start({ redactionOff: JWT_OFF }, { redactionOff: JWT_OFF })
     assert.match(off.log, /INFO active \(.*; redaction formats off: jwt[;)]/)
     assert.ok(off.output.includes(FAKE_JWT))
-    const refused = await start({ secretPatterns: [JWT_OFF] }, {})
+    const refused = await start({ redactionOff: JWT_OFF }, {})
     assert.ok(!refused.log.includes("redaction formats off"))
-    assert.match(refused.log, /WARN .*secretPatterns: turning off the built-in format jwt ignored/)
+    assert.match(refused.log, /WARN .*redactionOff: turning off the built-in format jwt ignored/)
     assert.ok(!refused.output.includes(FAKE_JWT))
   })
 })

@@ -30,7 +30,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
     detail: "in the global guard.json only",
     entries: [
       { usage: "rules off|ask|deny|model <rule>", text: 'set a built-in rule ("off" turns it off, "model" leaves its asks to the decision model)' },
-      { usage: "rules on <rule>", text: "remove the rule's setting there: it applies with its own verdict again" },
+      { usage: "rules reset <rule>", text: "remove the rule's setting there: it applies with its own verdict again" },
       { usage: "  --agent <name>", text: "in the section of this agent (main agent, or subagent)" },
       { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
       { usage: "redaction off|on <format>", text: "turn a built-in redaction format off, or back on (top level only)" },
@@ -41,7 +41,6 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
 ]
 
 const NOTES = [
-  'Also accepted: guard allow|off|ask|deny|model <rule> and guard reset <rule>, like guard rules off|ask|deny|model|on ("allow" is "off").',
   "Only the global guard.json is written (OpenCode's global configuration directory, from this terminal's environment).",
   "The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.",
 ]

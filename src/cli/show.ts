@@ -65,9 +65,9 @@ function redactionSettings(io: CliIo, sources: ReturnType<typeof readSources>): 
     const origin = sources.origin ?? "global configuration"
     const rows = [
       ...(config.secretPatterns.length ? [{ key: "secretPatterns", value: `${config.secretPatterns.length} pattern${config.secretPatterns.length === 1 ? "" : "s"}`, origin }] : []),
-      ...config.disabledPatterns.map((type) => ({ key: `secretPatterns.${type}`, value: "off", origin })),
+      ...config.disabledPatterns.map((type) => ({ key: `redactionOff.${type}`, value: "off", origin })),
     ]
-    return { rows, warnings: warnings.filter((warning) => warning.startsWith("secretPatterns")) }
+    return { rows, warnings: warnings.filter((warning) => warning.startsWith("secretPatterns") || warning.startsWith("redactionOff")) }
   } catch {
     return { rows: [], warnings: [] }
   }
@@ -147,7 +147,7 @@ const RELAXES = "relaxes"
  */
 function relaxes(key: string, value: string): boolean {
   if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
-  if (key.startsWith("secretPatterns.") || key.startsWith("redactionOff.")) return value === "off"
+  if (key.startsWith("redactionOff.")) return value === "off"
   if (PROTECTIVE.has(key)) return value === "false"
   if (key === "selfProtectionByModel") return value === "true"
   if (key === "localAsks") return value === "model"

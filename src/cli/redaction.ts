@@ -12,12 +12,12 @@ import { CliError, readSources, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment } from "./style.ts"
 
-/** The plugin's warnings about its `secretPatterns` option: each one starts with the option's name. */
-const PATTERNS_WARNING = /^(?:secretPatterns\b)/
+/** The plugin's warnings about its `secretPatterns` and `redactionOff` options: each one starts with the option's name. */
+const PATTERNS_WARNING = /^(?:secretPatterns|redactionOff)\b/
 const NOT_SHOWN =
   "Not shown: a project's opencode.json can add patterns of its own, and they then apply in that project (never turn a format off)."
 const TURN_OFF =
-  'Turned off by guard redaction off <format> (redactionOff in the global guard.json, back on with guard redaction on <format>), or by { "type": "<format>", "enabled": false } in secretPatterns of the global or system configuration (elsewhere: ignored, with a warning). Off, its patterns no longer redact anything: tool outputs, prompts (the prompt check may still mask such a value), the wire, the log; the rules no longer see it as a secret (secret-network and the like), and the decision model receives it in clear.'
+  'Turned off by guard redaction off <format> (redactionOff in the global guard.json, back on with guard redaction on <format>), or by "redactionOff": ["<format>"] in the plugin options of the global or system configuration (elsewhere: ignored, with a warning). Off, its patterns no longer redact anything: tool outputs, prompts (the prompt check may still mask such a value), the wire, the log; the rules no longer see it as a secret (secret-network and the like), and the decision model receives it in clear.'
 
 const source = (pattern: SecretPattern) => `/${pattern.regex.source}/${pattern.regex.flags}`
 

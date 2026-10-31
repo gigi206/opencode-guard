@@ -136,12 +136,12 @@ describe("lot 48 step E: model on a rule that only denies", () => {
     const w = await world()
     writeFileSync(w.guardFile, JSON.stringify({ agents: { plan: { selfProtectionByModel: true } } }))
     const before = readFileSync(w.guardFile, "utf8")
-    const r = w.run(["model", "placeholder", "--agent", "plan"])
+    const r = w.run(["rules", "model", "placeholder", "--agent", "plan"])
     assert.equal(r.code, 1, r.err)
     assert.ok(r.err.includes("refused, nothing written") && r.err.includes(WARNING), r.err)
     assert.equal(readFileSync(w.guardFile, "utf8"), before)
     // Guard: a rule that asks takes "model" where selfProtectionByModel is retained.
-    assert.equal(w.run(["model", "self-protection", "--agent", "plan"]).code, 0)
+    assert.equal(w.run(["rules", "model", "self-protection", "--agent", "plan"]).code, 0)
   })
 
   it("COR-6 (guard): no warning for model on a rule that asks", () => {

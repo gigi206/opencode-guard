@@ -74,12 +74,14 @@ function setting(word: string, args: readonly string[], io: CliIo): void {
 }
 
 function run(command: string, args: readonly string[], io: CliIo): void {
-  if ((SETTINGS as readonly string[]).includes(command) || command === "reset") return setting(command, args, io)
+  if ((SETTINGS as readonly string[]).includes(command) || command === "reset" || command === "allow")
+    throw new UsageError(`unknown command ${command} (a rule's setting: guard rules ${command === "allow" ? "off" : command} <rule>)`)
   switch (command) {
     case "rules": {
       // `rules <setting> <rule>`: the same as the top-level setting commands.
       const [word, ...rest] = args
-      if (word !== undefined && (SETTINGS as readonly string[]).concat("on", "reset").includes(word)) return setting(word === "on" ? "reset" : word, rest, io)
+      if (word !== undefined && (SETTINGS as readonly string[]).concat("reset").includes(word)) return setting(word, rest, io)
+      if (word === "on" || word === "allow") throw new UsageError(`unknown setting ${word} (guard rules ${word === "on" ? "reset" : "off"} <rule>)`)
       const parsed = parse(args, ["builtins", "custom", "explain"])
       expect(parsed, 0, 0, "")
       if (parsed.explain !== undefined) {

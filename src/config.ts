@@ -59,8 +59,8 @@ export interface GuardConfig {
   readonly cacheMax: number
   readonly secretPatterns: readonly SecretPattern[]
   /**
-   * Built-in formats turned off (`{ "type": …, "enabled": false }` in `secretPatterns`): only those the global or
-   * system configuration turns off too.
+   * Built-in formats turned off (`redactionOff` option): only those the global or system configuration turns off too;
+   * the global guard.json's are applied by the redactor while the plugin runs (`Version.redactionOff`).
    */
   readonly disabledPatterns: readonly string[]
   readonly allowlist: readonly string[]
@@ -295,13 +295,11 @@ function undeclaredModel(declarations: readonly PluginDeclaration[] | string, ef
 }
 
 /**
- * `secretPatterns` option: each entry an object `{ type, pattern }` or the pattern source alone (type `custom`), or
- * `{ type, enabled: false }`, which turns off a built-in format (every pattern of that type). An entry with a pattern and
- * `enabled: false` is a pattern of yours kept aside. Turning a format off is checked by `parseConfig` (global only).
+ * `secretPatterns` option: your own patterns, each entry an object `{ type, pattern }` or the pattern source alone (type
+ * `custom`); `enabled: false` keeps one aside. Built-in formats are turned off by `redactionOff`.
  */
-function secretPatternsOption(value: unknown, warnings: string[]): { patterns: SecretPattern[]; disabled: string[] } {
+function secretPatternsOption(value: unknown, warnings: string[]): SecretPattern[] {
   const patterns: SecretPattern[] = []
-  const disabled: string[] = []
   // A single value (object or string) instead of an array: reported, never silently ignored.
   if (value !== undefined && !Array.isArray(value)) warnings.push("secretPatterns must be an array, ignored")
   if (Array.isArray(value)) {
@@ -309,19 +307,13 @@ function secretPatternsOption(value: unknown, warnings: string[]): { patterns: S
       const entry: Record<string, unknown> = isRecord(item) ? item : { pattern: item }
       const name = `secretPatterns[${index}]`
       if (entry.enabled !== undefined && typeof entry.enabled !== "boolean") return warnings.push(`${name}: enabled must be true or false, entry ignored`)
-      if (entry.enabled === false && entry.pattern === undefined) {
-        const type = entry.type
-        if (typeof type !== "string" || !type) return warnings.push(`${name}: the built-in format to turn off is missing (type)`)
-        if (OPENCODE_FORMAT_SUMMARIES.has(type)) return warnings.push(`${name}: the built-in format ${type} cannot be turned off`)
-        if (!FORMAT_SUMMARIES.has(type)) return warnings.push(`${name}: no built-in format named ${type}`)
-        if (!disabled.includes(type)) disabled.push(type)
-        return
-      }
+      if (entry.pattern === undefined && typeof entry.type === "string" && (FORMAT_SUMMARIES.has(entry.type) || OPENCODE_FORMAT_SUMMARIES.has(entry.type)))
+        return warnings.push(`${name}: no pattern; ${entry.type} is a built-in format: turn it off with "${REDACTION_OFF}": ["${entry.type}"], entry ignored`)
       const compiled = regex(entry.pattern, "g", name, warnings)
       if (compiled && entry.enabled !== false) patterns.push({ type: typeof entry.type === "string" ? entry.type : "custom", regex: compiled })
     })
   }
-  return { patterns, disabled }
+  return patterns
 }
 
 /** Settings besides the address and model whose value, read from a plugin entry, differs from the effective one. */
@@ -332,6 +324,7 @@ function otherModelSettings(options: Readonly<Record<string, unknown>>, raw: Rea
   const headers = (config: ModelConfig) => JSON.stringify(Object.entries(Object.fromEntries(Object.entries(config.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]))).sort())
   const thresholds = thresholdsOption(options.thresholds, [])
   const declaredPatterns = secretPatternsOption(options.secretPatterns, [])
+  const declaredOff = redactionOffOption(options[REDACTION_OFF], "", [])
   const patterns = (list: readonly SecretPattern[]) => JSON.stringify(list.map(({ type, regex }) => [type, regex.source, regex.flags]))
   const differences: Array<[string, boolean]> = [
     ["decision.protocol", declared.protocol !== effective.decision.protocol],
@@ -339,7 +332,8 @@ function otherModelSettings(options: Readonly<Record<string, unknown>>, raw: Rea
     ["decision.apiKey", declared.apiKey !== effective.decision.apiKey],
     ["decision.headers", headers(declared) !== headers(effective.decision)],
     ["maxStateChars", maxStateCharsOption(options.maxStateChars, []) !== effective.maxStateChars],
-    ["secretPatterns", patterns(declaredPatterns.patterns) !== patterns(effective.secretPatterns) || [...declaredPatterns.disabled].sort().join() !== [...effective.disabledPatterns].sort().join()],
+    ["secretPatterns", patterns(declaredPatterns) !== patterns(effective.secretPatterns)],
+    [REDACTION_OFF, [...new Set(declaredOff)].sort().join() !== [...effective.disabledPatterns].sort().join()],
     ["thresholds", (Object.keys(DEFAULT_THRESHOLDS) as Array<keyof Thresholds>).some((key) => thresholds[key] !== effective.thresholds[key])],
   ]
   return differences.flatMap(([name, differs]) => (differs ? [name] : []))
@@ -537,6 +531,7 @@ const OPTION_KEYS = [
   "cacheTtlMs",
   "cacheMax",
   "secretPatterns",
+  "redactionOff",
   "allowlist",
   "rules",
   "unprotectedAgent",
@@ -713,10 +708,10 @@ function profileValue(value: unknown): Profile | undefined | null {
   return typeof value === "string" && (raw === "standard" || raw === "credentials-only") ? raw : null
 }
 
-/** Setting of one rule, any case, `allow` read as `off`; `undefined` otherwise. Same reading for the global file. */
+/** Setting of one rule, any case; `undefined` otherwise. Same reading for the global file. */
 function overrideValue(value: unknown): RuleOverride | undefined {
   const raw = text(value).toLowerCase()
-  return raw === "allow" ? "off" : raw === "off" || raw === "ask" || raw === "deny" || raw === "model" ? raw : undefined
+  return raw === "off" || raw === "ask" || raw === "deny" || raw === "model" ? raw : undefined
 }
 
 /** `localAsks` read like `askAs` (any case); `undefined`: not set; `null`: invalid. Same reading for the global file. */
@@ -726,11 +721,9 @@ function localAsksValue(value: unknown): "ask" | "model" | undefined | null {
   return typeof value === "string" && (raw === "ask" || raw === "model") ? raw : null
 }
 
-/** Setting as written (any case), for warnings: `allow` stays `allow`. */
-const writtenOverride = (value: unknown) => (text(value).toLowerCase() === "allow" ? "allow" : overrideValue(value))
 
 /**
- * `ruleOverrides`: built-in rule identifier → `off` (or `allow`, same setting), `ask`, `deny` or `model`. Ignored with a warning (never the value of another
+ * `ruleOverrides`: built-in rule identifier → `off`, `ask`, `deny` or `model`. Ignored with a warning (never the value of another
  * field): unknown identifier, invalid value, one of the user's rules (even under a built-in name: the setting would apply
  * to it), internal errors, `off` or `ask` on an always-active rule (`model` there: checked with `selfProtectionByModel`),
  * `model` on a rule that only denies (no ask to leave to the decision model).
@@ -739,7 +732,7 @@ function ruleOverridesOption(value: unknown, userRules: readonly CustomRule[], w
   const overrides = new Map<string, RuleOverride>()
   if (value === undefined || isEmpty(value)) return overrides
   if (!isRecord(value)) {
-    warnings.push('ruleOverrides must be an object (rule identifier: "off", "allow", "ask", "deny" or "model"), ignored')
+    warnings.push('ruleOverrides must be an object (rule identifier: "off", "ask", "deny" or "model"), ignored')
     return overrides
   }
   for (const [rule, raw] of Object.entries(value)) {
@@ -749,13 +742,13 @@ function ruleOverridesOption(value: unknown, userRules: readonly CustomRule[], w
     if (userRules.some((custom) => custom.id === rule)) warnings.push(`${name} ignored: it names one of your rules (set its verdict in rules)`)
     else if (rule === INTERNAL_ERROR_RULE) warnings.push(`${name} ignored: an internal error always asks`)
     else if (feature === undefined) warnings.push(`${name} ignored: unknown rule (identifiers are listed in docs/rules.md)`)
-    else if (!setting) warnings.push(`invalid value for ${name} (${shown(raw)}): "off", "allow", "ask", "deny" or "model" expected, ignored`)
+    else if (!setting) warnings.push(`invalid value for ${name} (${shown(raw)}): "off", "ask", "deny" or "model" expected, ignored`)
     else if (setting === "model" && USER_ONLY_RULES.has(rule))
       warnings.push(`${name} "model" ignored: this rule is about ${USER_ONLY_RULES.get(rule)}, never left to the decision model`)
     else if (setting === "model" && DENY_ONLY_RULES.has(rule))
       warnings.push(`${name} "model" ignored: this rule only denies, it has no confirmation to leave to the decision model`)
     else if (feature === "always" && setting !== "deny" && setting !== "model")
-      warnings.push(`${name} "${writtenOverride(raw)}" ignored: this rule is always active (only "deny" is accepted)`)
+      warnings.push(`${name} "${overrideValue(raw)}" ignored: this rule is always active (only "deny" is accepted)`)
     else overrides.set(rule, setting)
   }
   return overrides
@@ -811,12 +804,11 @@ export function parseConfig(
   inputs?: ScopeInputs,
 ): { config: GuardConfig; warnings: string[] } {
   const warnings: string[] = []
-  warnUnknown(Object.fromEntries(Object.entries(options).filter(([key]) => key !== REDACTION_OFF)), OPTION_KEYS, "", warnings)
-  if (options[REDACTION_OFF] !== undefined)
-    warnings.push(`${REDACTION_OFF} ignored: it is a key of the global guard.json; in opencode.json, turn a format off with secretPatterns { "type": "<format>", "enabled": false }`)
+  warnUnknown(options, OPTION_KEYS, "", warnings)
   const thresholds = thresholdsOption(options.thresholds, warnings)
 
-  const { patterns: secretPatterns, disabled: requestedOff } = secretPatternsOption(options.secretPatterns, warnings)
+  const secretPatterns = secretPatternsOption(options.secretPatterns, warnings)
+  const requestedOff = [...new Set(redactionOffOption(options[REDACTION_OFF], "", warnings))]
 
   const rules: CustomRule[] = []
   // A single rule (object) instead of an array: reported (a deny rule silently lost would be a hole).
@@ -914,8 +906,8 @@ export function parseConfig(
   // Built-in formats turned off: a relaxation (rules, wire, the model's view), counted only when the global or system
   // configuration turns them off too.
   const disabledPatterns = requestedOff.filter((type) => {
-    const why = refusal((declared) => secretPatternsOption(declared.secretPatterns, []).disabled.includes(type))
-    if (why) warnings.push(`secretPatterns: turning off the built-in format ${type} ignored: ${why}`)
+    const why = refusal((declared) => redactionOffOption(declared[REDACTION_OFF], "", []).includes(type))
+    if (why) warnings.push(`${REDACTION_OFF}: turning off the built-in format ${type} ignored: ${why}`)
     return !why
   })
   const modelUndeclared = decision ? undeclaredModel(loaded(), { decision, maxStateChars, thresholds, secretPatterns, disabledPatterns }) : "no decision model"
@@ -956,7 +948,7 @@ export function parseConfig(
     if (setting === "deny") continue
     const why = refusal((declaration) => isRecord(declaration.ruleOverrides) && overrideValue(declaration.ruleOverrides[rule]) === setting)
     if (why) {
-      certification.push(`ruleOverrides.${rule} "${writtenOverride((options.ruleOverrides as Record<string, unknown>)[rule])}" ignored: ${why}`)
+      certification.push(`ruleOverrides.${rule} "${overrideValue((options.ruleOverrides as Record<string, unknown>)[rule])}" ignored: ${why}`)
       overrides.delete(rule)
     }
   }
@@ -1026,15 +1018,15 @@ const GLOBAL_ONLY_KEYS = ["trustedProjects", "projects"]
 /** Built-in formats turned off, a key of the global guard.json only (`guard redaction off <format>` writes it). */
 export const REDACTION_OFF = "redactionOff"
 
-/** `redactionOff` of the global guard.json: built-in format names; the others are reported and ignored. */
+/** `redactionOff` (plugin options, global guard.json): built-in format names; the others are reported and ignored. */
 export function redactionOffOption(value: unknown, label: string, warnings: string[]): string[] {
   if (value === undefined) return []
   if (!Array.isArray(value)) {
-    warnings.push(`${label}: ${REDACTION_OFF} must be an array of built-in format names, ignored`)
+    warnings.push(`${label ? `${label}: ` : ""}${REDACTION_OFF} must be an array of built-in format names, ignored`)
     return []
   }
   return value.flatMap((type, index) => {
-    const where = `${label}: ${REDACTION_OFF}[${index}]`
+    const where = `${label ? `${label}: ` : ""}${REDACTION_OFF}[${index}]`
     if (typeof type !== "string" || !type) warnings.push(`${where} ignored: a format name expected`)
     else if (OPENCODE_FORMAT_SUMMARIES.has(type)) warnings.push(`${where} ignored: the built-in format ${type} cannot be turned off`)
     else if (!FORMAT_SUMMARIES.has(type)) warnings.push(`${where} ignored: no built-in format named ${type}`)
@@ -1280,7 +1272,7 @@ function readSection(value: Readonly<Record<string, unknown>>, where: string, ru
   const local: string[] = []
   for (const key of Object.keys(value))
     if (accepted.includes(key)) continue
-    else if (key === REDACTION_OFF) local.push(`${REDACTION_OFF} ignored: it counts only at the top level of the global guard.json`)
+    else if (key === REDACTION_OFF) local.push(`${REDACTION_OFF} ignored: it counts only in the global configuration (global opencode.json, system configuration) and at the top level of the global guard.json`)
     else if (GLOBAL_ONLY_KEYS.includes(key)) local.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
     else if (OPTION_KEYS.includes(key)) local.push(`${key} ignored: only the plugin options in opencode.json accept it`)
     else local.push(`unknown option ${key}, ignored`)
@@ -1378,7 +1370,7 @@ function scopeLayers(
     const value = parsed.overrides.get(rule) ?? "none"
     if (value === (globalRules.get(`rule:${rule}`) ?? "none")) continue
     const matches = (declaration: Readonly<Record<string, unknown>>) => ((isRecord(declaration.ruleOverrides) && overrideValue(declaration.ruleOverrides[rule])) || "none") === value
-    ops.push({ key: `rule:${rule}`, value, text: value === "none" ? `ruleOverrides.${rule} unset` : `ruleOverrides.${rule} "${writtenOverride(written[rule])}"`, certify: () => refusal(matches), ...label })
+    ops.push({ key: `rule:${rule}`, value, text: value === "none" ? `ruleOverrides.${rule} unset` : `ruleOverrides.${rule} "${overrideValue(written[rule])}"`, certify: () => refusal(matches), ...label })
   }
   const asks = localAsksValue(options.localAsks) || "ask"
   if (asks !== (globalFile.top.entries.get("localAsks") ?? "ask") || (localAsksValue(options.localAsks) && !globalFile.top.entries.has("localAsks")))

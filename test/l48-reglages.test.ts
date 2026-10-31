@@ -167,24 +167,14 @@ describe("lot 48 step B: ruleOverrides", () => {
   })
 })
 
-describe("lot 48 step B: allow, same setting as off", () => {
-  it("RGL-13: allow turns the rule off, other rules still apply; same limits as off; compared with off once normalized", async () => {
-    // Effective `allow`, global `off`, and the reverse: the same setting.
-    const allowed = policyOf({ ruleOverrides: { "git-reset-hard": "Allow" } }, declaredBy({ ruleOverrides: { "git-reset-hard": "off" } }))
-    assert.equal(shell("git reset --hard", allowed), undefined)
-    assert.deepEqual(brief(shell("git reset --hard; git clean -fdx", allowed)), ["ask", "git-clean", false])
-    assert.equal(shell("git reset --hard", policyOf({ ruleOverrides: { "git-reset-hard": "off" } }, declaredBy({ ruleOverrides: { "git-reset-hard": "allow" } }))), undefined)
-    const alone = await decide({ ruleOverrides: { "dd-device": "allow" } }, declaredBy({ ruleOverrides: { "dd-device": "allow" } }), "dd if=/dev/zero of=/dev/sda bs=1M")
-    assert.deepEqual([alone.verdict, alone.source, alone.rule], ["allow", "default", undefined])
-    // Not declared globally: ignored, the ask remains.
-    const project = configOf({ ruleOverrides: { "git-reset-hard": "allow" } }, declaredBy({}))
-    assert.ok(project.warnings.some((line) => line.startsWith('ruleOverrides.git-reset-hard "allow" ignored: a relaxation counts only if the global or system configuration sets it too')), project.warnings.join("\n"))
-    assert.deepEqual(brief(shell("git reset --hard", (project.config as { policy?: ActiveRules }).policy)), ["ask", "git-reset-hard", false])
-    const custom = [{ id: "no-deploy", pattern: "deploy --prod", verdict: "deny", reason: "no deploy" }]
-    const refused = configOf({ rules: custom, ruleOverrides: { "self-protection": "allow", "internal-error": "allow", "no-deploy": "allow" } }, declaredBy({ ruleOverrides: { "self-protection": "allow", "internal-error": "allow", "no-deploy": "allow" } }))
-    for (const start of ['ruleOverrides.self-protection "allow" ignored: this rule is always active', "ruleOverrides.internal-error ignored", 'ruleOverrides["no-deploy"] ignored: it names one of your rules'])
-      assert.ok(refused.warnings.some((line) => line.startsWith(start)), `${start}\n${refused.warnings.join("\n")}`)
-    assert.deepEqual(brief(shell("echo '{}' > ~/.config/opencode/opencode.json", (refused.config as { policy?: ActiveRules }).policy)), ["ask", "self-protection", false])
+describe("lot 48 step B: allow is not a setting", () => {
+  it("RGL-13: \"allow\" is an invalid value, reported: the rule keeps its own verdict, wherever it is written", () => {
+    const declared = declaredBy({ ruleOverrides: { "git-reset-hard": "allow" } })
+    const written = configOf({ ruleOverrides: { "git-reset-hard": "Allow" } }, declared)
+    assert.ok(written.warnings.some((line) => line.startsWith('invalid value for ruleOverrides.git-reset-hard ("Allow"): "off", "ask", "deny" or "model" expected, ignored')), written.warnings.join("\n"))
+    assert.deepEqual(brief(shell("git reset --hard", (written.config as { policy?: ActiveRules }).policy)), ["ask", "git-reset-hard", false])
+    // "off" is the setting that turns it off, declared globally.
+    assert.equal(shell("git reset --hard", policyOf({ ruleOverrides: { "git-reset-hard": "off" } }, declaredBy({ ruleOverrides: { "git-reset-hard": "off" } }))), undefined)
   })
 })
 

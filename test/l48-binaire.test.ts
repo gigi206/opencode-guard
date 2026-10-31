@@ -135,12 +135,12 @@ describe("lot 48 step D: the command line", () => {
     assert.equal(rules.status, 0, rules.stderr)
     assert.equal(rules.stderr, "")
     assert.equal(rules.stdout.trim().split("\n").length, RULE_FEATURES.size)
-    const allow = run("allow", "eval")
+    const allow = run("rules", "off", "eval")
     assert.equal(allow.status, 0, allow.stderr)
     assert.ok(allow.stdout.includes(w.guardFile))
-    assert.deepEqual(w.read(), { ruleOverrides: { eval: "allow" } })
+    assert.deepEqual(w.read(), { ruleOverrides: { eval: "off" } })
     assert.equal(run("frobnicate").status, 2)
-    assert.equal(run("allow", "nope").status, 1)
+    assert.equal(run("rules", "off", "nope").status, 1)
     assert.equal(run().status, 2)
   })
 
@@ -165,61 +165,61 @@ describe("lot 48 step D: the command line", () => {
 
   it("BIN-3: creation, addition, --agent, --project (git root or given), both, removal; unknown keys and mode kept, emptied objects removed", async () => {
     const w = await world()
-    let r = w.run(["allow", "eval"])
+    let r = w.run(["rules", "off", "eval"])
     assert.equal(r.code, 0, r.err)
-    assert.equal(r.out, `ruleOverrides.eval set to "allow" in the top level of ${w.guardFile}`)
+    assert.equal(r.out, `ruleOverrides.eval set to "off" in the top level of ${w.guardFile}`)
     assert.equal(statSync(w.guardFile).mode & 0o777, 0o600)
-    assert.equal(w.run(["deny", "git-reset-hard", "--agent", "build"]).code, 0)
-    assert.equal(w.run(["ask", "rm", "--project"], join(w.project, "sub", "deep")).code, 0)
-    assert.equal(w.run(["model", "privilege", "--project", w.home]).code, 0)
-    assert.equal(w.run(["off", "kill", "--agent", "plan", "--project", "."]).code, 0)
+    assert.equal(w.run(["rules", "deny", "git-reset-hard", "--agent", "build"]).code, 0)
+    assert.equal(w.run(["rules", "ask", "rm", "--project"], join(w.project, "sub", "deep")).code, 0)
+    assert.equal(w.run(["rules", "model", "privilege", "--project", w.home]).code, 0)
+    assert.equal(w.run(["rules", "off", "kill", "--agent", "plan", "--project", "."]).code, 0)
     assert.deepEqual(w.read(), {
-      ruleOverrides: { eval: "allow" },
+      ruleOverrides: { eval: "off" },
       agents: { build: { ruleOverrides: { "git-reset-hard": "deny" } } },
       projects: { [w.project]: { ruleOverrides: { rm: "ask" }, agents: { plan: { ruleOverrides: { kill: "off" } } } }, [w.home]: { ruleOverrides: { privilege: "model" } } },
     })
-    r = w.run(["allow", "eval"])
+    r = w.run(["rules", "off", "eval"])
     assert.equal(r.code, 0)
-    assert.match(r.out, /is already "allow" .*: nothing changed/)
+    assert.match(r.out, /is already "off" .*: nothing changed/)
     // Removal: emptied objects removed, the others kept.
-    assert.equal(w.run(["reset", "kill", "--project", w.project, "--agent", "plan"]).code, 0)
-    assert.equal(w.run(["reset", "privilege", "--project", w.home]).code, 0)
-    assert.deepEqual(w.read(), { ruleOverrides: { eval: "allow" }, agents: { build: { ruleOverrides: { "git-reset-hard": "deny" } } }, projects: { [w.project]: { ruleOverrides: { rm: "ask" } } } })
-    for (const args of [["reset", "eval"], ["reset", "git-reset-hard", "--agent", "build"], ["reset", "rm", "--project"]]) assert.equal(w.run(args).code, 0, args.join(" "))
+    assert.equal(w.run(["rules", "reset", "kill", "--project", w.project, "--agent", "plan"]).code, 0)
+    assert.equal(w.run(["rules", "reset", "privilege", "--project", w.home]).code, 0)
+    assert.deepEqual(w.read(), { ruleOverrides: { eval: "off" }, agents: { build: { ruleOverrides: { "git-reset-hard": "deny" } } }, projects: { [w.project]: { ruleOverrides: { rm: "ask" } } } })
+    for (const args of [["rules", "reset", "eval"], ["rules", "reset", "git-reset-hard", "--agent", "build"], ["rules", "reset", "rm", "--project"]]) assert.equal(w.run(args).code, 0, args.join(" "))
     assert.deepEqual(w.read(), {})
-    r = w.run(["reset", "eval"])
+    r = w.run(["rules", "reset", "eval"])
     assert.equal(r.code, 0)
     assert.match(r.out, /is not set in the top level of .*: nothing changed/)
     // Unknown keys and the file's mode kept.
     writeFileSync(w.guardFile, JSON.stringify({ note: "mine", agents: { build: { comment: 1, ruleOverrides: { eval: "deny" } } } }))
     chmodSync(w.guardFile, 0o640)
-    assert.equal(w.run(["reset", "eval", "--agent", "build"]).code, 0)
-    assert.equal(w.run(["ask", "kill"]).code, 0)
+    assert.equal(w.run(["rules", "reset", "eval", "--agent", "build"]).code, 0)
+    assert.equal(w.run(["rules", "ask", "kill"]).code, 0)
     assert.deepEqual(w.read(), { note: "mine", agents: { build: { comment: 1 } }, ruleOverrides: { kill: "ask" } })
     assert.equal(statSync(w.guardFile).mode & 0o777, 0o640)
     assert.deepEqual(readdirSync(w.globalDir).sort(), ["guard.json"])
     // Still set by the global opencode.json: said after the removal.
     const set = await world({ global: { ruleOverrides: { eval: "deny" } } })
     writeFileSync(set.guardFile, JSON.stringify({ ruleOverrides: { eval: "ask" } }))
-    r = set.run(["reset", "eval"])
+    r = set.run(["rules", "reset", "eval"])
     assert.equal(r.code, 0)
     assert.match(r.out, /ruleOverrides\.eval is still "deny" there, set by global configuration/)
     // A directory that does not exist: refused.
-    assert.equal(set.run(["allow", "eval", "--project", join(set.root, "missing")]).code, 1)
+    assert.equal(set.run(["rules", "off", "eval", "--project", join(set.root, "missing")]).code, 1)
   })
 
   it("BIN-4: refused values, with the plugin's reason, nothing written", async () => {
     const w = await world({ global: { rules: [{ id: "no-deploy", verdict: "ask", pattern: "deploy" }] } })
     writeFileSync(w.guardFile, '{"keep": true}\n')
     for (const [args, reason] of [
-      [["allow", "nope"], 'ruleOverrides["nope"] ignored: unknown rule'],
-      [["deny", "internal-error"], "ruleOverrides.internal-error ignored: an internal error always asks"],
-      [["allow", "no-deploy"], 'ruleOverrides["no-deploy"] ignored: it names one of your rules'],
-      [["off", "self-protection"], 'ruleOverrides.self-protection "off" ignored: this rule is always active (only "deny" is accepted)'],
-      [["allow", "placeholder"], 'ruleOverrides.placeholder "allow" ignored: this rule is always active'],
-      [["ask", "guard-cli"], 'ruleOverrides.guard-cli "ask" ignored: this rule is always active'],
-      [["model", "self-protection"], 'ruleOverrides.self-protection "model" ignored: this rule is always active ("model" needs selfProtectionByModel)'],
-      [["model", "guard-cli"], 'ruleOverrides.guard-cli "model" ignored: this rule is about a change of the plugin\'s settings, never left to the decision model'],
+      [["rules", "off", "nope"], 'ruleOverrides["nope"] ignored: unknown rule'],
+      [["rules", "deny", "internal-error"], "ruleOverrides.internal-error ignored: an internal error always asks"],
+      [["rules", "off", "no-deploy"], 'ruleOverrides["no-deploy"] ignored: it names one of your rules'],
+      [["rules", "off", "self-protection"], 'ruleOverrides.self-protection "off" ignored: this rule is always active (only "deny" is accepted)'],
+      [["rules", "off", "placeholder"], 'ruleOverrides.placeholder "off" ignored: this rule is always active'],
+      [["rules", "ask", "guard-cli"], 'ruleOverrides.guard-cli "ask" ignored: this rule is always active'],
+      [["rules", "model", "self-protection"], 'ruleOverrides.self-protection "model" ignored: this rule is always active ("model" needs selfProtectionByModel)'],
+      [["rules", "model", "guard-cli"], 'ruleOverrides.guard-cli "model" ignored: this rule is about a change of the plugin\'s settings, never left to the decision model'],
     ] as const) {
       const r = w.run(args)
       assert.equal(r.code, 1, args.join(" "))
@@ -228,14 +228,14 @@ describe("lot 48 step D: the command line", () => {
     }
     // "model" on an always-active rule: only where selfProtectionByModel is retained, never for guard-cli.
     writeFileSync(w.guardFile, JSON.stringify({ agents: { plan: { selfProtectionByModel: true } } }))
-    assert.equal(w.run(["model", "self-protection", "--agent", "build"]).code, 1)
-    assert.equal(w.run(["model", "self-protection"]).code, 1)
-    assert.equal(w.run(["model", "self-protection", "--agent", "plan"]).code, 0)
-    assert.equal(w.run(["model", "guard-cli", "--agent", "plan"]).code, 1)
-    assert.equal(w.run(["deny", "guard-cli"]).code, 0)
+    assert.equal(w.run(["rules", "model", "self-protection", "--agent", "build"]).code, 1)
+    assert.equal(w.run(["rules", "model", "self-protection"]).code, 1)
+    assert.equal(w.run(["rules", "model", "self-protection", "--agent", "plan"]).code, 0)
+    assert.equal(w.run(["rules", "model", "guard-cli", "--agent", "plan"]).code, 1)
+    assert.equal(w.run(["rules", "deny", "guard-cli"]).code, 0)
     assert.deepEqual(w.read(), { agents: { plan: { selfProtectionByModel: true, ruleOverrides: { "self-protection": "model" } } }, ruleOverrides: { "guard-cli": "deny" } })
     // Usage errors.
-    for (const args of [["allow"], ["allow", "eval", "extra"], ["allow", "eval", "--agent"], ["allow", "eval", "--path", "x"], ["show", "x"], ["trust", "a", "b"]]) assert.equal(w.run(args).code, 2, args.join(" "))
+    for (const args of [["rules", "off"], ["rules", "off", "eval", "extra"], ["rules", "off", "eval", "--agent"], ["rules", "off", "eval", "--path", "x"], ["show", "x"], ["trust", "a", "b"]]) assert.equal(w.run(args).code, 2, args.join(" "))
   })
 
   it("BIN-5: a file the plugin would ignore is never replaced (link, invalid, not an object, too large, not a regular file); nor a misshapen section", async () => {
@@ -252,7 +252,7 @@ describe("lot 48 step D: the command line", () => {
       const w = await world()
       prepare(w)
       const before = lstatSync(w.guardFile)
-      const r = w.run(["allow", "eval"])
+      const r = w.run(["rules", "off", "eval"])
       assert.equal(r.code, 1, name)
       assert.ok(r.err.includes(`${w.guardFile} is left as is: ${reason}`), r.err)
       const after = lstatSync(w.guardFile)
@@ -260,10 +260,10 @@ describe("lot 48 step D: the command line", () => {
       if (name === "link") assert.equal(readFileSync(join(w.root, "target.json"), "utf8"), "{}")
     }
     for (const [content, args, reason] of [
-      [{ agents: "x" }, ["allow", "eval", "--agent", "build"], '"agents" in the global guard.json is not an object'],
-      [{ ruleOverrides: [] }, ["allow", "eval"], "ruleOverrides in the top level of the global guard.json is not an object"],
+      [{ agents: "x" }, ["rules", "off", "eval", "--agent", "build"], '"agents" in the global guard.json is not an object'],
+      [{ ruleOverrides: [] }, ["rules", "off", "eval"], "ruleOverrides in the top level of the global guard.json is not an object"],
       [{ trustedProjects: "/x" }, ["trust"], 'trustedProjects in the global guard.json is neither "*" nor a list'],
-      [{ pad: "x".repeat(65_490) }, ["allow", "eval"], "would be larger than 65536 bytes"],
+      [{ pad: "x".repeat(65_490) }, ["rules", "off", "eval"], "would be larger than 65536 bytes"],
     ] as const) {
       const w = await world()
       const text = JSON.stringify(content)
@@ -329,11 +329,11 @@ describe("lot 48 step D: effect without a restart", () => {
     const w = await world()
     const p = await plugin(w)
     assert.equal(await p.verdict("git reset --hard"), "ask")
-    assert.equal(w.run(["allow", "git-reset-hard"]).code, 0)
+    assert.equal(w.run(["rules", "off", "git-reset-hard"]).code, 0)
     p.tick()
     assert.equal(await p.verdict("git reset --hard"), "allow")
     assert.equal(await p.verdict("sudo ls", "ses_1", "plan"), "ask")
-    assert.equal(w.run(["allow", "privilege", "--agent", "plan"]).code, 0)
+    assert.equal(w.run(["rules", "off", "privilege", "--agent", "plan"]).code, 0)
     p.tick()
     // Main agent not recorded yet: only the hardenings of the calling agent's section.
     assert.equal(await p.verdict("sudo ls", "ses_1", "plan"), "ask")
@@ -460,7 +460,7 @@ describe("lot 48 step D: guard-cli, the command line asks", () => {
       "guard rules",
       "guard show",
       "guard last 5",
-      "guard allow eval --agent build",
+      "guard rules off eval --agent build",
       "/usr/local/bin/guard trust --all",
       "~/.local/bin/guard untrust",
       "sudo guard reset eval",
@@ -489,7 +489,7 @@ describe("lot 48 step D: guard-cli, the command line asks", () => {
     const options = { ...BY_MODEL, ruleOverrides: { "guard-cli": "model" } }
     assert.ok(relaxed(options).warnings.includes('ruleOverrides.guard-cli "model" ignored: this rule is about a change of the plugin\'s settings, never left to the decision model'))
     assert.deepEqual(shell("guard rules", { active: policyOf(options) }), ["ask", "guard-cli", false])
-    const decision = await decide(options, "shell", { command: "guard allow eval" })
+    const decision = await decide(options, "shell", { command: "guard rules off eval" })
     assert.deepEqual([decision.verdict, decision.rule], ["ask", "guard-cli"])
     assert.deepEqual(shell("guard rules", { active: policyOf({ ruleOverrides: { "guard-cli": "deny" } }) }), ["deny", "guard-cli", false])
   })
