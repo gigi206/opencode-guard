@@ -131,7 +131,7 @@ On 2026-10-17 and 18, seven models were scored on a bench of 34 tool calls with 
 | Model | With the defaults | Recommended `thresholds` | With them | With the two rules | Notes |
 |---|---|---|---|---|---|
 | `nox-4b` | 26/34 | `{ "askRisk": 1.2, "denyRisk": 2.2 }` | 30/34 | 32/34 | the current default; indulgent on risk-only cases (installs, `crontab`, `curl \| bash`), which these thresholds turn into confirmations |
-| `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models: over-strict with the defaults, about 1.3 s per call with 26 of its 32 layers on a 4 GB GPU (`systemone` path), the configuration that leaves room for the batch of 4096 tokens the plugin's requests need |
+| `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models: over-strict with the defaults, about 1.3 s per call with 26 of its 32 layers on the GPU (`systemone` path) |
 | `d3-nano` | 23/34 | `{ "denyNoul": 0.94, "denyRisk": 2.2, "askRisk": 1.2 }` | 25/34 | 27/34 | below `nox-4b` |
 | `d3-lite` | 21/34 | `{ "askRisk": 1.2 }` | 23/34 | 24/34 | below `nox-4b` |
 | `d3-edge` | 22/34 | `{ "denyNoul": 0.86, "askNoul": 0.6 }` | 25/34 | 27/34 | identical verdicts on CPU and GPU, 884 MiB and about 0.1 s per call on a 4 GB GPU (about 1.4 s on CPU); denies two benign network commands, indulgent on installs |
@@ -146,11 +146,11 @@ The values do not transfer from one model to another: the `0.94` would drop thre
 
 The repository ships `tools/serve.sh`, a service script for the whole Decision 3.0 family. It exposes the same `POST /v1/systemone` API on port 8899 and drives three backends:
 
-- **`llama`** — `llama-server` plus a quantized GGUF, no Python venv and no kernels to compile. The recommended path on a small GPU. A request must fit whole in one batch (`-ub`, with `-b` at least as large): the plugin sends inputs of up to 4,000 characters (plus the scripts it runs) and prompt parts of 2,000, so the script uses a batch of 4,096 tokens; a smaller batch makes the server reject the longer requests, which the plugin then treats as a model failure (a confirmation). On a 4 GB card, that batch leaves room for 26 of `d3-mini` Q4_K_M's 32 layers (3,712 MiB used) and 8 of `d3-flash` Q4_K_M's.
+- **`llama`** — `llama-server` plus a quantized GGUF, no Python venv and no kernels to compile. The recommended path on a small GPU. A request must fit whole in one batch (`-ub`, with `-b` at least as large): the plugin sends inputs of up to 4,000 characters (plus the scripts it runs) and prompt parts of 2,000, so the script uses a batch of 4,096 tokens; a smaller batch makes the server reject the longer requests, which the plugin then treats as a model failure (a confirmation). Then as many layers on the GPU as the free VRAM allows (see below).
 - **`native`** (default) — the model's own Transformers runtime (`d3_server.py`) in a local venv, with the kernels compiled from source; `d3-edge` uses about 2.3 GiB of VRAM.
 - **`engine`** (alias `container`) — `vllm-sr serve -e` in a Docker or Podman container, with batching; `d3-edge` uses about 1.75 GiB of VRAM. The dev CLI is pinned at first install and checked on every start (a different version needs `--yes` or `VLLM_SR_VERSION`), and the mode refuses the CPU fallback: use `--gpu` or `native --cpu`.
 
-One command downloads the artifact, checks the VRAM, stops the service already on the port, starts the backend, verifies `/v1/systemone`, and prints the plugin entry. For `d3-mini` Q4_K_M (4.5B, 32 layers, 3.7 GB), the best local model measured for its speed, with 26 of its 32 layers on a 4 GB GPU:
+One command downloads the artifact, checks the VRAM, stops the service already on the port, starts the backend, verifies `/v1/systemone`, and prints the plugin entry. For `d3-mini` Q4_K_M (4.5B, 32 layers, 3.7 GB), the best local model measured for its speed:
 
 ```sh
 bash tools/serve.sh llama --model d3-mini --yes
@@ -192,7 +192,7 @@ In the global `~/.config/opencode/opencode.json` (a project file may be applied 
 }
 ```
 
-`model` must match the server's `--alias` (`d3-mini` here; the script prints the exact block at startup). `timeoutMs` is per call and mandatory; `5000` is enough for `d3-mini` on short calls, use `8000` for `d3-flash`. On a 4 GB card, a long call takes much more with `d3-mini`: about 1.1 s for a 2,000-character prompt part, but 9 to 14 s for a decision on a 4,000-character input, beyond `5000` (the call then fails and the plugin asks for confirmation); a larger `timeoutMs` has it judged, at the cost of the wait. This `decision` block replaces the Nox-4B one from [Installation](../README.md#installation); thresholds, rules and the other options are independent of the model. For `d3-mini`, add under `options` the recommended set from the table above — `"thresholds": { "denyNoul": 0.94, "denyRisk": 2.8 }` — rather than the Nox-4B defaults (31/34 instead of 28/34; 33/34 with the two rules). OpenCode reads the configuration when the server starts, so restart it after editing the file.
+`model` must match the server's `--alias` (`d3-mini` here; the script prints the exact block at startup). `timeoutMs` is per call and mandatory; `5000` is enough for `d3-mini` on short calls, use `8000` for `d3-flash`. A long call takes much more when part of the model runs on the CPU: with 26 of `d3-mini`'s 32 layers on the GPU, about 1.1 s for a 2,000-character prompt part, but 9 to 14 s for a decision on a 4,000-character input, beyond `5000` (the call then fails and the plugin asks for confirmation); a larger `timeoutMs` has it judged, at the cost of the wait. This `decision` block replaces the Nox-4B one from [Installation](../README.md#installation); thresholds, rules and the other options are independent of the model. For `d3-mini`, add under `options` the recommended set from the table above — `"thresholds": { "denyNoul": 0.94, "denyRisk": 2.8 }` — rather than the Nox-4B defaults (31/34 instead of 28/34; 33/34 with the two rules). OpenCode reads the configuration when the server starts, so restart it after editing the file.
 
 For manual control, download the GGUF and start the same server yourself:
 
@@ -201,13 +201,13 @@ HF_HUB_DISABLE_XET=1 hf download ggml-org/vllm-d3-mini-GGUF \
   --include vllm-d3-mini-Q4_K_M.gguf --local-dir models/d3-mini
 ```
 
-Two options control whether the server fits on the GPU: `-ngl` is the number of layers kept on the GPU (`99` means all of them), and `-ub` is the batch used for prompt processing, which sizes the CUDA compute buffers. These models read a request in one batch, so `-ub` (and `-b`, whose default is 2048) must hold the longest request the plugin sends: 4096 tokens. A larger batch takes VRAM that layers would use. On the 4 GB card used for these measurements:
+Two options control whether the server fits on the GPU: `-ngl` is the number of layers kept on the GPU (`99` means all of them), and `-ub` is the batch used for prompt processing, which sizes the CUDA compute buffers. These models read a request in one batch, so `-ub` (and `-b`, whose default is 2048) must hold the longest request the plugin sends: 4096 tokens. A larger batch takes VRAM that layers would use. The optimal parameters:
 
 ```sh
-# d3-mini Q4_K_M: 26 of 32 layers on the GPU, batch of 4096 tokens.
-# 3,712 MiB used; about 1.1 s for a 2,000-character prompt part.
+# d3-mini Q4_K_M, batch of 4096 tokens; -ngl: every layer that fits in the free VRAM
+# (99 = all 32, about 4.4 GiB estimated; 26 layers: 3.7 GiB; 20: 3.2 GiB).
 llama-server -m models/d3-mini/vllm-d3-mini-Q4_K_M.gguf --alias d3-mini --port 8899 \
-  -c 8192 -b 4096 -ub 4096 -np 1 -ngl 26 --no-webui
+  -c 8192 -b 4096 -ub 4096 -np 1 -ngl 99 --no-webui
 ```
 
 The bench harness behind the table above lives in `tools/model-bench/` (see its README). `run_local_gpu.sh` starts the same server on port 8099, runs the 34 cases, then stops it:
@@ -217,7 +217,7 @@ bash tools/model-bench/run_local_gpu.sh d3-mini \
   models/d3-mini/vllm-d3-mini-Q4_K_M.gguf 26 /tmp/mini-gpu.jsonl 4096
 ```
 
-`model` must equal the `--alias`. With a batch of 4096, `-ngl 28` and above do not load on 4 GB; `-ngl 24` (3,522 MiB) and `-ngl 20` (3,166 MiB) leave more headroom for another CUDA process, a little slower. A batch of 8192 (for a decision with several long scripts, about 6,600 tokens) fits only with `-ngl 16`, slower on every call. The lighter models fit entirely with `-ngl 99` and a batch of 4096: `d3-nano` Q8_0 (~2.4 GiB), `d3-lite` Q8_0 (~1.2 GiB) and `d3-edge` Q8_0 (~0.9 GiB). `d3-flash` Q4_K_M is 6.6 GB and does not fit entirely on 4 GB; with a batch of 4096 it runs with `-ngl 8`, about 2.1 s for a 2,000-character part.
+`model` must equal the `--alias`. Each layer moved to the CPU slows every call; keep the batch at 4096 and lower `-ngl` until the server loads (`tools/serve.sh` defaults to 26, which needs 3.7 GiB). A batch of 8192 (for a decision with several long scripts, about 6,600 tokens) fits only with `-ngl 16`, slower on every call. The lighter models fit entirely with `-ngl 99` and a batch of 4096: `d3-nano` Q8_0 (~2.4 GiB), `d3-lite` Q8_0 (~1.2 GiB) and `d3-edge` Q8_0 (~0.9 GiB). `d3-flash` Q4_K_M is 6.6 GB and does not fit entirely on 4 GB; with a batch of 4096 it runs with `-ngl 8`, about 2.1 s for a 2,000-character part.
 
 **Shared blind spots.** Every model in the table allows an in-place file edit (`sed -i`) and misses a secret looked up in the shell history (`history | grep`). Two [custom rules](configuration.md#configuration-reference) settle both for any model, before it is called:
 

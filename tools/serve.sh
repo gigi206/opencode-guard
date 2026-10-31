@@ -24,9 +24,9 @@
 #                     (-ub, and -b set to the same value) is 4096 tokens by default,
 #                     enough for the plugin's requests (input up to 4000 characters,
 #                     prompt parts of 2000); a smaller one rejects them (the model then
-#                     fails and the plugin asks for confirmation). On a 4 GB card,
-#                     d3-mini Q4_K_M runs with 26 of its 32 layers on the GPU (~3.7 GB)
-#                     and d3-flash Q4_K_M with 8. The script downloads the GGUF from
+#                     fails and the plugin asks for confirmation). Default layers on the
+#                     GPU: 26 of d3-mini Q4_K_M's 32 (~3.7 GB of VRAM; --ngl 99 for all
+#                     of them, ~4.4 GB estimated) and 8 for d3-flash Q4_K_M. The script downloads the GGUF from
 #                     ggml-org/vllm-d3-<model>-GGUF, automatically stops a recognized
 #                     local service on the port, checks VRAM, starts, then tests
 #                     /v1/systemone. --keep leaves the existing service running,
@@ -187,7 +187,7 @@ if [ -z "$HOME_DIR" ]; then
 fi
 MODEL_DIR="${LOCAL_DIR:-$HOME_DIR/models/$MODEL_REPO}"
 
-# llama mode: defaults measured on the 4 GB card. Explicit options (--quant, --ngl,
+# llama mode: defaults for about 4 GB of VRAM (more VRAM: raise --ngl). Explicit options (--quant, --ngl,
 # --ub, --ctx) win.
 if [ "$MODE" = llama ]; then
   [ -z "$GGUF_ARG" ] || GGUF_ARG="${GGUF_ARG/#\~/$HOME}"
