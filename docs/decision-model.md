@@ -126,17 +126,19 @@ The questions that decide actions (risk, destruction, exfiltration…) are not s
 
 ## Measured models
 
-On 2026-10-17 and 18, seven models were scored on a bench of 34 tool calls with hand-checked verdicts (10 benign, 8 modifying, 8 dangerous, 8 trickier shell and tool payloads; 30 unambiguous, 4 debatable). Every model gets the same redacted inputs, and its answers alone are mapped to verdicts with the thresholds above — the local rules are identical for every model and would hide the differences. The d3 models were served locally by llama.cpp (`systemone` path), `nox-4b` through an OpenAI-compatible gateway. "Recommended" is the best threshold set found on that bench while keeping all ten expected refusals; the last column adds the two rules below, which apply before the model is called.
+On 2026-10-17 and 18, seven models were scored on a bench of 34 tool calls with hand-checked verdicts (10 benign, 8 modifying, 8 dangerous, 8 trickier shell and tool payloads; 30 unambiguous, 4 debatable). `d1-2B` was added on 2026-11-01, on the same bench. Every model gets the same redacted inputs, and its answers alone are mapped to verdicts with the thresholds above — the local rules are identical for every model and would hide the differences. The d3 models were served locally by llama.cpp (`systemone` path), `nox-4b` through an OpenAI-compatible gateway, `d1-2B` through its official GGUF in llama.cpp b12024 and through Transformers 5.22 (CPU, and 8-bit on the GPU). "Recommended" is the best threshold set found on that bench while keeping all ten expected refusals; the last column adds the two rules below, which apply before the model is called.
 
 | Model | With the defaults | Recommended `thresholds` | With them | With the two rules | Notes |
 |---|---|---|---|---|---|
 | `nox-4b` | 26/34 | `{ "askRisk": 1.2, "denyRisk": 2.2 }` | 30/34 | 32/34 | the current default; indulgent on risk-only cases (installs, `crontab`, `curl \| bash`), which these thresholds turn into confirmations |
 | `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models, and the minimum recommended for a local decision model: over-strict with the defaults |
+| `d3-flash` (Q4_K_M) | 26/34 | `{ "denyNoul": 0.98 }` | 30/34 | 30/34 | measured on the same bench; Q4_K_M with 8 layers on a 4 GB GPU; errors m04, t03, t05, t08 |
 | `d3-nano` | 23/34 | `{ "denyNoul": 0.94, "denyRisk": 2.2, "askRisk": 1.2 }` | 25/34 | 27/34 | below `nox-4b` |
 | `d3-lite` | 21/34 | `{ "askRisk": 1.2 }` | 23/34 | 24/34 | below `nox-4b` |
 | `d3-edge` | 22/34 | `{ "denyNoul": 0.86, "askNoul": 0.6 }` | 25/34 | 27/34 | identical verdicts on CPU and GPU; denies two benign network commands, indulgent on installs |
+| `d1-2B` (Q4_K_M) | 25/34 | the defaults (no set does better while keeping the ten refusals) | 25/34 | 27/34 | measured on 2026-11-01 with the official `LiquidAI/d1-2B-GGUF`; Q8_0: 23/34, 25/34 with `{ "denyNoul": 0.96 }`, 27/34 with the rules. With the model server's `score_readout="mean"` (Transformers), Q4 gives 26/34 with `{ "askRisk": 1.2 }` and 27/34 with the rules, but llama.cpp returns the median. Fits a 4 GB GPU (Q4: 2.4 GiB with an 8k context) |
 
-Two other models were measured as well; their recommended values: `d3-flash` `{ "denyNoul": 0.98 }`, `d3-27b` `{ "denyNoul": 0.96 }`.
+One other model was measured as well; its recommended value: `d3-27b` `{ "denyNoul": 0.96 }`.
 
 The values do not transfer from one model to another: the `0.94` would drop three expected refusals from `nox-4b`, and `nox-4b`'s values do nothing for `d3-mini`. They were searched on this same bench, so the last points are optimistic: watch real traffic with `debug: true`.
 
