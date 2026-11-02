@@ -1,10 +1,13 @@
 // `guard rules`: the built-in rules in the registry order (`rules/features.ts`), with their group, their own verdict
 // (before any setting) and what they check: the same text as the table of docs/rules.md (a test compares them); then the
-// user's own rules (`rules` option), read and set aside exactly as the plugin does.
-import { parseConfig } from "../config.ts"
+// user's own rules (`rules` option, then the global guard.json's), read and set aside exactly as the plugin does.
+import { join } from "node:path"
+import { parseConfig, type GuardFile } from "../config.ts"
+import { GUARD_FILE, readGuardFiles } from "../guard-file.ts"
 import { RULE_DETAILS, ruleSettings } from "../rules/details.ts"
 import { RULE_FEATURES, type RuleFeature } from "../rules/features.ts"
-import { CliError, readSources, type CliIo, type Pretty } from "./context.ts"
+import type { CustomRule } from "../rules/types.ts"
+import { CliError, readSources, resolution, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import { type Segment } from "./style.ts"
 
@@ -128,14 +131,45 @@ const RULES_WARNING = /^(?:invalid )?rules\b/
 const NOT_SHOWN =
   "Not shown: a project's opencode.json can replace this whole list, and its rules then apply in that project; guard last names the rule behind each ask or denial."
 
-/** The user's own rules as the plugin reads them, or why none could be read. */
-type CustomRules =
+/** The plugin's warnings about the rules of the global guard.json (its top level or a section of it). */
+const GUARD_RULES_WARNING = /^global guard\.json(?:, .*?)?: (?:invalid )?rules\b/
+
+type Row = { readonly id: string; readonly verdict: string; readonly tools: string; readonly reason: string; readonly pattern: string; readonly builtin: boolean }
+
+/** The rules of the global guard.json, when it has some (or warnings about them), or why it is ignored. */
+type GuardRules = { readonly path: string } & ({ readonly rows: readonly Row[]; readonly setAside: readonly string[] } | { readonly unread: string })
+
+/** The user's own rules as the plugin reads them, or why none could be read; then the global guard.json's. */
+type CustomRules = (
   | {
       readonly origin: string
-      readonly rows: ReadonlyArray<{ readonly id: string; readonly verdict: string; readonly tools: string; readonly reason: string; readonly pattern: string; readonly builtin: boolean }>
+      readonly rows: readonly Row[]
       readonly setAside: readonly string[]
     }
   | { readonly unread: string }
+) & { readonly guard?: GuardRules }
+
+const rowOf = (rule: CustomRule): Row => ({
+  id: rule.id,
+  verdict: rule.verdict,
+  tools: rule.tools.join(","),
+  reason: rule.reason,
+  pattern: `/${rule.pattern.source}/${rule.pattern.flags}`,
+  builtin: RULE_FEATURES.has(rule.id),
+})
+
+/** The global guard.json as the plugin reads it: its rules and their warnings; nothing when it has neither. */
+function guardRules(io: CliIo, sources: Sources): GuardRules | undefined {
+  if (!sources.globalDir) return undefined
+  const path = join(sources.globalDir, GUARD_FILE)
+  const [file] = readGuardFiles({ global: path, projects: [], roots: [] }) as Array<GuardFile | undefined>
+  if (!file) return undefined
+  if (!file.data) return { path, unread: `ignored: ${file.reason ?? "it cannot be read"} (a running plugin keeps the rules it read from it last)` }
+  const version = resolution(io, sources, undefined, [file])
+  const rows = (version.guardRules ?? []).map(rowOf)
+  const setAside = version.warnings.filter((warning) => GUARD_RULES_WARNING.test(warning)).map((warning) => warning.replace(/^global guard\.json: /, ""))
+  return rows.length || setAside.length ? { path, rows, setAside } : undefined
+}
 
 /**
  * From the options the plugin gets without a project's opencode.json (the system entry, loaded last, else the global
@@ -144,43 +178,44 @@ type CustomRules =
 function customRules(io: CliIo): CustomRules {
   try {
     const sources = readSources(io)
+    const guard = guardRules(io, sources)
     const from = (label: string) => sources.declarations.find((entry) => entry.label === label)
     const origin = from("system")?.options ? "system configuration, which replaces the global entry" : from("global")?.options ? "global configuration" : undefined
     if (!origin) {
       const reasons = sources.declarations.map((entry) => `${entry.label} configuration: ${entry.reason ?? "not read"}`)
-      return { unread: `none read, the plugin is not declared (${reasons.join("; ")})` }
+      return { unread: `none read, the plugin is not declared (${reasons.join("; ")})`, ...(guard ? { guard } : {}) }
     }
     const { config, warnings } = parseConfig(sources.options, io.env)
-    return {
-      origin,
-      rows: config.rules.map((rule) => ({
-        id: rule.id,
-        verdict: rule.verdict,
-        tools: rule.tools.join(","),
-        reason: rule.reason,
-        pattern: `/${rule.pattern.source}/${rule.pattern.flags}`,
-        builtin: RULE_FEATURES.has(rule.id),
-      })),
-      setAside: warnings.filter((warning) => RULES_WARNING.test(warning)),
-    }
+    return { origin, rows: config.rules.map(rowOf), setAside: warnings.filter((warning) => RULES_WARNING.test(warning)), ...(guard ? { guard } : {}) }
   } catch (error) {
     return { unread: `the configuration could not be read (${error instanceof Error ? error.message : String(error)})` }
   }
 }
 
+/** Rows of rules, one line each, columns aligned. */
+function plainRows(rows: readonly Row[], setAside: readonly string[]): string[] {
+  const cells = rows.map((row) => [row.id, row.verdict, row.tools, row.reason, `${row.pattern}${row.builtin ? "  (same identifier as a built-in rule)" : ""}`])
+  const width = (column: number) => Math.max(0, ...cells.map((row) => row[column]!.length))
+  const [id, verdict, tools, reason] = [width(0), width(1), width(2), width(3)]
+  return [
+    ...(cells.length ? cells.map((row) => `  ${row[0]!.padEnd(id)}  ${row[1]!.padEnd(verdict)}  ${row[2]!.padEnd(tools)}  ${row[3]!.padEnd(reason)}  ${row[4]}`) : ["  none"]),
+    ...(setAside.length ? ["  Set aside:", ...setAside.map((warning) => `    ${warning}`)] : []),
+  ]
+}
+
+/** The global guard.json's section (output that is not a terminal). */
+function plainGuard(guard: GuardRules | undefined): string[] {
+  if (!guard) return []
+  if ("unread" in guard) return [`Your rules in the global guard.json ${guard.path}: ${guard.unread}`]
+  return [`Your rules (rules of the global guard.json ${guard.path}):`, ...plainRows(guard.rows, guard.setAside)]
+}
+
 /** The user's own rules, one line each (output that is not a terminal): a section of its own, with a header. */
 export function customRuleLines(io: CliIo): string[] {
   const rules = customRules(io)
-  if ("unread" in rules) return [`Your rules: ${rules.unread}`]
-  const rows = rules.rows.map((row) => [row.id, row.verdict, row.tools, row.reason, `${row.pattern}${row.builtin ? "  (same identifier as a built-in rule)" : ""}`])
-  const width = (column: number) => Math.max(0, ...rows.map((row) => row[column]!.length))
-  const [id, verdict, tools, reason] = [width(0), width(1), width(2), width(3)]
-  return [
-    `Your rules (rules option of the ${rules.origin}):`,
-    ...(rows.length ? rows.map((row) => `  ${row[0]!.padEnd(id)}  ${row[1]!.padEnd(verdict)}  ${row[2]!.padEnd(tools)}  ${row[3]!.padEnd(reason)}  ${row[4]}`) : ["  none"]),
-    ...(rules.setAside.length ? ["  Set aside:", ...rules.setAside.map((warning) => `    ${warning}`)] : []),
-    `  ${NOT_SHOWN}`,
-  ]
+  if ("unread" in rules) return [`Your rules: ${rules.unread}`, ...plainGuard(rules.guard)]
+  // The note is about the option's list only: right after it.
+  return [`Your rules (rules option of the ${rules.origin}):`, ...plainRows(rules.rows, rules.setAside), `  ${NOT_SHOWN}`, ...plainGuard(rules.guard)]
 }
 
 /** What `false` turns off, after the group's name (the option to set). */
@@ -208,20 +243,11 @@ export function prettyBuiltins(pretty: Pretty): void {
   }
 }
 
-/** The user's own rules for a terminal: aligned, reasons wrapped, each pattern alone on the next line, unchanged. */
-export function prettyCustom(io: CliIo, pretty: Pretty): void {
-  const rules = customRules(io)
-  if ("unread" in rules) {
-    title(pretty, "Your rules", "rules option", "custom")
-    pretty.line([])
-    for (const line of rowLines(pretty, [["  "]], 2, pretty.clean(rules.unread), "warn")) pretty.line(line)
-    return
-  }
-  const rows = rules.rows.map((row) => ({ id: pretty.clean(row.id), verdict: row.verdict, tools: pretty.clean(row.tools), reason: pretty.clean(row.reason), pattern: pretty.clean(row.pattern), builtin: row.builtin }))
+/** Rows of rules for a terminal: aligned, reasons wrapped, each pattern alone on the next line, unchanged. */
+function prettyRows(pretty: Pretty, given: readonly Row[], setAside: readonly string[]): void {
+  const rows = given.map((row) => ({ id: pretty.clean(row.id), verdict: row.verdict, tools: pretty.clean(row.tools), reason: pretty.clean(row.reason), pattern: pretty.clean(row.pattern), builtin: row.builtin }))
   const [id, tools] = [Math.max(0, ...rows.map((row) => row.id.length)), Math.max(0, ...rows.map((row) => row.tools.length))]
   const column = 4 + id + 2 + 4 + 2 + tools + 2
-  title(pretty, "Your rules", `${count(rows.length)}, from the rules option of the ${pretty.clean(rules.origin)}`, "custom")
-  pretty.line([])
   if (!rows.length) pretty.line([["    "], ["none", "dim"]])
   for (const row of rows) {
     const cells: Segment[] = [["    "], [row.id.padEnd(id), "rule"], ["  "], [row.verdict.padEnd(4), verdictStyle(row.verdict)], ["  "], [row.tools.padEnd(tools)], ["  "]]
@@ -229,11 +255,39 @@ export function prettyCustom(io: CliIo, pretty: Pretty): void {
     pretty.line([[" ".repeat(column)], [row.pattern, "dim"]])
     if (row.builtin) pretty.line([[" ".repeat(column)], ["same identifier as a built-in rule", "warn"]])
   }
-  if (rules.setAside.length) {
+  if (setAside.length) {
     pretty.line([])
     pretty.line([["  "], ["Set aside", "warn"]])
-    for (const warning of rules.setAside) for (const line of rowLines(pretty, [["    "]], 4, pretty.clean(warning), "warn")) pretty.line(line)
+    for (const warning of setAside) for (const line of rowLines(pretty, [["    "]], 4, pretty.clean(warning), "warn")) pretty.line(line)
   }
+}
+
+/** The global guard.json's rules for a terminal, under a heading with its path. */
+function prettyGuard(pretty: Pretty, guard: GuardRules | undefined): void {
+  if (!guard) return
+  pretty.line([])
+  heading(pretty, "From the global guard.json", pretty.clean(guard.path))
+  if ("unread" in guard) for (const line of rowLines(pretty, [["    "]], 4, pretty.clean(guard.unread), "warn")) pretty.line(line)
+  else {
+    pretty.line([])
+    prettyRows(pretty, guard.rows, guard.setAside)
+  }
+}
+
+/** The user's own rules for a terminal: those of the rules option, then the global guard.json's. */
+export function prettyCustom(io: CliIo, pretty: Pretty): void {
+  const rules = customRules(io)
+  if ("unread" in rules) {
+    title(pretty, "Your rules", "rules option", "custom")
+    pretty.line([])
+    for (const line of rowLines(pretty, [["  "]], 2, pretty.clean(rules.unread), "warn")) pretty.line(line)
+    prettyGuard(pretty, rules.guard)
+    return
+  }
+  title(pretty, "Your rules", `${count(rules.rows.length)}, from the rules option of the ${pretty.clean(rules.origin)}`, "custom")
+  pretty.line([])
+  prettyRows(pretty, rules.rows, rules.setAside)
   pretty.line([])
   for (const line of rowLines(pretty, [["  "]], 2, NOT_SHOWN, "dim")) pretty.line(line)
+  prettyGuard(pretty, rules.guard)
 }

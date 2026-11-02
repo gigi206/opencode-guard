@@ -1,6 +1,7 @@
 // `guard show`: the policy settings in force for the current directory (and a main agent), each with the file and
-// section it comes from, the project's trust and the settings set aside with the reason (the warnings of the plugin's
-// resolution). Only from the files read faithfully here; no other option of the configuration is ever printed.
+// section it comes from, the exceptions retained, the project's trust and the settings set aside with the reason (the
+// warnings of the plugin's resolution). Only from the files read faithfully here; no other option of the configuration is
+// ever printed.
 import { resolve } from "node:path"
 import { parseConfig } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
@@ -30,7 +31,10 @@ export function show(io: CliIo, agent: string | undefined): void {
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
   const patterns = redactionSettings(io, sources)
   const formatsOff = (version.redactionOff ?? []).map((type) => ({ key: `redactionOff.${type}`, value: "off", origin: "global guard.json" }))
-  const settings = [...(version.settings?.(agent) ?? []), ...patterns.rows, ...formatsOff]
+  const rows = version.settings?.(agent) ?? []
+  // Exceptions apart: a path would widen every column of the settings.
+  const settings = [...rows.filter((row) => !row.key.startsWith(EXCEPTIONS)), ...patterns.rows, ...formatsOff]
+  const exceptions = rows.filter((row) => row.key.startsWith(EXCEPTIONS)).map((row) => ({ rule: row.key.slice(EXCEPTIONS.length), path: String(row.value), origin: row.origin }))
   const warnings = [...version.warnings, ...patterns.warnings]
   if (io.pretty)
     return prettyShow(io.pretty, {
@@ -39,6 +43,7 @@ export function show(io: CliIo, agent: string | undefined): void {
       trusted: Boolean(version.trusted),
       listed,
       settings,
+      exceptions,
       warnings,
     })
   io.out(`Settings for ${directory}${agent === undefined ? "" : ` with the main agent ${agent}`}, read from:`)
@@ -49,6 +54,9 @@ export function show(io: CliIo, agent: string | undefined): void {
   const width = (pick: (row: (typeof settings)[number]) => string) => Math.max(...settings.map((row) => pick(row).length))
   const [key, value] = [width((row) => row.key), width((row) => String(row.value))]
   for (const row of settings) io.out(`  ${row.key.padEnd(key)}  ${String(row.value).padEnd(value)}  ${row.origin}`)
+  io.out(`Exceptions in force:${exceptions.length ? "" : " none"}`)
+  const [rule, path] = [Math.max(0, ...exceptions.map((row) => row.rule.length)), Math.max(0, ...exceptions.map((row) => row.path.length))]
+  for (const row of exceptions) io.out(`  ${row.rule.padEnd(rule)}  ${row.path.padEnd(path)}  ${row.origin}`)
   if (warnings.length) {
     io.out("Set aside:")
     for (const warning of warnings) io.out(`  ${warning}`)
@@ -73,7 +81,7 @@ function redactionSettings(io: CliIo, sources: ReturnType<typeof readSources>): 
   }
 }
 
-/** `guard show` in a terminal: the sources read, the project's trust, the settings in force and those set aside. */
+/** `guard show` in a terminal: the sources read, the project's trust, the settings and exceptions in force, those set aside. */
 function prettyShow(
   pretty: Pretty,
   data: {
@@ -82,6 +90,7 @@ function prettyShow(
     readonly trusted: boolean
     readonly listed: string
     readonly settings: ReadonlyArray<{ readonly key: string; readonly value: unknown; readonly origin: string }>
+    readonly exceptions: ReadonlyArray<{ readonly rule: string; readonly path: string; readonly origin: string }>
     readonly warnings: readonly string[]
   },
 ): void {
@@ -117,7 +126,18 @@ function prettyShow(
   if (pretty.color && rows.length) {
     const legend: Segment[] = [["    "]]
     for (const [word, style] of VALUE_STYLES) legend.push([word, style], [" "])
-    pretty.line([...legend, ...(mark ? ([["· ", "dim"], [RELAXES, "warn"], [": the setting relaxes a protection", "dim"]] as Segment[]) : [])])
+    pretty.line([...legend, ...(mark || data.exceptions.length ? ([["· ", "dim"], [RELAXES, "warn"], [": the setting relaxes a protection", "dim"]] as Segment[]) : [])])
+  }
+  pretty.line([])
+  heading(pretty, "Exceptions in force")
+  const exceptions = data.exceptions.map((row) => ({ rule: pretty.clean(row.rule), path: pretty.clean(row.path), origin: pretty.clean(row.origin) }))
+  if (!exceptions.length) pretty.line([["    "], ["none", "dim"]])
+  // Each one relaxes a protection: the path after the mark, its origin on the next line under it (a long path stays whole).
+  const rule = Math.max(0, ...exceptions.map((row) => row.rule.length))
+  const start = 4 + rule + 2 + RELAXES.length + 2
+  for (const row of exceptions) {
+    for (const line of rowLines(pretty, [["    "], [row.rule.padEnd(rule), "rule"], ["  "], [RELAXES, "warn"], ["  "]], start, row.path)) pretty.line(line)
+    for (const line of rowLines(pretty, [[" ".repeat(start)]], start, row.origin, "dim")) pretty.line(line)
   }
   if (data.warnings.length) {
     pretty.line([])
@@ -140,10 +160,11 @@ const valueStyle = (value: string): Style | undefined => VALUE_STYLES.find(([wor
 /** Switches whose `true` keeps a protection on (`policy` switches of `config.ts`). */
 const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "decisionModel"])
 const RELAXES = "relaxes"
+const EXCEPTIONS = "exceptions."
 
 /**
  * Does the setting relax a protection: a protective switch off, self-protection or local confirmations left to the
- * decision model, a rule turned off or left to the model, a redaction format turned off?
+ * decision model, a rule turned off or left to the model, a redaction format turned off, confirmations remembered?
  */
 function relaxes(key: string, value: string): boolean {
   if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
@@ -151,5 +172,6 @@ function relaxes(key: string, value: string): boolean {
   if (PROTECTIVE.has(key)) return value === "false"
   if (key === "selfProtectionByModel") return value === "true"
   if (key === "localAsks") return value === "model"
+  if (key === "rememberConfirmations") return value !== "off"
   return false
 }

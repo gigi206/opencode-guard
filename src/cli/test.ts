@@ -2,14 +2,17 @@
 // decider as the plugin (decide.ts), with the settings it would resolve for this directory and agent (configuration,
 // guard.json files, sections), the server's environment completed by `service.json`, and the directories it protects.
 // The decision model is asked only with `--model` (the call is then sent to it); otherwise, a call no local rule decides
-// is said to be the model's. Not replayed: OpenCode's own permission rules, its second check of the shell sub-commands
-// (the plugin's rules already split the command), and the scripts written earlier in a session.
+// is said to be the model's. Exceptions apply as in the plugin; the memory of confirmations does not (it holds within a
+// session). Not replayed: OpenCode's own permission rules, its second check of the shell sub-commands (the plugin's rules
+// already split the command), and the scripts written earlier in a session.
 import { homedir } from "node:os"
 import { parseConfig, resolveVersion } from "../config.ts"
 import { createDecider, type Decision } from "../decide.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { guardDirectories, knownSecrets } from "../index.ts"
 import { createModelClient, ModelError, type ModelClient } from "../model/client.ts"
+import { isRegularFile } from "../real-path.ts"
+import { TARGETED_RULES } from "../rules/features.ts"
 import { shellDirectories } from "../scripts.ts"
 import { createRedactor } from "../secrets/redact.ts"
 import { CliError, readSources, realOrUndefined, serverEnv, type CliIo } from "./context.ts"
@@ -48,6 +51,7 @@ export async function testCall(io: CliIo, request: TestRequest, client?: ModelCl
     files,
     project: directory,
     realPath: realOrUndefined,
+    regularFile: isRegularFile,
     ...(sources.origin ? { origin: sources.origin } : {}),
   })
   const agent = request.agent ?? DEFAULT_AGENT
@@ -58,6 +62,9 @@ export async function testCall(io: CliIo, request: TestRequest, client?: ModelCl
   }
   const version = resolveVersion(config.layers!, files)
   const scope = version.scope(agent, undefined, undefined)
+  // The plugin keeps the rules it read last from a global guard.json that became unusable: unknown here.
+  const ignored = files.find((file) => file.global && !file.data)
+  if (ignored) notes.push(`the global guard.json is ignored (${ignored.reason ?? "it cannot be read"}): a running plugin keeps the rules it read from it last, not seen here`)
   const redactor = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config) })
   redactor.setDisabledTypes(version.redactionOff ?? [])
   const { protectedDirs, pluginDirs, serviceDirs } = guardDirectories(env, sources.globalDir)
@@ -76,7 +83,11 @@ export async function testCall(io: CliIo, request: TestRequest, client?: ModelCl
   const decider = createDecider({ config, redactor, ...(model ? { model } : {}), home, protectedDirs, pluginDirs, serviceDirs, readContent: true, resolveLinks: true })
   const command = request.tool === "shell" ? (request.input as { command?: unknown }).command : undefined
   const cwds = typeof command === "string" ? shellDirectories(command, undefined, directory, home) : undefined
-  const decision: Decision = await decider.decide({ tool: request.tool, input: request.input, agent, directory, ...(cwds ? { cwds } : {}), scope })
+  const decision: Decision = await decider.decide({ tool: request.tool, input: request.input, agent, directory, ...(cwds ? { cwds } : {}), scope, rules: version.rules })
+  for (const waiver of decision.waived ?? []) notes.push(`${waiver.rule} lifted by an exception: ${waiver.targets.join(", ")}`)
+  const minutes = scope.policy.rememberMinutes ?? 0
+  if (minutes > 0 && decision.verdict === "ask" && decision.rule !== undefined && TARGETED_RULES.has(decision.rule))
+    notes.push(`rememberConfirmations (${minutes} min) does not apply here: it remembers a confirmation within a session only`)
   if (asked && (decision.source === "model-error" || decision.source === "default")) {
     const local = decision.parts?.local
     return {

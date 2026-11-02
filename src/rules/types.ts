@@ -11,6 +11,27 @@ export interface Finding {
    * truncated input, unreachable or disabled model: the ask remains.
    */
   readonly modelDecides?: string
+  /**
+   * Real paths of every file the finding is about (`TARGETED_RULES` only), computed only when an exception or the memory
+   * of confirmations is active for its rule; absent: unknown (a variable, a pattern, a path not resolved, a limit), and
+   * then neither an exception nor the memory lifts it.
+   */
+  readonly targets?: readonly string[]
+}
+
+/** Finding lifted before any combination: all its targets excepted for its rule, or the exact set confirmed earlier. */
+export interface Waiver {
+  readonly rule: string
+  readonly kind: "exception" | "remembered"
+  readonly targets: readonly string[]
+}
+
+/** Per call, beside the policy: the memory of confirmations of the session, and where lifted findings are reported. */
+export interface WaiverContext {
+  /** The user confirmed this exact set of targets for the rule in this session, at most `minutes` ago. */
+  readonly remembered?: (rule: string, targets: readonly string[], minutes: number) => boolean
+  /** Receives each finding lifted (the same one may come from several views of a command). */
+  readonly waived?: (waiver: Waiver) => void
 }
 
 /** Additional rule provided by the user via the options. */

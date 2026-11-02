@@ -17,8 +17,9 @@ import { createPromptGate, type PromptGate } from "./hooks/prompt-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
+import { isRegularFile } from "./real-path.ts"
 import { declaredOutputCheck, declaredPluginOptions, globalConfigDirectory, type OutputCheckState } from "./output-check.ts"
-import { RULE_FEATURES } from "./rules/features.ts"
+import { RULE_FEATURES, waiverSummary } from "./rules/features.ts"
 import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
 import { serviceDirectories, serviceSecretSource } from "./secrets/opencode-service.ts"
@@ -134,6 +135,7 @@ export async function setupGuard(
   systemDir: string = systemConfigDirectory(),
   globalDir: string | undefined = globalConfigDirectory(env),
   scopeClock?: { readonly now: () => number; readonly intervalMs: number },
+  home?: string,
 ) {
   const { pluginDir, pluginDirs, protectedDirs, serviceDirs } = guardDirectories(env, globalDir)
   // Settings by agent and by project: guard.json files (global, and each `.opencode` OpenCode reads for the session
@@ -168,6 +170,7 @@ export async function setupGuard(
     files,
     ...(project ? { project } : {}),
     realPath: realOrUndefined,
+    regularFile: isRegularFile,
   })
   warnings.push(...unread)
   // OpenCode service password and remote access route: re-read from its files (`env` directories).
@@ -182,10 +185,9 @@ export async function setupGuard(
     redactDeep: (value, options) => (refreshFormats(), formats.redactDeep(value, options)),
     containsSecret: (value) => (refreshFormats(), formats.containsSecret(value)),
   }
-  let home: string | undefined
   let homeError: unknown
   try {
-    home = homedir()
+    home ??= homedir()
   } catch (error) {
     homeError = error
   }
@@ -277,6 +279,8 @@ export async function setupGuard(
       scopes,
       readContent: true,
       resolveLinks: true,
+      // Test clock: it also drives the memory of confirmations.
+      ...(scopeClock ? { now: scopeClock.now } : {}),
     })
   } catch (error) {
     log.error("guard hooks failed to register: plugin not loaded, NO protection", error)
@@ -384,7 +388,7 @@ export async function setupGuard(
   // Profile and rule settings retained, only when they differ from the defaults.
   const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)
-  const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}`
+  const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}${waiverSummary(config.policy)}`
   // Prompt check: its state whenever the decision model is on (`off` when turned off, so that a project doing it shows).
   const custom = (settings: { custom: boolean } | undefined) => (settings?.custom ? " (custom settings)" : "")
   const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}${custom(config.promptCheck)}` : model && !config.promptCheck ? "; prompt check: off" : ""

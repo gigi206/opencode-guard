@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 import { parseConfig, resolveVersion, type GuardFile, type PluginDeclaration, type Version } from "../config.ts"
 import { knownSecrets } from "../index.ts"
 import { declaredPluginOptions, globalConfigDirectory } from "../output-check.ts"
+import { isRegularFile } from "../real-path.ts"
 import { createRedactor, type Redactor } from "../secrets/redact.ts"
 import type { Segment, Terminal } from "./style.ts"
 
@@ -91,6 +92,7 @@ export function resolution(io: CliIo, sources: Sources, project: string | undefi
     files,
     ...(project ? { project } : {}),
     realPath: realOrUndefined,
+    regularFile: isRegularFile,
     ...(sources.origin ? { origin: sources.origin } : {}),
   })
   return resolveVersion(config.layers!, files)

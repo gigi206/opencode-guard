@@ -29,7 +29,7 @@ describe("guard completion", { skip: !available("bash") && "bash not installed" 
   it("CMP-1: commands, rule settings and identifiers, formats, settings and their values, options", () => {
     assert.deepEqual(complete("st"), ["status"])
     assert.ok(complete("").includes("completion"))
-    assert.deepEqual(complete("rules", "re"), ["reset"])
+    assert.deepEqual(complete("rules", "re"), ["reset", "remove"])
     assert.ok(complete("rules", "off", "").includes("rm"))
     assert.ok(complete("rules", "--explain", "").includes("secret-file-read"))
     assert.ok(complete("redaction", "off", "").includes("twilio_key"))

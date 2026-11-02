@@ -2,7 +2,7 @@
 // and the reason a finding usually carries. Never the rule's pattern or an internal expression: the shell rules are
 // functions, not one regular expression, and the explanations stay at the level of docs/rules.md.
 
-import { DENY_ONLY_RULES, USER_ONLY_RULES } from "./features.ts"
+import { DENY_ONLY_RULES, TARGETED_RULES, USER_ONLY_RULES } from "./features.ts"
 
 export interface RuleDetail {
   /** What the rule looks at, in words (no pattern or internal expression). */
@@ -327,5 +327,8 @@ export function ruleSettings(id: string, group: "always" | "sensitiveFiles" | "d
     return `${common} The group cannot be turned off.`
   }
   const switchName = group === "sensitiveFiles" ? "sensitiveFiles" : "dangerousCommands"
-  return `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off", "ask", "deny" or "model"; "model" leaves its confirmations to the decision model, and so does localAsks: "model" when the rule has no setting. A value that relaxes the rule must also be declared in the global configuration, unless the project is trusted.`
+  const common = `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off", "ask", "deny" or "model"; "model" leaves its confirmations to the decision model, and so does localAsks: "model" when the rule has no setting. A value that relaxes the rule must also be declared in the global configuration, unless the project is trusted.`
+  // Its findings name their files: the only rule an exception or the memory of confirmations reaches.
+  if (!TARGETED_RULES.has(id)) return common
+  return `${common} It also accepts exceptions, absolute paths of files whose asks it no longer makes when the command only reads them (exceptions.${id}, or guard rules off ${id} --path <file>), and rememberConfirmations, minutes (1 to 60) during which a set of files the user confirmed in a session is not asked again; neither ever lifts a denial, and both are off by default.`
 }

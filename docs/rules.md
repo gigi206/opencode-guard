@@ -113,6 +113,8 @@ Each finding names its rule, in the log, in a refusal and in a confirmation. The
 | `codemode-fetch` | `dangerousCommands` | `ask` | CodeMode code that makes network requests |
 | `script-unverifiable` | `dangerousCommands` | `ask` | a script written by the agent that can no longer be checked |
 
+Only `secret-file-read` accepts [exceptions](configuration.md#exceptions-for-one-file-exceptions) and the [memory of confirmations](configuration.md#remembering-confirmations-rememberconfirmations): its findings name the files they are about (its reason in a shell command names them, at most three, then how many more, a relative path or one with a `..` component as written; with the default settings, after the first file, a file recognized by its content alone is not named).
+
 ## Secret redaction
 
 Secrets are replaced with `[[GUARD_REDACTED:<type>]]`, for example `[[GUARD_REDACTED:openai_key]]`.
@@ -201,7 +203,7 @@ The patterns behind the detection above, by type (the type names the placeholder
 
 - **`--auto`** (and its hidden aliases `--yolo` and `--dangerously-skip-permissions`) is handled **by the client**: OpenCode's server still raises every confirmation request, and the CLI (or the TUI in "autoaccept" mode) answers "allow once" automatically. All of the plugin's confirmations are therefore approved; only `deny` verdicts still protect you. The plugin cannot detect this mode, hence the unattended mode below.
 - **Non-interactive `opencode run`** (without `--auto`). Confirmations are auto-rejected and the model continues without the action.
-- **"Always allow"** is not remembered for the plugin's confirmations: each action judged dangerous is asked again.
+- **"Always allow"** is not offered for the plugin's confirmations (they carry nothing to save; an interface that still shows it allows once): each action judged dangerous is asked again.
 - **`.env` reads.** Reading a `.env` file triggers two prompts: the plugin's, then OpenCode's built-in `*.env` rule.
 - **Your own `!` commands** are never blocked. OpenCode adds the command and its output to the conversation without any hook, so they are redacted on the wire only; with the [output check](decision-model.md#output-check-outputcheck), the decision model also looks there for a secret written in plain words, masked in what is sent (the local history keeps it), and if it does not answer, the request is blocked: send it again once it answers.
 - **Scheduled tasks** (OpenCode 2.2, `experimental.schedules`): a task's condition written in code runs its tool calls through the plugin like any other; a condition written as a shell command is run by OpenCode itself, outside the tool hooks, and the confirmations it would need are settled without anyone present when it runs. The plugin refuses every confirmation of such a command (it comes from no tool call) rather than letting OpenCode allow it; its refusals stay refusals; the decision model does not see it. Turn scheduled tasks off in the protected layer ([Full protection](configuration.md#protecting-the-plugin-from-project-configuration)) if a project should not turn them on.

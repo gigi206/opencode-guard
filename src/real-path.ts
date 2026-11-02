@@ -2,9 +2,18 @@
 // component by component like the kernel (`lstat` + `readlink`): under Bun, `realpathSync` and `realpathSync.native`
 // normalize before following links (a `..` after a link would go up into the link's directory, not that of
 // its target). The rules stay pure: they receive the predicate built here, per tool call.
-import { lstatSync, readlinkSync } from "node:fs"
+import { lstatSync, readlinkSync, statSync } from "node:fs"
 import { posix } from "node:path"
 import { LIMIT_REACHED } from "./rules/types.ts"
+
+/** A real path names a regular file (neither a directory nor a device): the check the configuration receives for exceptions. */
+export function isRegularFile(path: string): boolean {
+  try {
+    return statSync(path).isFile()
+  } catch {
+    return false
+  }
+}
 
 /** Lookups (`lstat`) per tool call. */
 export const MAX_LOOKUPS = 512
@@ -15,7 +24,8 @@ const PATH_MAX = 4096
 
 /** File operations (injectable for tests). */
 export interface LinkIo {
-  readonly lstat: (path: string) => { isSymbolicLink(): boolean }
+  /** `isFile` absent: never a regular file (no target of an exception). */
+  readonly lstat: (path: string) => { isSymbolicLink(): boolean; isFile?(): boolean }
   readonly readlink: (path: string) => string
 }
 
@@ -74,9 +84,10 @@ function processCwd(): string | undefined {
  * points to the call directories and the server one). Missing or unreadable component: the rest, to be created, is resolved lexically.
  * `LIMIT_REACHED`: limit reached (lookups, followed links, including a loop, or path length); the caller asks.
  * `undefined`: unknown (unreadable link, open descriptor of a process, relative path); the caller then keeps only the
- * lexical comparison. Results memoized.
+ * lexical comparison. `existing`: a missing or unreadable component, or a last one that is not a regular file, gives
+ * `undefined` (file read, never created: the targets of an exception). Same budget; results memoized.
  */
-export function createRealPath(options: RealPathOptions = {}): (absolute: string) => readonly string[] | undefined | typeof LIMIT_REACHED {
+export function createRealPath(options: RealPathOptions = {}): (absolute: string, existing?: boolean) => readonly string[] | undefined | typeof LIMIT_REACHED {
   const io = options.io ?? nodeIo
   const own = options.processDirectory ?? processCwd()
   const candidates = [...(options.directories ?? []), ...(own ? [own] : [])]
@@ -84,9 +95,12 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
   let lookups = 0
 
   /** Walk of `parts` (reverse order) from `current`, real path without links (`""`: root). */
-  function walk(current: string, parts: string[], links: number): string[] | undefined | typeof LIMIT_REACHED {
+  function walk(current: string, parts: string[], links: number, existing: boolean): string[] | undefined | typeof LIMIT_REACHED {
+    // The last component reached is a regular file (its `lstat`, already made): checked in `existing` mode only.
+    let file = false
     while (parts.length > 0) {
       const part = parts.pop()!
+      file = false
       if (part === "" || part === ".") continue
       if (part === "..") {
         current = current.slice(0, Math.max(current.lastIndexOf("/"), 0))
@@ -104,7 +118,7 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
         if (entry !== "cwd" || candidates.length === 0) return undefined
         const results: string[] = []
         for (const directory of candidates) {
-          const branch = walk("", [...parts, ...reversed(directory)], links)
+          const branch = walk("", [...parts, ...reversed(directory)], links, existing)
           if (!Array.isArray(branch)) return branch
           results.push(...branch)
         }
@@ -113,15 +127,16 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
       const next = `${current}/${part}`
       if (lookups >= MAX_LOOKUPS) return LIMIT_REACHED
       lookups++
-      let link: boolean
+      let stat: ReturnType<LinkIo["lstat"]>
       try {
-        link = io.lstat(next).isSymbolicLink()
+        stat = io.lstat(next)
       } catch {
         // Missing or unreadable: file or directories to create.
-        return [posix.resolve(next, ...parts.reverse())]
+        return existing ? undefined : [posix.resolve(next, ...parts.reverse())]
       }
-      if (!link) {
+      if (!stat.isSymbolicLink()) {
         current = next
+        file = stat.isFile?.() === true
         continue
       }
       if (++links > MAX_LINKS) return LIMIT_REACHED
@@ -134,13 +149,14 @@ export function createRealPath(options: RealPathOptions = {}): (absolute: string
       if (target.startsWith("/")) current = ""
       parts.push(...reversed(target))
     }
-    return [current || "/"]
+    return existing && !file ? undefined : [current || "/"]
   }
 
-  return (absolute) => {
-    if (seen.has(absolute)) return seen.get(absolute)
-    const found = !absolute.startsWith("/") ? undefined : absolute.length > PATH_MAX ? LIMIT_REACHED : walk("", reversed(absolute), 0)
-    seen.set(absolute, found)
+  return (absolute, existing = false) => {
+    const key = existing ? `\u0000${absolute}` : absolute
+    if (seen.has(key)) return seen.get(key)
+    const found = !absolute.startsWith("/") ? undefined : absolute.length > PATH_MAX ? LIMIT_REACHED : walk("", reversed(absolute), 0, existing)
+    seen.set(key, found)
     return found
   }
 }

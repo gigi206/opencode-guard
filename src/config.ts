@@ -2,7 +2,8 @@ import type { ModelConfig } from "./model/client.ts"
 import { DEFAULT_OUTPUT_QUESTIONS, DEFAULT_PROMPT_QUESTIONS, DEFAULT_THRESHOLDS, type CheckQuestion, type CheckQuestionTexts, type OutputQuestionTexts, type PromptQuestionTexts, type Thresholds } from "./model/questions.ts"
 import { OPENCODE_FORMAT_SUMMARIES } from "./secrets/opencode-service.ts"
 import { FORMAT_SUMMARIES, MIN_KNOWN_SECRET, type SecretPattern } from "./secrets/patterns.ts"
-import { DENY_ONLY_RULES, RULE_FEATURES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
+import { DENY_ONLY_RULES, RULE_FEATURES, TARGETED_RULES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
+import { hasParentComponent } from "./rules/sensitive-paths.ts"
 import { INTERNAL_ERROR_RULE, type CustomRule, type Finding } from "./rules/types.ts"
 
 /**
@@ -567,6 +568,8 @@ const OPTION_KEYS = [
   "agents",
   "projects",
   "trustedProjects",
+  "exceptions",
+  "rememberConfirmations",
 ]
 const DECISION_KEYS = ["baseURL", "protocol", "model", "apiKey", "timeoutMs", "headers"]
 const THRESHOLD_KEYS = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk", "minConfidence"]
@@ -782,6 +785,103 @@ function ruleOverridesOption(value: unknown, userRules: readonly CustomRule[], w
   return overrides
 }
 
+/** Real path of an existing file or directory; `undefined` if missing or unreadable. */
+type RealPath = (path: string) => string | undefined
+
+/**
+ * Checks of an exception's path, injected (this module reads no file): its real path, and whether that real path names a
+ * regular file (neither a directory nor a device); without `regularFile`, no path can be checked.
+ */
+interface FileChecks {
+  readonly realPath: RealPath
+  readonly regularFile?: (real: string) => boolean
+}
+
+/** Checks that consult nothing: each path kept as written (a project guard.json not trusted, whose relaxations do not count). */
+const AS_WRITTEN: FileChecks = { realPath: (path) => path, regularFile: () => true }
+
+/** Exception (rule, real path) as a key of a source or a section: one key per pair, so that the lists add up. */
+const EXCEPTION_KEY = "exception:"
+const exceptionKey = (rule: string, path: string) => `${EXCEPTION_KEY}${rule}\u0000${path}`
+/** Settings that lift asks (exceptions, memory of confirmations): never in an `agents` section. */
+const WAIVER_KEYS = ["exceptions", "rememberConfirmations"]
+
+/**
+ * `exceptions`: rule identifier → absolute paths of the files whose asks it lifts, each replaced by its real path. Ignored
+ * with a warning: not an object, a rule whose findings do not carry their files (`TARGETED_RULES`: always-active rules,
+ * internal errors, your rules, unknown identifiers), not an array, a path that is not absolute, has a `..` component
+ * (the file the kernel opens depends on the links before it), does not exist or is not a regular file once its links are
+ * resolved (a directory, a device), and every path without `checks` (nothing can be checked). `unretained`: why a path
+ * cannot be retained, said before it is resolved (it is then not consulted).
+ */
+function exceptionsOption(
+  value: unknown,
+  rules: readonly CustomRule[],
+  checks: FileChecks | undefined,
+  warnings: string[],
+  unretained?: (rule: string, path: string) => string | undefined,
+): Array<readonly [string, string]> {
+  const kept: Array<readonly [string, string]> = []
+  const files = checks?.regularFile ? { realPath: checks.realPath, regularFile: checks.regularFile } : undefined
+  if (value === undefined || isEmpty(value)) return kept
+  const accepted = [...TARGETED_RULES].join(", ")
+  if (!isRecord(value)) {
+    warnings.push(`exceptions must be an object (rule identifier: array of absolute paths), ignored`)
+    return kept
+  }
+  for (const [rule, paths] of Object.entries(value)) {
+    const name = RULE_FEATURES.has(rule) || rule === INTERNAL_ERROR_RULE ? `exceptions.${rule}` : `exceptions[${JSON.stringify(rule)}]`
+    if (rules.some((custom) => custom.id === rule)) warnings.push(`${name} ignored: it names one of your rules (only ${accepted} accepts exceptions)`)
+    else if (!TARGETED_RULES.has(rule)) warnings.push(`${name} ignored: only ${accepted} accepts exceptions`)
+    else if (!Array.isArray(paths)) warnings.push(`${name} must be an array of absolute paths, ignored`)
+    else
+      paths.forEach((path, index) => {
+        if (typeof path !== "string" || !path.startsWith("/")) return warnings.push(`${name}[${index}] ignored: an absolute path is expected`)
+        if (hasParentComponent(path)) return warnings.push(`${name}[${index}] ignored: ${JSON.stringify(path)} has a ".." component (write the path without it)`)
+        const why = unretained?.(rule, path)
+        if (why) return warnings.push(`exceptions.${rule} ${JSON.stringify(path)} ignored: ${why}`)
+        const real = files?.realPath(path)
+        if (real === undefined) warnings.push(`${name}[${index}] ignored: ${JSON.stringify(path)} ${files ? "does not exist" : "could not be checked"}`)
+        else if (!files!.regularFile(real)) warnings.push(`${name}[${index}] ignored: ${JSON.stringify(path)} is not a regular file`)
+        else kept.push([rule, real])
+      })
+  }
+  return kept
+}
+
+/** `rememberConfirmations`: whole minutes from 1 to 60, 0 off; absent: not set; any other value: a warning, off (0). */
+function rememberOption(value: unknown, warnings: string[]): number | undefined {
+  if (value === undefined || isEmpty(value)) return undefined
+  const parsed = typeof value === "string" ? Number(value.trim()) : value
+  if (typeof parsed === "number" && Number.isInteger(parsed) && parsed >= 0 && parsed <= 60) return parsed
+  warnings.push(`invalid value for rememberConfirmations (${shown(value)}): whole minutes from 1 to 60 expected, off`)
+  return 0
+}
+
+/** A global or system declaration lists this exception (same rule, same real path). */
+const declaresException = (declaration: Readonly<Record<string, unknown>>, rules: readonly CustomRule[], checks: FileChecks, rule: string, path: string) =>
+  exceptionsOption(declaration.exceptions, rules, checks, []).some(([listed, real]) => listed === rule && real === path)
+
+/**
+ * The session directory is trusted by the global sources read at startup (`trustedProjects` of the global and system
+ * declarations and of the global guard.json, listed directories resolved without a warning); a trust gained later counts
+ * for these exceptions at the next start.
+ */
+function trustedProject(declarations: readonly PluginDeclaration[] | string, inputs: ScopeInputs): boolean {
+  const { project } = inputs
+  if (project === undefined) return false
+  const globalGuard = inputs.files.find((file) => file.global)?.data
+  const sources = [...(typeof declarations === "string" ? [] : declarations.flatMap((entry) => (entry.options ? [entry.options] : []))), ...(globalGuard ? [globalGuard] : [])]
+  return sources.some((source) => {
+    const list = source.trustedProjects === "*" ? ["*"] : Array.isArray(source.trustedProjects) ? source.trustedProjects : []
+    return list.some((dir) => dir === "*" || (typeof dir === "string" && dir.startsWith("/") && ((real) => real !== undefined && within(project, real))(inputs.realPath(dir))))
+  })
+}
+
+/** A global or system declaration lists this path as written for the rule. */
+const listsPath = (declaration: Readonly<Record<string, unknown>>, rule: string, path: string) =>
+  isRecord(declaration.exceptions) && Array.isArray(declaration.exceptions[rule]) && declaration.exceptions[rule].includes(path)
+
 /** "" (missing {env:…} variable) → "ask". Any case: `Deny` must not leave an unattended run in ask mode. */
 function askAsOption(value: unknown, warnings: string[]): "ask" | "deny" {
   const raw = text(value).toLowerCase()
@@ -820,6 +920,77 @@ function logFileOption(value: unknown, env: Record<string, string | undefined>, 
   return defaultLogFile(env)
 }
 
+/** Where a list of the user's rules comes from: the plugin options, or the global guard.json. */
+export interface RuleSource {
+  /** Prefix of its warnings (`<label>: rules[0]…`); absent: the plugin options. */
+  readonly label?: string
+  /** Identifier and reason of a rule without its own: `<prefix>-<index>`. */
+  readonly prefix: string
+}
+export const OPTION_RULES: RuleSource = { prefix: "custom" }
+export const GUARD_RULES: RuleSource = { label: "global guard.json", prefix: "guard-json" }
+
+/** Identifier of the rule at `index` of a list: its own, or the source's default (also for the reserved `placeholder`). */
+export const ruleIdOf = (item: Readonly<Record<string, unknown>>, index: number, source: RuleSource = OPTION_RULES) =>
+  typeof item.id === "string" && item.id !== "placeholder" ? item.id : `${source.prefix}-${index}`
+
+/** The user's `rules`: the same reading and checks for the plugin options and the global guard.json. */
+export function rulesOption(value: unknown, warnings: string[], source: RuleSource = OPTION_RULES, discarded?: string[]): CustomRule[] {
+  const rules: CustomRule[] = []
+  const local: string[] = []
+  // A single rule (object) instead of an array: reported (a deny rule silently lost would be a hole).
+  if (value !== undefined && !Array.isArray(value)) local.push("rules must be an array, ignored")
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      // Identifiers of the entries discarded (`discarded`): the caller may keep the rule read last under each.
+      const drop = (line?: string) => (line && local.push(line), discarded?.push(isRecord(item) ? ruleIdOf(item, index, source) : `${source.prefix}-${index}`))
+      if (!isRecord(item)) return drop(`invalid rules[${index}]`)
+      const verdict = item.verdict === "deny" || item.verdict === "ask" ? item.verdict : undefined
+      // `g` and `y` make `test()` depend on `lastIndex` (every other command would escape the rule).
+      const compiled = regex(item.pattern, typeof item.flags === "string" ? item.flags.replace(/[gy]/g, "") : "", `rules[${index}]`, local)
+      if (!verdict) return drop(`rules[${index}].verdict must be "deny" or "ask"`)
+      if (!compiled) return drop()
+      // `"tools": "*"` (single string) is equivalent to `["*"]`; any other type would otherwise be silently reduced to `["shell"]`.
+      let tools = ["shell"]
+      if (typeof item.tools === "string" && item.tools.trim()) tools = [item.tools.trim()]
+      else if (Array.isArray(item.tools)) {
+        const names = item.tools.filter((tool): tool is string => typeof tool === "string").map((tool) => tool.trim())
+        tools = names.filter(Boolean)
+        if (tools.length < item.tools.length) local.push(`rules[${index}].tools: empty or non-string tool names ignored`)
+        if (!tools.length) {
+          local.push(`rules[${index}].tools has no valid tool name, using ["shell"]`)
+          tools = ["shell"]
+        }
+      } else if (item.tools !== undefined) local.push(`rules[${index}].tools must be a tool name or an array of tool names, using ["shell"]`)
+      // Rule copied from OpenCode v1: without the alias, a rule on `bash` would never apply (ineffective deny).
+      for (const name of [...tools]) {
+        const renamed = V1_TOOL_NAMES.get(name)
+        if (renamed) {
+          if (!tools.includes(renamed)) tools.push(renamed)
+          local.push(`rules[${index}].tools: "${name}" is the OpenCode v1 name of "${renamed}": the rule applies to "${renamed}"`)
+        } else if (V1_CONDITIONAL_TOOLS.has(name))
+          local.push(`rules[${index}].tools: "${name}" exists in OpenCode v2 only when "experimental.todo" is enabled`)
+      }
+      for (const [old, current] of V1_ARGUMENTS)
+        if (compiled.source.includes(old)) local.push(`rules[${index}].pattern mentions "${old}", renamed "${current}" in OpenCode v2`)
+      // `placeholder` is the identifier of the built-in redaction marker rule, which the tracked-script
+      // check (decide.ts) excludes and whose rejection message omits the instruction not to bypass (gate.ts): reused
+      // by a user rule, it would make that rule ineffective in a script and weaken its message.
+      const id = ruleIdOf(item, index, source)
+      if (item.id === "placeholder") local.push(`rules[${index}].id "placeholder" is reserved for the built-in redaction placeholder rule, using "${id}"`)
+      rules.push({
+        id,
+        verdict,
+        reason: typeof item.reason === "string" ? item.reason : `custom rule ${index}${source.label === undefined ? "" : ` of the ${source.label}`}`,
+        pattern: compiled,
+        tools,
+      })
+    })
+  }
+  warnings.push(...local.map((line) => (source.label === undefined ? line : `${source.label}: ${line}`)))
+  return rules
+}
+
 /**
  * `env` is only used for the default log path: configuration comes solely from `options`. `declared`: plugin entries
  * of the global and system configurations, read only if a relaxation is requested (absent or failing: relaxations
@@ -838,63 +1009,14 @@ export function parseConfig(
   const secretPatterns = secretPatternsOption(options.secretPatterns, warnings)
   const requestedOff = [...new Set(redactionOffOption(options[REDACTION_OFF], "", warnings))]
 
-  const rules: CustomRule[] = []
-  // A single rule (object) instead of an array: reported (a deny rule silently lost would be a hole).
-  if (options.rules !== undefined && !Array.isArray(options.rules)) warnings.push("rules must be an array, ignored")
-  if (Array.isArray(options.rules)) {
-    options.rules.forEach((item, index) => {
-      if (!isRecord(item)) return warnings.push(`invalid rules[${index}]`)
-      const verdict = item.verdict === "deny" || item.verdict === "ask" ? item.verdict : undefined
-      // `g` and `y` make `test()` depend on `lastIndex` (every other command would escape the rule).
-      const compiled = regex(item.pattern, typeof item.flags === "string" ? item.flags.replace(/[gy]/g, "") : "", `rules[${index}]`, warnings)
-      if (!verdict) return warnings.push(`rules[${index}].verdict must be "deny" or "ask"`)
-      if (!compiled) return
-      // `"tools": "*"` (single string) is equivalent to `["*"]`; any other type would otherwise be silently reduced to `["shell"]`.
-      let tools = ["shell"]
-      if (typeof item.tools === "string" && item.tools.trim()) tools = [item.tools.trim()]
-      else if (Array.isArray(item.tools)) {
-        const names = item.tools.filter((tool): tool is string => typeof tool === "string").map((tool) => tool.trim())
-        tools = names.filter(Boolean)
-        if (tools.length < item.tools.length) warnings.push(`rules[${index}].tools: empty or non-string tool names ignored`)
-        if (!tools.length) {
-          warnings.push(`rules[${index}].tools has no valid tool name, using ["shell"]`)
-          tools = ["shell"]
-        }
-      } else if (item.tools !== undefined) warnings.push(`rules[${index}].tools must be a tool name or an array of tool names, using ["shell"]`)
-      // Rule copied from OpenCode v1: without the alias, a rule on `bash` would never apply (ineffective deny).
-      for (const name of [...tools]) {
-        const renamed = V1_TOOL_NAMES.get(name)
-        if (renamed) {
-          if (!tools.includes(renamed)) tools.push(renamed)
-          warnings.push(`rules[${index}].tools: "${name}" is the OpenCode v1 name of "${renamed}": the rule applies to "${renamed}"`)
-        } else if (V1_CONDITIONAL_TOOLS.has(name))
-          warnings.push(`rules[${index}].tools: "${name}" exists in OpenCode v2 only when "experimental.todo" is enabled`)
-      }
-      for (const [old, current] of V1_ARGUMENTS)
-        if (compiled.source.includes(old)) warnings.push(`rules[${index}].pattern mentions "${old}", renamed "${current}" in OpenCode v2`)
-      // `placeholder` is the identifier of the built-in redaction marker rule, which the tracked-script
-      // check (decide.ts) excludes and whose rejection message omits the instruction not to bypass (gate.ts): reused
-      // by a user rule, it would make that rule ineffective in a script and weaken its message.
-      let id = typeof item.id === "string" ? item.id : `custom-${index}`
-      if (id === "placeholder") {
-        id = `custom-${index}`
-        warnings.push(`rules[${index}].id "placeholder" is reserved for the built-in redaction placeholder rule, using "${id}"`)
-      }
-      rules.push({
-        id,
-        verdict,
-        reason: typeof item.reason === "string" ? item.reason : `custom rule ${index}`,
-        pattern: compiled,
-        tools,
-      })
-    })
-  }
+  const rules = rulesOption(options.rules, warnings)
 
   // Relaxations (`profile`, rules set to `off`, `ask` or `model`, `localAsks: "model"`, `selfProtectionByModel`): a
   // project's opencode.json can replace the plugin's options, so each one is kept only if the global or system
   // configuration declares the plugin with the same value (`deny`: from anywhere). Files read once, only if one is
   // requested; at the slightest doubt, the relaxation is ignored.
   const overrides = ruleOverridesOption(options.ruleOverrides, rules, warnings)
+  const remember = rememberOption(options.rememberConfirmations, warnings)
   const wanted = profileValue(options.profile)
   if (wanted === null) warnings.push(`invalid value for profile (${shown(options.profile)}), using "standard"`)
   let profile: Profile = wanted ?? "standard"
@@ -925,6 +1047,13 @@ export function parseConfig(
     warnings.push(`${name} settings ignored, defaults used: ${why.replace("a relaxation counts", "they count")}`)
     return { ...defaults, explicit: parsed.explicit }
   }
+  // Exceptions and memory of confirmations: relaxations too, each exception on its own (rule, real path). A project's
+  // opencode.json may replace the options: outside a project trusted at startup, a path is resolved only when a global or
+  // system declaration lists it as written (the paths a repository chose are not consulted otherwise).
+  let trustedAtStart: boolean | undefined
+  const unretained = (rule: string, path: string) =>
+    (trustedAtStart ??= inputs !== undefined && trustedProject(loaded(), inputs)) ? undefined : refusal((declaration) => listsPath(declaration, rule, path))
+  const exceptions = exceptionsOption(options.exceptions, rules, inputs, warnings, unretained)
   // Settings by agent and by project: inputs read once (global and system files read now); when a guard.json file,
   // `agents`, `projects` or `trustedProjects` exists, the layered resolution replaces the checks below, whose warnings
   // are then dropped.
@@ -939,7 +1068,7 @@ export function parseConfig(
     return !why
   })
   const modelUndeclared = decision ? undeclaredModel(loaded(), { decision, maxStateChars, thresholds, secretPatterns, disabledPatterns }) : "no decision model"
-  const layers = inputs && scopeLayers(options, { rules, overrides: new Map(overrides), profile, refusal, declarations: loaded(), modelUndeclared }, inputs, warnings)
+  const layers = inputs && scopeLayers(options, { rules, overrides: new Map(overrides), exceptions, remember, profile, refusal, declarations: loaded(), modelUndeclared }, inputs, warnings)
   const version = layers && (inputs!.files.length > 0 || layers.keyed) ? resolveVersion(layers, inputs!.files) : undefined
   const certification = version ? [] : warnings
   if (profile !== "standard") {
@@ -965,6 +1094,20 @@ export function parseConfig(
     if (why) {
       certification.push(`selfProtectionByModel ignored: ${why}`)
       selfProtectionByModel = false
+    }
+  }
+  const excepted = new Map<string, Set<string>>()
+  for (const [rule, path] of exceptions) {
+    const why = refusal((declaration) => declaresException(declaration, rules, inputs!, rule, path))
+    if (why) certification.push(`exceptions.${rule} ${JSON.stringify(path)} ignored: ${why}`)
+    else excepted.set(rule, new Set([...(excepted.get(rule) ?? []), path]))
+  }
+  let rememberMinutes = remember ?? 0
+  if (rememberMinutes > 0) {
+    const why = refusal((declaration) => rememberOption(declaration.rememberConfirmations, []) === rememberMinutes)
+    if (why) {
+      certification.push(`rememberConfirmations ${rememberMinutes} ignored: ${why}`)
+      rememberMinutes = 0
     }
   }
   for (const [rule, setting] of overrides) {
@@ -1007,7 +1150,7 @@ export function parseConfig(
       thresholds,
       features,
       profile: version?.profile ?? profile,
-      policy: base?.policy ?? rulePolicy({ ...features, localAsksByModel, selfProtectionByModel }, overrides),
+      policy: base?.policy ?? rulePolicy({ ...features, localAsksByModel, selfProtectionByModel }, overrides, { exceptions: excepted, rememberMinutes }),
       redactPrompt: features.redactPrompt,
       debug: bool(options.debug, false, "debug", warnings),
       askAs: askAsOption(options.askAs, warnings),
@@ -1087,8 +1230,10 @@ export interface ScopeInputs {
   readonly files: readonly GuardFile[]
   /** Real path of the session directory, read once at startup; unknown: no `projects` section matches, not trusted. */
   readonly project?: string
-  /** Real path of a listed directory; missing or unreadable: `undefined`. */
+  /** Real path of a listed directory or file; missing or unreadable: `undefined`. */
   readonly realPath: (path: string) => string | undefined
+  /** A real path names a regular file (exceptions); absent: no exception can be checked. */
+  readonly regularFile?: (real: string) => boolean
   /** Origin shown for the keys of the effective options (`guard show`); absent: plugin options. */
   readonly origin?: string
 }
@@ -1151,6 +1296,7 @@ export interface Layers {
   readonly effective: EffectiveChanges
   readonly project?: string
   readonly realPath: (path: string) => string | undefined
+  readonly regularFile?: (real: string) => boolean
   /** `agents`, `projects` or `trustedProjects` in the effective options or the global or system file. */
   readonly keyed: boolean
   /** Why the effective decision model's address or model is not one a global source declares; absent: it is. */
@@ -1171,13 +1317,22 @@ export interface Version {
   readonly profile: Profile
   readonly trusted: boolean
   readonly warnings: readonly string[]
+  /** Logged at the error level: rules of the global guard.json read last and kept in force while it cannot be used. */
+  readonly errors?: readonly string[]
+  /** The user's rules in force: the plugin options', then the global guard.json's. */
+  readonly rules: readonly CustomRule[]
+  /** The global guard.json's (read now, or kept while it cannot be used); absent: none. */
+  readonly guardRules?: readonly CustomRule[]
   /** Sources, sections and trust, for the log. */
   readonly summary: string
   /** Built-in formats turned off by the global guard.json (`redactionOff`), on top of `secretPatterns`; absent: none. */
   readonly redactionOff?: readonly string[]
   /** Trusted directories listed by the global sources (real paths, or `*`); `resolveVersion` only. */
   readonly listed?: readonly string[]
-  /** Policy settings in force for a main agent (none: the top level), with the source and section that set each one. */
+  /**
+   * Policy settings in force for a main agent (none: the top level), with the source and section that set each one; then
+   * the delay of `rememberConfirmations` (`off`, or minutes) and each exception retained (`exceptions.<rule>`, real path).
+   */
   settings?(main: string | undefined): ReadonlyArray<{ readonly key: string; readonly value: string | boolean; readonly origin: string }>
 }
 
@@ -1186,6 +1341,9 @@ interface PolicyState {
   readonly overrides: ReadonlyMap<string, RuleOverride>
   readonly localAsksByModel: boolean
   readonly selfProtectionByModel: boolean
+  /** Exceptions of every source and section retained (they add up), and the delay of the memory of confirmations. */
+  readonly exceptions: ReadonlyMap<string, ReadonlySet<string>>
+  readonly rememberMinutes: number
   /** Key → source and section that set its value (`guard show`); absent: default. */
   readonly origins: ReadonlyMap<string, string>
 }
@@ -1194,6 +1352,8 @@ const DEFAULT_STATE: PolicyState = {
   overrides: new Map(),
   localAsksByModel: false,
   selfProtectionByModel: false,
+  exceptions: new Map(),
+  rememberMinutes: 0,
   origins: new Map(),
 }
 /** Origin of a key of the effective options (project layer). */
@@ -1221,6 +1381,13 @@ function applied(state: PolicyState, key: string, value: string | boolean, origi
   }
   if (key === "localAsks") return { ...state, localAsksByModel: value === "model", origins }
   if (key === "selfProtectionByModel") return { ...state, selfProtectionByModel: value === true, origins }
+  if (key.startsWith(EXCEPTION_KEY)) {
+    const [rule, path] = key.slice(EXCEPTION_KEY.length).split("\u0000") as [string, string]
+    const exceptions = new Map(state.exceptions)
+    exceptions.set(rule, new Set([...(state.exceptions.get(rule) ?? []), path]))
+    return { ...state, exceptions, origins }
+  }
+  if (key === "rememberConfirmations") return { ...state, rememberMinutes: Number(value), origins }
   return { ...state, switches: { ...state.switches, [key]: value === true }, origins }
 }
 
@@ -1228,6 +1395,7 @@ const scopeOf = (state: PolicyState, modelGrants = false): Scope => ({
   policy: rulePolicy(
     { dangerousCommands: state.switches.dangerousCommands, sensitiveFiles: state.switches.sensitiveFiles, localAsksByModel: state.localAsksByModel, selfProtectionByModel: state.selfProtectionByModel },
     state.overrides,
+    { exceptions: state.exceptions, rememberMinutes: state.rememberMinutes },
   ),
   decisionModel: state.switches.decisionModel,
   scripts: state.switches.scripts,
@@ -1258,6 +1426,9 @@ function outcomes(state: PolicyState): number[] {
 /** Rules, then `localAsks` and `selfProtectionByModel`, then the switches, `decisionModel` last (it may hand asks to the model). */
 const rank = (key: string) => (key.startsWith("rule:") ? 0 : key === "localAsks" ? 1 : key === "selfProtectionByModel" ? 2 : 3 + POLICY_SWITCHES.indexOf(key as PolicySwitch))
 
+/** An exception or a memory delay that is not 0: a relaxation `outcomes` does not see (neither paths nor delay). */
+const waives = (op: Op) => op.key.startsWith(EXCEPTION_KEY) || (op.key === "rememberConfirmations" && op.value !== "0")
+
 /** Project layer laid over `state`: its last value of each key; unless trusted, free or certified, a key that relaxes is dropped. */
 function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => void): PolicyState {
   const last = new Map<string, Op>()
@@ -1269,7 +1440,7 @@ function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => v
   for (const op of [...last.values()].sort((a, b) => rank(a.key) - rank(b.key))) {
     const candidate = applied(state, op.key, op.value, op.label ?? PLUGIN_OPTIONS)
     const after = outcomes(candidate)
-    const why = op.trusted || op.free || after.every((value, index) => value >= before[index]!) ? undefined : op.certify ? op.certify() : "project"
+    const why = op.trusted || op.free || (!waives(op) && after.every((value, index) => value >= before[index]!)) ? undefined : op.certify ? op.certify() : "project"
     if (why === undefined) {
       state = candidate
       before = after
@@ -1289,6 +1460,10 @@ function described(key: string, value: string | boolean): string {
   if (key.startsWith("rule:")) return value === "none" ? `ruleOverrides.${key.slice(5)} unset` : `ruleOverrides.${key.slice(5)} "${value}"`
   if (key === "localAsks") return `localAsks "${value}"`
   if (key === "selfProtectionByModel") return value ? "selfProtectionByModel" : "selfProtectionByModel false"
+  if (key.startsWith(EXCEPTION_KEY)) {
+    const [rule, path] = key.slice(EXCEPTION_KEY.length).split("\u0000")
+    return `exceptions.${rule} ${JSON.stringify(path)}`
+  }
   return `${key} ${value}`
 }
 
@@ -1296,12 +1471,22 @@ const opsOf = (section: Section | undefined, label: string, trusted = false): Op
   section ? [...section.entries].map(([key, value]) => ({ key, value, label, text: described(key, value), trusted })) : []
 
 /** Policy settings of a source or a section; the profile sets the switches the same object leaves unset. */
-function readSection(value: Readonly<Record<string, unknown>>, where: string, rules: readonly CustomRule[], warnings: string[], accepted: readonly string[]): Section {
+function readSection(
+  value: Readonly<Record<string, unknown>>,
+  where: string,
+  rules: readonly CustomRule[],
+  warnings: string[],
+  accepted: readonly string[],
+  checks?: FileChecks,
+): Section {
   const local: string[] = []
   for (const key of Object.keys(value))
     if (accepted.includes(key)) continue
     else if (key === REDACTION_OFF) local.push(`${REDACTION_OFF} ignored: it counts only in the global configuration (global opencode.json, system configuration) and at the top level of the global guard.json`)
+    else if (WAIVER_KEYS.includes(key)) local.push(`${key} ignored: an agents section does not accept it (only the top level or a projects section)`)
     else if (GLOBAL_ONLY_KEYS.includes(key)) local.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
+    // A costly pattern in a repository would slow down every check.
+    else if (key === "rules") local.push("rules ignored: your rules count only in the plugin options and at the top level of the global guard.json")
     else if (OPTION_KEYS.includes(key)) local.push(`${key} ignored: only the plugin options in opencode.json accept it`)
     else local.push(`unknown option ${key}, ignored`)
   const entries = new Map<string, string | boolean>()
@@ -1317,6 +1502,11 @@ function readSection(value: Readonly<Record<string, unknown>>, where: string, ru
   const profile = profileValue(value.profile)
   if (profile === null) local.push(`invalid value for profile (${shown(value.profile)}), ignored`)
   else if (profile) for (const name of CREDENTIALS_ONLY_OFF) if (!entries.has(name)) entries.set(name, profile === "standard")
+  if (accepted.includes("exceptions")) {
+    for (const [rule, path] of exceptionsOption(value.exceptions, rules, checks, local)) entries.set(exceptionKey(rule, path), true)
+    const minutes = rememberOption(value.rememberConfirmations, local)
+    if (minutes !== undefined) entries.set("rememberConfirmations", String(minutes))
+  }
   warnings.push(...local.map((line) => `${where}: ${line}`))
   return { entries, ...(profile ? { profile } : {}), label: where }
 }
@@ -1336,9 +1526,18 @@ function readAgents(value: unknown, where: string, rules: readonly CustomRule[],
 }
 
 /** Global source or guard.json; `report`: warnings of the top level and `agents` (the global file's repeat the effective options'). */
-function readSource(data: Readonly<Record<string, unknown>>, label: string, global: boolean, rules: readonly CustomRule[], warnings: string[], report = true): Source {
+function readSource(
+  data: Readonly<Record<string, unknown>>,
+  label: string,
+  global: boolean,
+  rules: readonly CustomRule[],
+  checks: FileChecks,
+  warnings: string[],
+  report = true,
+): Source {
   const local = report ? warnings : []
-  const top = readSection(data, label, rules, local, [...POLICY_KEYS, "agents", ...(global ? [...GLOBAL_ONLY_KEYS, REDACTION_OFF] : [])])
+  // `rules` of the global guard.json: read by `resolveVersion` (those of a global opencode.json are the plugin options').
+  const top = readSection(data, label, rules, local, [...POLICY_KEYS, ...WAIVER_KEYS, "agents", ...(global ? [...GLOBAL_ONLY_KEYS, REDACTION_OFF, "rules"] : [])], checks)
   const agents = readAgents(data.agents, label, rules, local)
   const projects: ProjectSection[] = []
   const trusted: string[] = []
@@ -1349,7 +1548,13 @@ function readSource(data: Readonly<Record<string, unknown>>, label: string, glob
         const where = `${label}, projects[${JSON.stringify(dir)}]`
         if (!dir.startsWith("/")) warnings.push(`${where} ignored: the directory must be an absolute path`)
         else if (!isRecord(section)) warnings.push(`${where} ignored: it must be an object`)
-        else projects.push({ dir, label: where, top: readSection(section, where, rules, warnings, [...POLICY_KEYS, "agents"]), agents: readAgents(section.agents, where, rules, warnings) })
+        else
+          projects.push({
+            dir,
+            label: where,
+            top: readSection(section, where, rules, warnings, [...POLICY_KEYS, ...WAIVER_KEYS, "agents"], checks),
+            agents: readAgents(section.agents, where, rules, warnings),
+          })
       }
   }
   if (global && data.trustedProjects !== undefined) {
@@ -1373,6 +1578,8 @@ function scopeLayers(
   parsed: {
     readonly rules: readonly CustomRule[]
     readonly overrides: ReadonlyMap<string, RuleOverride>
+    readonly exceptions: ReadonlyArray<readonly [string, string]>
+    readonly remember: number | undefined
     readonly profile: Profile
     readonly refusal: (matches: (options: Readonly<Record<string, unknown>>) => boolean) => string | undefined
     readonly declarations: readonly PluginDeclaration[] | string
@@ -1385,8 +1592,8 @@ function scopeLayers(
   const label = inputs.origin === undefined ? {} : { label: inputs.origin }
   const optionsOf = (label: string) => entryOf(parsed.declarations, label) ?? {}
   const [globalOptions, systemOptions] = [optionsOf("global"), optionsOf("system")]
-  const globalFile = readSource(globalOptions, "global configuration", true, rules, warnings, false)
-  const systemFile = readSource(systemOptions, "system configuration", true, rules, warnings, false)
+  const globalFile = readSource(globalOptions, "global configuration", true, rules, inputs, warnings, false)
+  const systemFile = readSource(systemOptions, "system configuration", true, rules, inputs, warnings, false)
   for (const key of GLOBAL_ONLY_KEYS)
     if (options[key] !== undefined && ![globalOptions, systemOptions].some((source) => JSON.stringify(source[key]) === JSON.stringify(options[key])))
       warnings.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
@@ -1406,6 +1613,20 @@ function scopeLayers(
   const byModel = flag(options.selfProtectionByModel) === true
   if (byModel !== (globalFile.top.entries.get("selfProtectionByModel") ?? false) || (typeof flag(options.selfProtectionByModel) === "boolean" && !globalFile.top.entries.has("selfProtectionByModel")))
     ops.push({ key: "selfProtectionByModel", value: byModel, text: described("selfProtectionByModel", byModel), certify: () => refusal((declaration) => (flag(declaration.selfProtectionByModel) === true) === byModel), ...label })
+  // Exceptions and memory delay the global file does not set: an exception adds to the global sources' ones.
+  for (const [rule, path] of parsed.exceptions) {
+    const key = exceptionKey(rule, path)
+    if (!globalFile.top.entries.has(key))
+      ops.push({ key, value: true, text: described(key, true), certify: () => refusal((declaration) => declaresException(declaration, rules, inputs, rule, path)), ...label })
+  }
+  if (parsed.remember !== undefined && String(parsed.remember) !== globalFile.top.entries.get("rememberConfirmations"))
+    ops.push({
+      key: "rememberConfirmations",
+      value: String(parsed.remember),
+      text: `rememberConfirmations ${parsed.remember}`,
+      certify: () => refusal((declaration) => rememberOption(declaration.rememberConfirmations, []) === parsed.remember),
+      ...label,
+    })
   const explicit = (source: Readonly<Record<string, unknown>>) =>
     Object.fromEntries(POLICY_SWITCHES.flatMap((name) => (typeof flag(source[name]) === "boolean" ? [[name, flag(source[name])]] : []))) as Partial<Record<PolicySwitch, boolean>>
   // `agents` sections: only what differs from the global file's (a section left out keeps the global file's).
@@ -1438,21 +1659,53 @@ function scopeLayers(
     },
     ...(inputs.project ? { project: inputs.project } : {}),
     realPath: inputs.realPath,
+    ...(inputs.regularFile ? { regularFile: inputs.regularFile } : {}),
     keyed: [options, globalOptions, systemOptions].some((source) => ["agents", ...GLOBAL_ONLY_KEYS].some((key) => source[key] !== undefined)),
     ...(parsed.modelUndeclared === undefined ? {} : { modelUndeclared: parsed.modelUndeclared }),
     ...(systemSwitch(parsed.declarations) === undefined ? {} : { systemModel: systemSwitch(parsed.declarations) }),
   }
 }
 
-/** Resolves the settings for the guard.json files present: never throws on their content (each problem is a warning). */
-export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Version {
+/**
+ * Resolves the settings for the guard.json files present: never throws on their content (each problem is a warning).
+ * `previous`: the version in force, whose global guard.json rules stay while that file is present but ignored, or while
+ * its `rules` is not a list; a rule whose entry is discarded stays under the same identifier.
+ */
+export function resolveVersion(layers: Layers, files: readonly GuardFile[], previous?: Version): Version {
   const warnings: string[] = []
-  const sources = files.flatMap((file) => {
-    if (file.data) return [{ file, source: readSource(file.data, file.label, file.global, layers.rules, warnings) }]
-    warnings.push(`${file.label} ignored: ${file.reason ?? "it cannot be read"}`)
-    return []
-  })
-  const globalGuards = sources.filter((item) => item.file.global).map((item) => item.source)
+  const errors: string[] = []
+  // The user's rules of the global guard.json, read first: every source's settings are checked against all of them.
+  const globalGuard = files.find((file) => file.global)
+  let guardRules: readonly CustomRule[] = []
+  const stay = (count: number) => (count === 1 ? "the rule read from it last stays" : `the ${count} rules read from it last stay`)
+  if (globalGuard?.data) {
+    // A deny rule never lost to an edit either: `rules` no longer a list, or an entry discarded (pattern, verdict).
+    const discarded: string[] = []
+    const unusable = globalGuard.data.rules !== undefined && !Array.isArray(globalGuard.data.rules)
+    guardRules = rulesOption(globalGuard.data.rules, warnings, GUARD_RULES, discarded)
+    const read = guardRules
+    const kept = (previous?.guardRules ?? []).filter((rule) => unusable || (discarded.includes(rule.id) && !read.some((current) => current.id === rule.id)))
+    if (kept.length) {
+      guardRules = [...guardRules, ...kept]
+      const what = unusable ? "rules is not a list" : `rules ${[...new Set(kept.map((rule) => JSON.stringify(rule.id)))].join(", ")} discarded`
+      errors.push(`${globalGuard.label}: ${what}; ${stay(kept.length)} in force until it is valid again`)
+    }
+  } else if (globalGuard && previous?.guardRules?.length) {
+    // A deny rule never lost to a broken file: kept until the file is valid again (removed with the file).
+    guardRules = previous.guardRules
+    errors.push(`${globalGuard.label} ignored: ${globalGuard.reason ?? "it cannot be read"}; ${stay(guardRules.length)} in force until it is valid again`)
+  }
+  for (const rule of guardRules)
+    if (layers.rules.some((option) => option.id === rule.id))
+      warnings.push(`${GUARD_RULES.label}: rules: "${rule.id}" is also the identifier of a rule of the plugin options: both rules apply`)
+  const rules = [...layers.rules, ...guardRules]
+  const globalGuards: Source[] = []
+  const projectFiles: Array<GuardFile & { readonly data: Readonly<Record<string, unknown>> }> = []
+  for (const file of files)
+    if (!file.data) {
+      if (!(file.global && errors.length)) warnings.push(`${file.label} ignored: ${file.reason ?? "it cannot be read"}`)
+    } else if (file.global) globalGuards.push(readSource(file.data, file.label, true, rules, layers, warnings))
+    else projectFiles.push({ ...file, data: file.data })
   const globalSources = [layers.globalFile, layers.systemFile, ...globalGuards]
   const { project, realPath } = layers
   const real = (dir: string, where: string) => {
@@ -1465,9 +1718,12 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
   const listed = globalSources.flatMap((source) => source.trusted.flatMap((dir) => (dir === "*" ? [dir] : (real(dir, `${source.label}, trustedProjects`) ?? []))))
   const isTrusted = (path: string | undefined) => path !== undefined && listed.some((dir) => dir === "*" || within(path, dir))
   const trusted = isTrusted(project)
-  const projectGuards = sources
-    .filter((item) => !item.file.global)
-    .map((item) => ({ ...item.source, trusted: item.file.dir !== undefined && isTrusted(realPath(item.file.dir)) }))
+  // A project guard.json is read once its trust is known: not trusted, its relaxations do not count, and the paths it chose
+  // are kept as written, not consulted.
+  const projectGuards = projectFiles.map((file) => {
+    const trusted = file.dir !== undefined && isTrusted(realPath(file.dir))
+    return { ...readSource(file.data, file.label, false, rules, trusted ? layers : AS_WRITTEN, warnings), trusted }
+  })
   // Matching `projects` sections, the outermost directory first (the closest one wins).
   const matched = globalSources
     .flatMap((source) => source.projects)
@@ -1529,6 +1785,20 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
         warn?.(`ruleOverrides.${rule} "model" ignored: this rule is always active ("model" needs selfProtectionByModel)`)
         state = applied(state, `rule:${rule}`, "none")
       }
+    // A setting read before a rule of the global guard.json took its identifier (plugin options, global and system files):
+    // ignored as for the options' rules.
+    for (const rule of state.overrides.keys())
+      if (rules.some((custom) => custom.id === rule)) {
+        warn?.(`ruleOverrides.${rule} ignored: it names one of your rules (set its verdict in rules)`)
+        state = applied(state, `rule:${rule}`, "none")
+      }
+    for (const rule of state.exceptions.keys())
+      if (rules.some((custom) => custom.id === rule)) {
+        warn?.(`exceptions.${rule} ignored: it names one of your rules (only ${[...TARGETED_RULES].join(", ")} accepts exceptions)`)
+        const exceptions = new Map(state.exceptions)
+        exceptions.delete(rule)
+        state = { ...state, exceptions, origins: new Map([...state.origins].filter(([key]) => !key.startsWith(exceptionKey(rule, "")))) }
+      }
     return state
   }
   const base = scopeOf(stateFor(undefined, undefined, undefined, (line) => warnings.push(line)), grants(undefined, undefined))
@@ -1556,9 +1826,9 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
   let shownProfile: Profile = globalTops.reduce<Profile>((last, section) => section.profile ?? last, "standard")
   if (profile !== effective.globalProfile) shownProfile = profile
   for (const source of projectGuards) if (source.top.profile === "standard" || (source.top.profile && source.trusted)) shownProfile = source.top.profile
-  const read = sources.map((item) => item.source.label)
+  const read = files.filter((file) => file.data).map((file) => file.label)
   // Formats turned off by the global guard.json: its top level only (a project's file or section is reported by `readSection`).
-  const redactionOff = [...new Set(sources.filter((item) => item.file.global).flatMap((item) => redactionOffOption(item.file.data?.[REDACTION_OFF], item.file.label, warnings)))]
+  const redactionOff = [...new Set(files.filter((file) => file.global && file.data).flatMap((file) => redactionOffOption(file.data?.[REDACTION_OFF], file.label, warnings)))]
   return {
     base,
     scope: (main, sub, call) => scope(main, sub, call),
@@ -1567,6 +1837,9 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
     profile: shownProfile,
     trusted,
     warnings: [...new Set(warnings)],
+    ...(errors.length ? { errors } : {}),
+    rules,
+    ...(guardRules.length ? { guardRules } : {}),
     listed,
     settings(main) {
       const state = stateFor(main, undefined, undefined)
@@ -1576,6 +1849,10 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[]): Ver
         value("localAsks", state.localAsksByModel ? "model" : "ask"),
         value("selfProtectionByModel", state.selfProtectionByModel),
         ...[...RULE_FEATURES.keys()].flatMap((rule) => (state.overrides.has(rule) ? [value(`rule:${rule}`, state.overrides.get(rule)!)] : [])),
+        value("rememberConfirmations", state.rememberMinutes > 0 ? `${state.rememberMinutes} min` : "off"),
+        ...[...state.exceptions].flatMap(([rule, paths]) =>
+          [...paths].sort().map((path) => ({ key: `exceptions.${rule}`, value: path, origin: state.origins.get(exceptionKey(rule, path)) ?? "default" })),
+        ),
       ]
     },
     ...(redactionOff.length ? { redactionOff } : {}),

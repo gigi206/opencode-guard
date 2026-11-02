@@ -133,7 +133,7 @@ describe("lot 47, PLA-5: key content, limits raised then ask beyond", () => {
     const absent = contentIo(ordinaryThenKey(0))
     const found = shellFinding(`cat ${names(1000).replace(/n/g, "a")} material`, reading(absent.io))
     assert.equal(shown(found), "ask/secret-file-read")
-    assert.equal(found!.reason, "access to a credential file")
+    assert.equal(found!.reason, "access to a credential file (material)")
     // Opened files: 100 regular files without a key before it.
     const opened = contentIo(ordinaryThenKey(100))
     assert.equal(shown(shellFinding(`cat ${names(100)} material`, reading(opened.io))), "ask/secret-file-read")

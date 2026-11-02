@@ -4,12 +4,25 @@ import { patchTargets } from "../patch.ts"
 import { resolveLike } from "../scripts.ts"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes } from "./code-network.ts"
-import { entrusted, overridden, ruleEnabled, type ActiveRules } from "./features.ts"
-import { credentialFile, exactSystemWrite, exactWriteClass, protectedWriteClass, strictestKind, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WritePathContext } from "./sensitive-paths.ts"
+import { entrusted, overridden, ruleEnabled, waivable, waiverOf, type ActiveRules } from "./features.ts"
+import {
+  credentialFile,
+  exactSystemWrite,
+  exactWriteClass,
+  protectedWriteClass,
+  realFile,
+  strictestKind,
+  systemWrite,
+  targetable,
+  uncheckedCredentialReason,
+  uncheckedWriteReason,
+  type CredentialContext,
+  type WritePathContext,
+} from "./sensitive-paths.ts"
 import { shellFinding } from "./shell.ts"
-import { decidable, INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
+import { decidable, INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type WaiverContext } from "./types.ts"
 
-export interface ToolRuleContext extends WritePathContext, CredentialContext {
+export interface ToolRuleContext extends WritePathContext, CredentialContext, WaiverContext {
   readonly redactor: Redactor
   readonly home?: string
   readonly custom?: readonly CustomRule[]
@@ -76,11 +89,36 @@ function record(input: unknown): Record<string, unknown> {
   return input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {}
 }
 
-/** Credential file; content not checked (limit): ask from the same rule, with its own reason, never left to the model. */
-function secretRead(path: string, ctx: ToolRuleContext): Finding | undefined {
+/**
+ * How a tool resolves a path it names: `session`, like OpenCode's `read`, `glob` and `grep` (`resolvePath`: `~` expanded,
+ * relative to the session directory); `absolute`, an absolute path only (an MCP server resolves the others its own way);
+ * `none`, never a file (a pattern).
+ */
+type PathForm = "session" | "absolute" | "none"
+
+/**
+ * Real path of the existing regular file a tool names (`realFile`); unknown otherwise, and for a path that is not absolute
+ * or has a `..` component (`targetable`).
+ */
+function toolTarget(path: string, form: PathForm, ctx: ToolRuleContext): string | undefined {
+  if (!targetable(path)) return undefined
+  const absolute = form === "session" ? resolveLike("/", path) : form === "absolute" ? path : undefined
+  return absolute === undefined ? undefined : realFile(absolute, ctx)
+}
+
+/**
+ * Credential file; content not checked (limit): ask from the same rule, with its own reason, never left to the model.
+ * After its setting, an ask whose file is known (`waivable` only) is lifted by an exception or the memory.
+ */
+function secretRead(path: string, ctx: ToolRuleContext, form: PathForm = "none"): Finding | undefined {
   if (!path || !ruleEnabled("secret-file-read", ctx.active)) return undefined
   const found = credentialFile(path, ctx)
-  if (found === true) return entrusted(overridden({ verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }, ctx.active), ctx.active)
+  if (found === true) {
+    const finding = overridden({ verdict: "ask", rule: "secret-file-read", reason: `access to a credential file (${path})` }, ctx.active)
+    const target = finding.verdict === "ask" && waivable(finding.rule, ctx.active) ? toolTarget(path, form, ctx) : undefined
+    if (target !== undefined && waiverOf(finding.rule, [target], ctx.active, ctx)) return undefined
+    return entrusted(target === undefined ? finding : { ...finding, targets: [target] }, ctx.active)
+  }
   return found === LIMIT_REACHED ? overridden({ verdict: "ask", rule: "secret-file-read", reason: uncheckedCredentialReason(path) }, ctx.active) : undefined
 }
 
@@ -317,16 +355,16 @@ export function toolFinding(tool: string, input: unknown, ctx: ToolRuleContext):
   const custom = customFindings(tool, input, ctx)
   // Each check separate (`checked`): a check that throws never loses another's denial.
   const placeholderOf = () => checked("the placeholder check", ctx, () => placeholder(JSON.stringify(input) ?? ""))
-  const read = (path: string) => checked("the credential file check", ctx, () => secretRead(path, ctx))
+  const read = (path: string, form?: PathForm) => checked("the credential file check", ctx, () => secretRead(path, ctx, form))
   const write = (path: string) => checked("the protected location check", ctx, () => protectedWrite(path, ctx))
   switch (tool) {
     case "shell":
       return shellFinding(str(args.command), ctx)
     case "read":
-      return mostSevere([read(str(args.path)), ...custom])
+      return mostSevere([read(str(args.path), "session"), ...custom])
     case "glob":
     case "grep":
-      return mostSevere([read(str(args.path)), read(str(args.pattern)), read(str(args.include)), ...custom])
+      return mostSevere([read(str(args.path), "session"), read(str(args.pattern)), read(str(args.include)), ...custom])
     // Placeholder searched in the whole input: robust to a renaming of fields by OpenCode.
     case "edit":
     case "write":
@@ -363,7 +401,7 @@ export function toolFinding(tool: string, input: unknown, ctx: ToolRuleContext):
       const located = checked("the tool arguments", ctx, () => {
         const paths = argumentPaths(input)
         const locations = strictestProtected(paths.map((path) => protectedArgument(path, ctx)))
-        return mostSevere(paths.flatMap((path, index) => [secretRead(path, ctx), locations[index]]))
+        return mostSevere(paths.flatMap((path, index) => [secretRead(path, ctx, "absolute"), locations[index]]))
       })
       return mostSevere([
         placeholderOf(),

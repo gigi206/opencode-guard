@@ -46,7 +46,8 @@ describe("l46-service", () => {
         assert.equal(witness?.rule, rule)
         assert.deepEqual(witnessWith, witness)
         assert.notEqual(without?.rule, rule)
-        assert.deepEqual(withDirs, witness)
+        // The reason of a read names its own file: same verdict and rule.
+        assert.deepEqual({ ...withDirs, reason: withDirs?.reason.replace(file, "~/.config/opencode/service.json") }, { ...witness, reason: witness?.reason.replace("/home/test", "~") })
       })
   }
 

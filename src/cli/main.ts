@@ -1,7 +1,7 @@
 // Command line of the guard plugin (`bin/guard`): its rules, its settings in the global guard.json, the settings in
 // force and its latest asks and denials. It asks for no confirmation: launched by the agent, it is itself a
 // self-protection ask of the plugin (`guard-cli`), the only thing that stops the agent.
-import { RULE_FEATURES } from "../rules/features.ts"
+import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { OPENCODE_FORMAT_SUMMARIES } from "../secrets/opencode-service.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import type { Redactor } from "../secrets/redact.ts"
@@ -16,24 +16,30 @@ import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
-import { directoryOf, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
+import { addRule, directoryOf, exceptPath, MINUTES, removeRule, resetPath, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
 
 export { USAGE } from "./help.ts"
 
 class UsageError extends CliError {}
 
+/** Options of `rules add`, each with a value; a pattern or a reason is taken as is, even when it starts with `-`. */
+const RULE_OPTIONS = ["pattern", "verdict", "reason", "tools", "flags"] as const
+type RuleOption = (typeof RULE_OPTIONS)[number]
+
 interface Parsed {
   readonly positionals: string[]
   agent?: string
   project?: string | true
+  path?: string
   all?: boolean
   builtins?: boolean
   custom?: boolean
   explain?: string
+  rule?: Partial<Record<RuleOption, string>>
 }
 
 /** Options allowed by a command; `--project` takes the next argument as its directory unless it is an option. */
-function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "all" | "builtins" | "custom" | "explain">, explained = "a rule identifier"): Parsed {
+function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "project" | "path" | "all" | "builtins" | "custom" | "explain" | RuleOption>, explained = "a rule identifier"): Parsed {
   const parsed: Parsed = { positionals: [] }
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!
@@ -46,6 +52,15 @@ function parse(args: readonly string[], allowed: ReadonlyArray<"agent" | "projec
       const next = args[index + 1]
       parsed.project = inline ?? (next !== undefined && !next.startsWith("-") ? args[++index]! : true)
       if (parsed.project === "") throw new UsageError("--project needs a directory, or nothing")
+    } else if (name === "--path" && allowed.includes("path")) {
+      const value = inline ?? args[++index]
+      if (!value || value.startsWith("-")) throw new UsageError("--path needs a file")
+      parsed.path = value
+    } else if (RULE_OPTIONS.some((option) => name === `--${option}`) && allowed.includes(name.slice(2) as RuleOption)) {
+      const option = name.slice(2) as RuleOption
+      const value = inline ?? args[++index]
+      if (value === undefined || value === "" || (option !== "pattern" && option !== "reason" && value.startsWith("-"))) throw new UsageError(`--${option} needs a value`)
+      parsed.rule = { ...parsed.rule, [option]: value }
     } else if (arg === "--all" && allowed.includes("all")) parsed.all = true
     else if (arg === "--builtins" && allowed.includes("builtins")) parsed.builtins = true
     else if (arg === "--custom" && allowed.includes("custom")) parsed.custom = true
@@ -64,16 +79,45 @@ function expect(parsed: Parsed, min: number, max: number, what: string): void {
   if (parsed.positionals.length > max) throw new UsageError(`unexpected argument ${parsed.positionals[max]}`)
 }
 
-/** A rule's setting (`allow`, `off`, `ask`, `deny`, `model`) or its removal (`reset`), at the target given by the options. */
+/**
+ * A rule's setting (`off`, `ask`, `deny`, `model`) or its removal (`reset`), at the target given by the options; with
+ * `--path`, `off` and `reset` add or remove one file's exception instead (a rule that accepts them, never in an agents
+ * section).
+ */
 function setting(word: string, args: readonly string[], io: CliIo): void {
-  const parsed = parse(args, ["agent", "project"])
+  const parsed = parse(args, ["agent", "project", "path"])
   expect(parsed, 1, 1, "a rule identifier")
+  const rule = parsed.positionals[0]!
+  if (parsed.path !== undefined) {
+    if (word !== "off" && word !== "reset") throw new UsageError(`--path goes with rules off or rules reset only, not with ${word}`)
+    if (parsed.agent !== undefined) throw new UsageError("--path does not go with --agent: an agents section accepts no exception")
+    if (!TARGETED_RULES.has(rule)) throw new UsageError(`--path goes with ${[...TARGETED_RULES].join(", ")} only: no other rule accepts exceptions`)
+  }
   const target: Target = {
     ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
     ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, word === "reset") }),
   }
-  if (word === "reset") resetRule(io, parsed.positionals[0]!, target)
-  else setRule(io, word as SettingWord, parsed.positionals[0]!, target)
+  if (parsed.path !== undefined) (word === "reset" ? resetPath : exceptPath)(io, rule, parsed.path, target)
+  else if (word === "reset") resetRule(io, rule, target)
+  else setRule(io, word as SettingWord, rule, target)
+}
+
+/** `rules add <id> --pattern <regex> --verdict ask|deny […]` and `rules remove <id>`: the top level of the global guard.json only. */
+function ruleEntry(word: "add" | "remove", args: readonly string[], io: CliIo): void {
+  const parsed = parse(args, ["agent", "project", ...RULE_OPTIONS])
+  if (parsed.agent !== undefined || parsed.project !== undefined) throw new UsageError(`rules ${word} writes the top level of the global guard.json only (no --agent or --project)`)
+  expect(parsed, 1, 1, "a rule identifier")
+  const id = parsed.positionals[0]!
+  const rule = parsed.rule ?? {}
+  if (word === "remove") {
+    if (parsed.rule) throw new UsageError(`--${Object.keys(rule)[0]} goes with rules add only`)
+    return removeRule(io, id)
+  }
+  if (rule.pattern === undefined) throw new UsageError("--pattern is required")
+  if (rule.verdict === undefined) throw new UsageError("--verdict is required")
+  const tools = rule.tools === undefined ? undefined : rule.tools.split(",").map((tool) => tool.trim())
+  if (tools?.some((tool) => !tool)) throw new UsageError("--tools needs tool names separated by commas, or *")
+  addRule(io, id, { pattern: rule.pattern, verdict: rule.verdict, ...(rule.reason === undefined ? {} : { reason: rule.reason }), ...(tools ? { tools } : {}), ...(rule.flags === undefined ? {} : { flags: rule.flags }) })
 }
 
 /**
@@ -117,6 +161,7 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       // `rules <setting> <rule>`: the same as the top-level setting commands.
       const [word, ...rest] = args
       if (word !== undefined && (SETTINGS as readonly string[]).concat("reset").includes(word)) return setting(word, rest, io)
+      if (word === "add" || word === "remove") return ruleEntry(word, rest, io)
       if (word === "on" || word === "allow") throw new UsageError(`unknown setting ${word} (guard rules ${word === "on" ? "reset" : "off"} <rule>)`)
       const parsed = parse(args, ["builtins", "custom", "explain"])
       expect(parsed, 0, 0, "")
@@ -174,6 +219,7 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       const key = parsed.positionals[0]!
       if (key === "ruleOverrides") throw new UsageError("a rule's setting is changed with guard rules off|ask|deny|model|reset <rule>")
       if (!Object.hasOwn(SWITCHES, key)) throw new UsageError(`unknown setting ${key} (one of ${Object.keys(SWITCHES).join(", ")})`)
+      if (key === MINUTES && parsed.agent !== undefined) throw new UsageError(`${MINUTES} does not go with --agent: an agents section does not accept it`)
       const target: Target = {
         ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
         ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, command === "unset") }),

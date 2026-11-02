@@ -2,7 +2,7 @@
 // (`eval "$(guard completion zsh)"`). The rule identifiers, the redaction formats and the settings are written into it
 // when it is generated, from the plugin's own lists: loaded at each shell start, it follows the plugin's version. zsh
 // runs the bash function through `bashcompinit`. Nothing is run on a completion.
-import { RULE_FEATURES } from "../rules/features.ts"
+import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import { SETTINGS, SWITCHES } from "./write.ts"
 
@@ -23,8 +23,10 @@ function bashFunction(): string {
   local settings="${words(Object.keys(SWITCHES))}"
   COMPREPLY=()
   case $prev in
-    --agent|--tool) return ;;
+    --agent|--tool|--pattern|--reason|--tools|--flags) return ;;
+    --verdict) COMPREPLY=($(compgen -W "ask deny" -- "$cur")); return ;;
     --project) COMPREPLY=($(compgen -d -- "$cur")); return ;;
+    --path) COMPREPLY=($(compgen -f -- "$cur")); return ;;
     --explain) [[ $cmd == rules ]] && words=$rules || words=$formats
       COMPREPLY=($(compgen -W "$words" -- "$cur")); return ;;
   esac
@@ -33,8 +35,11 @@ function bashFunction(): string {
   else
     case $cmd in
       rules)
-        if [[ $COMP_CWORD -eq 2 ]]; then words="${words([...SETTINGS, "reset"])} --builtins --custom --explain"
-        elif [[ " ${words([...SETTINGS, "reset"])} " == *" $sub "* ]]; then words="$rules --agent --project"; fi ;;
+        if [[ $COMP_CWORD -eq 2 ]]; then words="${words([...SETTINGS, "reset", "add", "remove"])} --builtins --custom --explain"
+        elif [[ " ${words([...SETTINGS, "reset"])} " == *" $sub "* ]]; then words="$rules --agent --project"
+          # A file's exception: off or reset of a rule that accepts them.
+          [[ ($sub == off || $sub == reset) && " ${words(TARGETED_RULES)} " == *" \${COMP_WORDS[3]} "* ]] && words="$words --path"
+        elif [[ $sub == add ]] && [[ $COMP_CWORD -ge 4 ]]; then words="--pattern --verdict --reason --tools --flags"; fi ;;
       redaction)
         if [[ $COMP_CWORD -eq 2 ]]; then words="off on --builtins --custom --explain"
         elif [[ $sub == off || $sub == on ]] && [[ $COMP_CWORD -eq 3 ]]; then words=$formats; fi ;;

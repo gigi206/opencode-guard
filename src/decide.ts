@@ -4,10 +4,10 @@ import { ModelError, type ModelClient } from "./model/client.ts"
 import { QUESTIONS, SCRIPTS_NOTE, STATE_NOTE, interpret } from "./model/questions.ts"
 import { shellFinding, type ShellRuleContext } from "./rules/shell.ts"
 import { CODEMODE_TOOL, toolFinding } from "./rules/tools.ts"
-import { INTERNAL_ERROR_RULE, mostSevere, type Finding, type Verdict } from "./rules/types.ts"
+import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule, type Finding, type Verdict, type Waiver, type WaiverContext } from "./rules/types.ts"
 import { createCredentialContent } from "./credential-content.ts"
 import { createRealPath } from "./real-path.ts"
-import { bySetting, hardened, ruleEnabled } from "./rules/features.ts"
+import { bySetting, hardened, ruleEnabled, withoutWaivers } from "./rules/features.ts"
 import { scriptDirectories, type UnverifiableCause } from "./scripts.ts"
 import type { Redactor } from "./secrets/redact.ts"
 import type { Logger } from "./types.ts"
@@ -44,6 +44,12 @@ export interface ToolCall {
   readonly scripts?: readonly ExecutedScript[]
   /** Settings of the call (agent and project sections, `scopes.ts`); absent: the configuration's. */
   readonly scope?: Scope
+  /** The user's rules in force (`scopes.ts`, re-read with the global guard.json); absent: the configuration's. */
+  readonly rules?: readonly CustomRule[]
+  /** Memory of the confirmations of the call's session (`gate.ts`); absent: nothing is remembered. */
+  readonly remembered?: WaiverContext["remembered"]
+  /** A call made by CodeMode code (`gate.ts`): neither an exception nor the memory lifts its findings. */
+  readonly fromCode?: boolean
 }
 
 export interface Decision {
@@ -70,6 +76,10 @@ export interface Decision {
    * in `reason`.
    */
   readonly parts?: ReasonParts
+  /** Targets of the local ask shown (`Finding.targets`): the set the user confirms (memory of confirmations). */
+  readonly targets?: readonly string[]
+  /** Findings lifted by an exception or the memory, once each (for the log). */
+  readonly waived?: readonly Waiver[]
 }
 
 export interface ReasonParts {
@@ -276,7 +286,14 @@ export function createDecider(deps: DeciderDeps) {
     } catch {}
   }
 
+  /** Decision, with the findings lifted by an exception or the memory, once each (the views of a command may repeat one). */
   async function decide(call: ToolCall): Promise<Decision> {
+    const lifted = new Map<string, Waiver>()
+    const decision = await judge(call, (waiver) => lifted.set(JSON.stringify([waiver.rule, waiver.kind, waiver.targets]), waiver))
+    return lifted.size ? { ...decision, waived: [...lifted.values()] } : decision
+  }
+
+  async function judge(call: ToolCall, waived: (waiver: Waiver) => void): Promise<Decision> {
     // Input that cannot be redacted: local rules still judge (a denial holds), but nothing is sent to the
     // model.
     let redactedInput: unknown = UNAVAILABLE_INPUT
@@ -294,10 +311,11 @@ export function createDecider(deps: DeciderDeps) {
     const directories = call.cwds ?? (call.directory === undefined ? [] : [call.directory])
     const credentialContent = deps.readContent && directories.length > 0 ? createCredentialContent({ directories, home: deps.home }) : undefined
     const realPaths = deps.resolveLinks ? createRealPath({ directories }) : undefined
+    const policy = call.scope?.policy ?? config.policy
     const ruleContext = {
       redactor,
       home: deps.home,
-      custom: config.rules,
+      custom: call.rules ?? config.rules,
       cwd: call.directory,
       ...(call.cwds ? { cwds: call.cwds } : {}),
       ...(credentialContent ? { credentialContent } : {}),
@@ -305,9 +323,11 @@ export function createDecider(deps: DeciderDeps) {
       protectedDirs: deps.protectedDirs,
       ...(deps.pluginDirs ? { pluginDirs: deps.pluginDirs } : {}),
       ...(deps.serviceDirs ? { serviceDirs: deps.serviceDirs } : {}),
-      active: call.scope?.policy ?? config.policy,
+      active: call.fromCode ? withoutWaivers(policy) : policy,
       // Tool check that throws (`rules/tools.ts`, ask for it alone): cause to the log.
       report,
+      ...(call.remembered && !call.fromCode ? { remembered: call.remembered } : {}),
+      waived,
     }
     // A failing part (the command, a tracked script) gives an ask for itself alone: the others keep their
     // finding, denial included. The cause goes to the log; the reason shown stays generic.
@@ -323,12 +343,15 @@ export function createDecider(deps: DeciderDeps) {
     }
     const command = guarded("the tool call", () => toolFinding(call.tool, call.input, ruleContext))
     // A script may change directory itself: command and session directories, plus its own `cd`s;
-    // its relative paths are also looked up from them to recognize a key by its content.
+    // its relative paths are also looked up from them to recognize a key by its content. Neither an exception nor the
+    // memory lifts a finding there: the command that runs the script is not checked with its text.
     const scriptContext = (script: ExecutedScript) => {
-      if (call.directory === undefined) return ruleContext
+      const { remembered: _, ...context } = ruleContext
+      const unwaived = { ...context, active: withoutWaivers(context.active) }
+      if (call.directory === undefined) return unwaived
       const cwds = scriptDirectories(script.content, call.cwds ?? [call.directory], call.directory, deps.home)
       return {
-        ...ruleContext,
+        ...unwaived,
         cwds,
         ...(deps.readContent ? { credentialContent: createCredentialContent({ directories: cwds, home: deps.home }) } : {}),
         ...(deps.resolveLinks ? { realPaths: createRealPath({ directories: cwds }) } : {}),
@@ -352,6 +375,8 @@ export function createDecider(deps: DeciderDeps) {
     const local = found && { ...found, reason: `${shown}${note}` }
     if (local?.verdict === "deny") return { verdict: "deny", reason: local.reason, rule: local.rule, source: "local", redactedInput }
     if (local) {
+      // Targets of the local ask shown to the user, the set a confirmation remembers (never after an internal error).
+      const targets = local.targets && !unchecked.length ? { targets: local.targets } : {}
       // Local confirmation: the model opinion is shown to the user; it never changes the verdict (neither stricter:
       // the user keeps control of doubtful cases, nor looser). Unreachable: ask without opinion.
       const consultation = model && !modelSkipped(call.tool) && !unredacted ? await consult(call, redactedInput, model) : undefined
@@ -397,6 +422,7 @@ export function createDecider(deps: DeciderDeps) {
           judgedInFull: consultation.inFull,
           parts: { local: local.reason, opinion: shortOpinion(consultation.judgement), verdict: `${label}: ${consultation.judgement.verdict}` },
           ...timing(consultation),
+          ...targets,
         }
       if (local.modelDecides !== undefined && consultation && "error" in consultation)
         return {
@@ -406,8 +432,9 @@ export function createDecider(deps: DeciderDeps) {
           source: consultation.source,
           redactedInput,
           ...timing(consultation),
+          ...targets,
         }
-      return { verdict: "ask", reason: local.reason, rule: local.rule, source: "local", redactedInput, ...timing(consultation) }
+      return { verdict: "ask", reason: local.reason, rule: local.rule, source: "local", redactedInput, ...timing(consultation), ...targets }
     }
     if (READ_ONLY_TOOLS.has(call.tool)) return { verdict: "allow", reason: "read-only tool, no local rule matched", source: "read-only", redactedInput }
     if (TASK_LIST_TOOLS.has(call.tool))

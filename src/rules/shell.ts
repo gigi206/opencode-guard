@@ -1,11 +1,27 @@
 import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes, NETWORK_FUNCTION } from "./code-network.ts"
-import { entrusted, hardened, overrideOf, ruleEnabled, withoutLowered, type ActiveRules } from "./features.ts"
-import { credentialFile, isCredentialFile, pathTokens, protectedWriteClass, systemWrite, uncheckedCredentialReason, uncheckedWriteReason, type CredentialContext, type WriteClass, type WritePathContext } from "./sensitive-paths.ts"
-import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding } from "./types.ts"
+import { entrusted, hardened, overrideOf, ruleEnabled, waivable, waiverOf, withoutLowered, type ActiveRules } from "./features.ts"
+import {
+  credentialFile,
+  hasParentComponent,
+  isCredentialFile,
+  lexicalPath,
+  namedCredentialFile,
+  pathTokens,
+  protectedWriteClass,
+  realFile,
+  systemWrite,
+  targetable,
+  uncheckedCredentialReason,
+  uncheckedWriteReason,
+  type CredentialContext,
+  type WriteClass,
+  type WritePathContext,
+} from "./sensitive-paths.ts"
+import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type WaiverContext } from "./types.ts"
 
-export interface ShellRuleContext extends WritePathContext, CredentialContext {
+export interface ShellRuleContext extends WritePathContext, CredentialContext, WaiverContext {
   readonly redactor: Redactor
   readonly home?: string
   readonly custom?: readonly CustomRule[]
@@ -17,6 +33,11 @@ export interface ShellRuleContext extends WritePathContext, CredentialContext {
   readonly active?: ActiveRules
   /** Content of an executed script (`scriptFinding`): the placeholder rule (write) does not apply to an execution. */
   readonly executedScript?: boolean
+  /**
+   * The other sub-commands of the same `permission.evaluate`: a target is retained only if each of them only reads
+   * (`partsOnlyRead`), like the other parts of a command.
+   */
+  readonly others?: readonly string[]
 }
 
 /**
@@ -280,6 +301,8 @@ interface RegexRule {
   readonly unfinished?: true
   /** Ask about a change of the plugin's settings: never left to the decision model (user's decision), `selfProtectionByModel` included. */
   readonly userOnly?: true
+  /** Reason and targets of the finding read with the test (`secret-file-read`: the files named). */
+  readonly detail?: (command: string, ctx: ShellRuleContext) => Pick<Finding, "reason" | "targets">
 }
 
 const re = (regex: RegExp) => (command: string) => regex.test(command)
@@ -461,18 +484,271 @@ function identityFiles(command: string): string[] {
   return keys
 }
 
+/** Credential files of a command (`secret-file-read`). */
+interface CredentialReading {
+  /** A file the rule asks about, a word not checked (`LIMIT_REACHED`, no file found), or neither. */
+  readonly found: boolean | typeof LIMIT_REACHED
+  /** Files named by the reason: absolute when computed without reading, otherwise as written. */
+  readonly shown: readonly string[]
+  /** Real paths of all the files (`Finding.targets`): only when the rule is `waivable` and every one is known. */
+  readonly targets?: readonly string[]
+}
+
+/** Paths named in a reason, then how many more. */
+const SHOWN_FILES = 3
+
 /**
- * Credential file among the command's words (`credentialFile`): true at the first recognized one (walk stopped there,
- * as before: same content lookups), `LIMIT_REACHED` if a word could not be checked, false otherwise.
+ * Credential files among the command's words (`credentialFile`). Default settings: after the first one, names only (same
+ * content lookups as before, none after it), for the reason. Exception or memory active (`waivable`): every word,
+ * content included, and the targets; a word not checked leaves the finding unfinished (no exception, no memory); all its
+ * targets excepted, or this exact set confirmed earlier in the session: no finding (the other rules are unchanged).
  */
-function credentialTokens(command: string, ctx: CredentialContext): boolean | typeof LIMIT_REACHED {
+function credentialTokens(command: string, ctx: ShellRuleContext): CredentialReading {
+  const waiving = waivable("secret-file-read", ctx.active)
   let unchecked = false
+  const files = new Set<string>()
   for (const token of pathTokens(command)) {
-    const found = credentialFile(token, ctx)
-    if (found === true) return true
-    if (found === LIMIT_REACHED) unchecked = true
+    const found = files.size > 0 && !waiving ? namedCredentialFile(token, ctx) : credentialFile(token, ctx)
+    if (found === true) files.add(token)
+    else if (found === LIMIT_REACHED) unchecked = true
   }
-  return unchecked ? LIMIT_REACHED : false
+  if (files.size === 0) return { found: unchecked ? LIMIT_REACHED : false, shown: [] }
+  // Relative or with a `..` component: as written (the file the shell opens is not known without reading).
+  const shown = [...files].map((file) => (hasParentComponent(file) ? undefined : lexicalPath(file, ctx.home, undefined)) ?? file)
+  const targets = waiving && !unchecked ? credentialTargets(command, [...files], ctx) : undefined
+  if (targets && waiverOf("secret-file-read", targets, ctx.active, ctx)) return { found: false, shown: [] }
+  return { found: true, shown, ...(targets ? { targets } : {}) }
+}
+
+/** Blank or operator around a whole word, outside quotes. */
+const WORD_BEFORE = /[\s;&|(<>]/
+const WORD_AFTER = /[\s;&|)<>]/
+/** Separators of `pathTokens`: the edges of the words it cuts. */
+const TOKEN_EDGE = /[\s'"`;|&<>()=,@]/
+
+/**
+ * Quote state of each character: 0 unquoted, 1 quoted or escaped, 2 opening quote, 3 closing quote. `undefined` where this
+ * simple reading could differ from the shell's (heredoc, comment, `$'…'`, backtick, substitution or parameter inside
+ * double quotes, quote not closed): no word is then taken as whole.
+ */
+function quoteStates(command: string): Uint8Array | undefined {
+  const states = new Uint8Array(command.length)
+  let quote: string | undefined
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!
+    if (quote) {
+      if (char === quote) {
+        states[i] = 3
+        quote = undefined
+        continue
+      }
+      if (quote === '"' && (char === "`" || (char === "$" && (command[i + 1] === "(" || command[i + 1] === "{")))) return undefined
+      states[i] = 1
+      if (quote === '"' && char === "\\" && i + 1 < command.length) states[++i] = 1
+    } else if (char === "\\") {
+      states[i] = 1
+      if (i + 1 < command.length) states[++i] = 1
+    } else if (char === "'" || char === '"') {
+      if (char === "'" && command[i - 1] === "$") return undefined
+      states[i] = 2
+      quote = char
+    } else if (char === "`" || (char === "<" && command[i + 1] === "<") || (char === "#" && (i === 0 || /[\s;&|(]/.test(command[i - 1]!)))) return undefined
+  }
+  return quote ? undefined : states
+}
+
+/**
+ * Every place `pathTokens` cut this word is a whole shell word: unquoted between blanks or operators, or the whole content
+ * of a quoted string. A piece of a longer word (quoted blank, escape, `=`, `,`, `@`) names another file.
+ */
+function wholeWord(command: string, word: string, states: Uint8Array): boolean {
+  const before = (at: number) => at < 0 || (states[at] === 0 && WORD_BEFORE.test(command[at]!))
+  const after = (at: number) => at >= command.length || (states[at] === 0 && WORD_AFTER.test(command[at]!))
+  const spans = wordSpans(command, word)
+  for (const [at, end] of spans) {
+    const inside = states.subarray(at, end)
+    if (inside.every((state) => state === 0) && before(at - 1) && after(end)) continue
+    if (inside.every((state) => state === 1) && states[at - 1] === 2 && states[end] === 3 && before(at - 2) && after(end + 1)) continue
+    return false
+  }
+  return spans.length > 0
+}
+
+type Span = readonly [number, number]
+
+/** Every place `pathTokens` cut this word (its edges), as [start, end). */
+function wordSpans(command: string, word: string): Span[] {
+  const edge = (at: number) => at < 0 || at >= command.length || TOKEN_EDGE.test(command[at]!)
+  const spans: Span[] = []
+  for (let at = command.indexOf(word); at >= 0; at = command.indexOf(word, at + 1)) if (edge(at - 1) && edge(at + word.length)) spans.push([at, at + word.length])
+  return spans
+}
+
+/** The command with these spans blanked (what lies outside the target words), in one pass. */
+function blanked(command: string, spans: readonly Span[]): string {
+  const chars = command.split("")
+  for (const [at, end] of spans) chars.fill(" ", at, end)
+  return chars.join("")
+}
+
+/** Beyond these, the targets are unfinished (linear cost): target words, substitutions, other sub-commands. */
+const MAX_TARGET_WORDS = 64
+const MAX_SUBSTITUTIONS = 32
+const MAX_OTHERS = 64
+
+/**
+ * Programs that, whatever their options, modify no file, launch no other program and run no code (GNU coreutils, grep,
+ * diffutils `cmp`, util-linux `rev`, shell built-ins `echo`, `pwd`, `true`, `false`): print or compare what they read.
+ * The only programs of a command an exception or the memory lifts, the one that names the target included. `sort`
+ * (output file, compression program), `uniq` (output operand), `diff` (an option pipes its output through `pr`), `sed`,
+ * `awk`, `tee`, `less`, `xxd`, `file`, `date`, `printf` (`-v` assigns), `jq` (runs its filter language) and `cd` (zsh
+ * hooks) are left out, as is any other program (a database client, a tool that runs commands).
+ */
+const READ_ONLY_COMMANDS = new Set([
+  ...["cat", "head", "tail", "wc", "grep", "cut", "tr", "nl", "tac", "rev", "fold", "paste", "base64", "od"],
+  ...["basename", "dirname", "realpath", "readlink", "pwd", "ls", "stat", "echo", "true", "false", "sleep"],
+  ...["sha1sum", "sha256sum", "sha512sum", "md5sum", "cksum", "cmp", "uname", "whoami", "id"],
+])
+
+/** Expansion that assigns a variable (`${x:=…}`, `${x=…}`, `$[…]`); arithmetic in parentheses is cut into parts. */
+const ASSIGNING_EXPANSION = /\$\{[^}]*=|\$\[/
+/** A plain name: unquoted, unescaped, without a path or an expansion. */
+const PLAIN_NAME = /^[\w.+-]+$/
+
+/**
+ * Parts of the command, each read in `text` (the command with the substitutions already masked): every substitution
+ * (`$(…)`, `<(…)`, `>(…)`, innermost first) is a part of its own, seen in its enclosing part as one word that is not a
+ * plain name; then cut at unquoted separators (sequence, pipeline, background, line) and parentheses (subshell,
+ * arithmetic, nesting the masking does not reach); `>&`, `&>`, `<&` and `>|` are redirections. More than
+ * `MAX_SUBSTITUTIONS`: `undefined`.
+ */
+function commandParts(command: string, states: Uint8Array): Array<{ readonly text: string; readonly span: Span }> | undefined {
+  const cut = (text: string, from: number, to: number) => {
+    const parts: Span[] = []
+    let start = from
+    for (let i = from; i < to; i++) {
+      const c = text[i]!
+      if (states[i] !== 0 || !/[;&|\n()]/.test(c)) continue
+      if (c === "&" && (text[i - 1] === ">" || text[i - 1] === "<" || text[i + 1] === ">")) continue
+      if (c === "|" && text[i - 1] === ">") continue
+      parts.push([start, i])
+      start = i + 1
+    }
+    parts.push([start, to])
+    return parts.filter(([at, end]) => text.slice(at, end).trim() !== "").map((span) => ({ text, span }))
+  }
+  let text = command
+  const parts: Array<{ readonly text: string; readonly span: Span }> = []
+  for (let masked = true; masked; ) {
+    masked = false
+    for (let i = 1; i < text.length; i++) {
+      if (states[i] !== 0 || states[i - 1] !== 0 || text[i] !== "(" || !/[$<>]/.test(text[i - 1]!)) continue
+      let j = i + 1
+      while (j < text.length && !(states[j] === 0 && (text[j] === "(" || text[j] === ")"))) j++
+      if (text[j] !== ")") continue
+      if (parts.length >= MAX_SUBSTITUTIONS) return undefined
+      parts.push(...cut(text, i + 1, j))
+      text = `${text.slice(0, i - 1)}$${"_".repeat(j - i + 1)}${text.slice(j + 1)}`
+      masked = true
+    }
+  }
+  return [...parts, ...cut(text, 0, text.length)]
+}
+
+/** Words of a part: cut at unquoted blanks. */
+function partWords(command: string, states: Uint8Array, [at, end]: Span): Span[] {
+  const words: Span[] = []
+  let start = -1
+  for (let i = at; i <= end; i++) {
+    const blank = i === end || (states[i] === 0 && /\s/.test(command[i]!))
+    if (blank && start >= 0) words.push([start, i])
+    if (blank) start = -1
+    else if (start < 0) start = i
+  }
+  return words
+}
+
+/**
+ * A redirection of the part to a file: output, append, read-write (it creates the file), `>&file`; never `/dev/null` nor a
+ * duplication of a descriptor (`2>&1`, `>&-`). A `>` before a parenthesis is a process substitution (its own part).
+ */
+function redirectsToFile(command: string, states: Uint8Array, [at, end]: Span): boolean {
+  const unquotedWord = (from: number) => {
+    let to = from
+    while (to < end && !(states[to] === 0 && /[\s;&|()<>]/.test(command[to]!))) to++
+    return { word: command.slice(from, to), plain: states.subarray(from, to).every((state) => state === 0) }
+  }
+  for (let i = at; i < end; i++) {
+    if (states[i] !== 0 || (command[i] !== ">" && !(command[i] === "<" && command[i + 1] === ">"))) continue
+    let j = i + (command[i] === "<" ? 2 : command[i + 1] === ">" ? 2 : 1)
+    if (command[j] === "|" || command[j] === "!") j++
+    const duplicated = command[j] === "&"
+    if (duplicated) j++
+    while (j < end && states[j] === 0 && /[^\S\n]/.test(command[j]!)) j++
+    const { word, plain } = unquotedWord(j)
+    if (word === "" && j >= end) continue
+    if (!(plain && (word === "/dev/null" || (duplicated && /^(?:\d+|-)$/.test(word))))) return true
+    i = j + word.length - 1
+  }
+  return false
+}
+
+/**
+ * Every part only reads: the one that names a target as every other one, substitutions included, a program of
+ * `READ_ONLY_COMMANDS` named alone (a plain name: neither an assignment, nor a path, nor a structural word), without a
+ * redirection to a file (set up before the program reads). Nowhere an expansion that assigns.
+ */
+function partsOnlyRead(command: string, states: Uint8Array, spans: readonly Span[]): boolean {
+  if (ASSIGNING_EXPANSION.test(blanked(command, spans))) return false
+  const parts = commandParts(command, states)
+  return parts !== undefined && parts.every(({ text, span: part }) => {
+    const [first] = partWords(text, states, part)
+    if (!first || redirectsToFile(text, states, part)) return false
+    const name = text.slice(first[0], first[1])
+    const plain = states.subarray(first[0], first[1]).every((state) => state === 0) && PLAIN_NAME.test(name)
+    return plain && READ_ONLY_COMMANDS.has(name)
+  })
+}
+
+/**
+ * Another sub-command of the same evaluation only reads (`ShellRuleContext.others`): judged like a part of the command,
+ * the words of the same target files set aside as there.
+ */
+function onlyReading(command: string, files: readonly string[]): boolean {
+  const states = quoteStates(command)
+  if (!states) return false
+  const spans = files.flatMap((file) => (wholeWord(command, file, states) ? wordSpans(command, file) : []))
+  return spans.length <= MAX_TARGET_WORDS && partsOnlyRead(command, states, spans)
+}
+
+/**
+ * Real paths of the files (existing regular files, `realFile`), sorted; `undefined` as soon as one is unknown: not
+ * absolute, or with a `..` component (`targetable`), not a whole word, expansion or pattern, a part of the command that
+ * does not only read (`partsOnlyRead`, other sub-commands included), more words, substitutions or sub-commands than the
+ * plugin examines, missing, or a limit of the resolver.
+ */
+function credentialTargets(command: string, files: readonly string[], ctx: ShellRuleContext): string[] | undefined {
+  const states = quoteStates(command)
+  if (!states || !files.every(targetable)) return undefined
+  if (!files.every((file) => wholeWord(command, file, states))) return undefined
+  const spans = files.flatMap((file) => wordSpans(command, file))
+  if (spans.length > MAX_TARGET_WORDS || (ctx.others?.length ?? 0) > MAX_OTHERS) return undefined
+  if (!partsOnlyRead(command, states, spans) || ctx.others?.some((other) => !onlyReading(other, files))) return undefined
+  const targets = new Set<string>()
+  for (const file of files) {
+    const absolute = lexicalPath(file, undefined, undefined)
+    const real = absolute === undefined ? undefined : realFile(absolute, ctx)
+    if (real === undefined) return undefined
+    targets.add(real)
+  }
+  return [...targets].sort()
+}
+
+/** Reason of `secret-file-read` naming the files (at most `SHOWN_FILES`, then how many more), and its targets. */
+function credentialDetail(reading: CredentialReading): Pick<Finding, "reason" | "targets"> {
+  const named = reading.shown.slice(0, SHOWN_FILES).join(", ")
+  const more = reading.shown.length > SHOWN_FILES ? ` and ${reading.shown.length - SHOWN_FILES} more` : ""
+  return { reason: `access to a credential file (${named}${more})`, ...(reading.targets ? { targets: reading.targets } : {}) }
 }
 
 /**
@@ -2855,14 +3131,15 @@ const ASK_RULES: readonly RegexRule[] = [
     id: "secret-file-read",
     verdict: "ask",
     reason: "access to a credential file",
-    test: (command, ctx) => CREDENTIAL_TOKENS.note(command, ctx) === true,
+    test: (command, ctx) => CREDENTIAL_TOKENS.note(command, ctx).found === true,
+    detail: (command, ctx) => credentialDetail(CREDENTIAL_TOKENS.peek(command, ctx)),
   },
   // Content not checked (limit): ask, never the network send deny (`sentSecretFiles` does not count it).
   {
     id: "secret-file-read",
     verdict: "ask",
     reason: uncheckedCredentialReason(),
-    test: (command, ctx) => CREDENTIAL_TOKENS.reread(command, ctx) === LIMIT_REACHED,
+    test: (command, ctx) => CREDENTIAL_TOKENS.reread(command, ctx).found === LIMIT_REACHED,
     unfinished: true,
   },
   // Its settings (opencode.json, guard.json, the plugin directory): never left to the decision model; then the rest.
@@ -3727,7 +4004,7 @@ function evaluate(command: string, ctx: ShellRuleContext, inData = false): Findi
   }
   for (const rule of ASK_RULES) {
     if (ruleEnabled(rule.id, ctx.active) && rule.test(command, ctx)) {
-      const finding = hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason }, ctx.active)
+      const finding = hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason, ...rule.detail?.(command, ctx) }, ctx.active)
       findings.push(rule.unfinished || rule.userOnly ? finding : entrusted(finding, ctx.active))
     }
   }
@@ -4510,11 +4787,13 @@ function budgetedPredicates(ctx: ShellRuleContext): { record: ShellRuleContext; 
   const { realPaths, credentialContent } = ctx
   if (!realPaths && !credentialContent) return { record: ctx, replay: ctx, linked: () => false }
   const paths = new Map<string, readonly string[] | undefined | typeof LIMIT_REACHED>()
+  // Existing files only (targets of an exception or the memory): answers kept apart, never seen by `linked`.
+  const existingPaths = new Map<string, readonly string[] | undefined | typeof LIMIT_REACHED>()
   const contents = new Map<string, boolean | typeof LIMIT_REACHED>()
   const recordPaths = realPaths
-    ? (absolute: string) => {
-        const found = realPaths(absolute)
-        paths.set(absolute, found)
+    ? (absolute: string, existing = false) => {
+        const found = realPaths(absolute, existing)
+        ;(existing ? existingPaths : paths).set(absolute, found)
         return found
       }
     : undefined
@@ -4529,7 +4808,7 @@ function budgetedPredicates(ctx: ShellRuleContext): { record: ShellRuleContext; 
     record: { ...ctx, ...(recordPaths ? { realPaths: recordPaths } : {}), ...(recordContent ? { credentialContent: recordContent } : {}) },
     replay: {
       ...ctx,
-      ...(realPaths ? { realPaths: (absolute: string) => paths.get(absolute) } : {}),
+      ...(realPaths ? { realPaths: (absolute: string, existing = false) => (existing ? existingPaths : paths).get(absolute) } : {}),
       ...(credentialContent ? { credentialContent: (path: string) => contents.get(path) ?? false } : {}),
     },
     linked: () => [...paths.values()].some((found) => found !== LIMIT_REACHED && found?.some(isDevicePath) === true),

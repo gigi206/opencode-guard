@@ -103,11 +103,12 @@ All options live under `options` in the plugin entry.
 | `decision.timeoutMs` | `5000` | Timeout per call (100–60000 ms). A timeout is retried once. |
 | `askAs` | `"ask"` | `"deny"` turns every confirmation into a refusal (unattended mode). |
 | `thresholds` | see docs | `denyNoul`, `askNoul`, `askExfiltration`, `denyRisk`, `askRisk`, `minConfidence`. |
-| `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`. |
+| `rules` | `[]` | Extra local rules: `{ "id", "pattern", "flags"?, "verdict": "deny" \| "ask", "reason", "tools"? }`; also read at the top level of the global `guard.json` (`guard rules add`). |
 | `outputCheck` | on | Also ask the decision model for a secret written in plain words in tool outputs, and mask it. |
 | `promptCheck` | on | Also ask the decision model for a secret typed in plain words in the prompt, in any language, and mask it. |
 | `dangerousCommands`, `sensitiveFiles`, `decisionModel`, `scripts`, `redactOutputs`, `redactPrompt`, `redactWire` | `true` | Turn a feature on or off. |
 | `ruleOverrides` | `{}` | One built-in rule by its identifier: `"off"`, `"ask"`, `"deny"` or `"model"` (its confirmations decided by the decision model); `"off"`, `"ask"` and `"model"` must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
+| `exceptions`, `rememberConfirmations` | `{}`, `0` | Credential files you no longer confirm (`{ "secret-file-read": ["<absolute path>"] }`, `guard rules off secret-file-read --path <file>`), and minutes during which a confirmed set of files is not asked again in the session (off by default, `guard set rememberConfirmations <minutes>`); only for a file named by an absolute path (never `~/`) in a command that only reads, never for a script written in the session or a call made by CodeMode code (limits in Configuration); never a refusal, must also be in your global configuration unless the project is trusted. |
 | `localAsks` | `"ask"` | `"model"`: the confirmations of the built-in rules without a setting are decided by the decision model (self-protection only with `selfProtectionByModel: true`); must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `profile` | `"standard"` | `"credentials-only"` turns `dangerousCommands`, `decisionModel` and `scripts` off by default; must also be in your global configuration (plugin options or global `guard.json`), unless the project is trusted. |
 | `debug` | `false` | Also log allowed actions and redaction counts; confirmations, refusals and local confirmations decided by the model are always logged. |
@@ -115,7 +116,7 @@ All options live under `options` in the plugin entry.
 
 Full reference, defaults, environment substitutions and edge cases: [Configuration](docs/configuration.md). Model choices, thresholds and local serving: [Decision model](docs/decision-model.md).
 
-The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the built-in rules and your own (`guard rules --explain <rule>` explains one in words), the redaction formats with their regular expressions (`guard redaction`), shows the settings in force and where they come from, lists the latest confirmations and refusals, and writes settings to the global `guard.json` (`guard rules off|reset <rule>`, `--agent`, `--project`, `guard redaction off|on <format>`, `guard trust`), applied without a restart; `guard help` lists the commands, in color in a terminal.
+The [`guard` command](docs/configuration.md#the-guard-command) (`bin/guard`) lists the built-in rules and your own (`guard rules --explain <rule>` explains one in words), the redaction formats with their regular expressions (`guard redaction`), shows the settings in force and where they come from, lists the latest confirmations and refusals, gives the verdict the plugin would give to a command without running it (`guard test`), reports the plugin's state from its log (`guard status`), and writes settings to the global `guard.json` (`guard rules off|ask|deny|model|reset <rule>`, `--agent`, `--project`, `guard rules off|reset secret-file-read --path <file>`, `guard rules add|remove`, `guard set|unset`, `guard redaction off|on <format>`, `guard trust`), applied without a restart; `guard completion bash|zsh` prints a completion script, `guard help` lists the commands, in color in a terminal.
 
 ## Logs
 

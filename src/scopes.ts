@@ -2,8 +2,10 @@
 // guard.json file changes (identity of the candidates checked at most once per interval: never a read per call), and the
 // scope of the call from the main agent recorded at the user's last prompt (`hooks/agents.ts`).
 import { resolveVersion, type GuardConfig, type Scope, type Version } from "./config.ts"
+import { waiverSummary } from "./rules/features.ts"
 import { guardIdentity, readGuardFiles, type GuardPaths } from "./guard-file.ts"
 import type { MainAgents } from "./hooks/agents.ts"
+import type { CustomRule } from "./rules/types.ts"
 import type { Logger } from "./types.ts"
 
 /** guard.json files checked for a change at most this often. */
@@ -18,6 +20,8 @@ export interface ScopeResolver {
   tracking(): boolean
   /** guard.json files checked for a change (when due): for the hooks that redact without resolving a scope. */
   refresh(): void
+  /** The user's rules of the version in force (after `resolve`); never throws. */
+  rules(): readonly CustomRule[]
 }
 
 export interface ScopeDeps {
@@ -48,6 +52,7 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
     profile: config.profile,
     trusted: false,
     warnings: [],
+    rules: config.rules,
     summary: "",
   }
   let current = config.version ?? plain
@@ -64,11 +69,12 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
     try {
       const files = readGuardFiles(deps.paths)
       // Started with a guard.json file: its removal is resolved by layers too (the startup settings held it).
-      current = files.length > 0 || layers.keyed || config.version ? resolveVersion(layers, files) : plain
+      current = files.length > 0 || layers.keyed || config.version ? resolveVersion(layers, files, current) : plain
       identity = next
       deps.onVersion?.(current)
-      log.info(`guard.json re-read (${current.summary || "guard.json: none; startup settings"})`)
+      log.info(`guard.json re-read (${current.summary || "guard.json: none; startup settings"}${waiverSummary(current.base.policy)})`)
       for (const warning of current.warnings) log.warn(warning)
+      for (const error of current.errors ?? []) log.error(error)
     } catch (error) {
       // Identity kept: the files are read again at the next check.
       log.error("guard.json could not be re-read: previous settings kept", error)
@@ -93,5 +99,6 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
     },
     tracking: () => current.tracking,
     refresh: reload,
+    rules: () => current.rules,
   }
 }

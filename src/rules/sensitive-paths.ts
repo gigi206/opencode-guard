@@ -139,7 +139,7 @@ export interface WritePathContext {
    * through a symbolic link. Absent: lexical comparison only; `undefined` (unknown): same for that path;
    * `LIMIT_REACHED` (limit): `unchecked` kind, unless self-protection is already recognized.
    */
-  readonly realPaths?: (absolute: string) => readonly string[] | undefined | typeof LIMIT_REACHED
+  readonly realPaths?: (absolute: string, existing?: boolean) => readonly string[] | undefined | typeof LIMIT_REACHED
   /** Directories of the OpenCode service files (`CredentialContext`): writing one of these files holds its settings. */
   readonly serviceDirs?: readonly string[]
 }
@@ -242,10 +242,45 @@ function isServiceFile(raw: string, ctx: CredentialContext): boolean {
  * the predicate). The content is consulted only if the name is not enough.
  */
 export const credentialFile = (raw: string, ctx: CredentialContext): boolean | typeof LIMIT_REACHED =>
-  isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx) || (ctx.credentialContent?.(raw) ?? false)
+  namedCredentialFile(raw, ctx) || (ctx.credentialContent?.(raw) ?? false)
+
+/** Credential file by its name alone (`credentialFile` without its content): no file read. */
+export const namedCredentialFile = (raw: string, ctx: CredentialContext): boolean => isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx)
 
 /** Recognized credential file (`credentialFile`); content not checked does not make one. */
 export const isCredentialFile = (raw: string, ctx: CredentialContext) => credentialFile(raw, ctx) === true
+
+/** Leading home forms, expanded like `normalizePath`. */
+const HOME_FORM = /^(?:~|\$HOME|\$\{HOME\})(?=\/|$)/
+/** Expansion, substitution, pattern, escape or quote: the word names a file known only to the shell. */
+const NOT_LITERAL = /[$`*?[\]{}\\"']/
+
+/** A `..` component: the kernel resolves it after the links before it, a lexical path removes it before them. */
+export const hasParentComponent = (raw: string): boolean => raw.split("/").includes("..")
+
+/**
+ * A word that may give a target (exceptions, memory): absolute, without a `..` component. A relative path depends on a
+ * directory the plugin knows only lexically, a home-relative one on the `HOME` of the session's environment, which the
+ * plugin does not see: both may name another file than the one opened.
+ */
+export const targetable = (raw: string): boolean => raw.startsWith("/") && !hasParentComponent(raw)
+
+/**
+ * Absolute path of a word computed without reading: home forms expanded (only with `home`), a relative path from `base`,
+ * lexically normalized; `undefined` if unknown (expansion, pattern, `~user`, no home or no base).
+ */
+export function lexicalPath(raw: string, home: string | undefined, base: string | undefined): string | undefined {
+  const word = HOME_FORM.test(raw) ? (home === undefined ? undefined : raw.replace(HOME_FORM, home)) : raw
+  if (word === undefined || word === "" || word.startsWith("~") || NOT_LITERAL.test(word)) return undefined
+  if (isAbsolute(word)) return resolve(word)
+  return base === undefined ? undefined : resolve(base, word)
+}
+
+/** Real path of an existing file (`realPaths`, existing components only): a single one, otherwise unknown. */
+export function realFile(absolute: string, ctx: WritePathContext): string | undefined {
+  const found = ctx.realPaths?.(absolute, true)
+  return Array.isArray(found) && found.length === 1 ? found[0] : undefined
+}
 
 /** Reason of the ask for content not checked (`credentialFile` returns `LIMIT_REACHED`), path quoted or not. */
 export const uncheckedCredentialReason = (path?: string) =>

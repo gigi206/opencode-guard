@@ -2,15 +2,15 @@ import { UNAVAILABLE_INPUT, type Decider, type Decision, type ExecutedScript, ty
 import { afterLeadingCd, changesDirectory, heredocFiles, scriptRuns, shellFinding } from "../rules/shell.ts"
 import { createCredentialContent } from "../credential-content.ts"
 import { createRealPath } from "../real-path.ts"
-import { placeholderFinding } from "../rules/tools.ts"
+import { CODEMODE_TOOL, placeholderFinding } from "../rules/tools.ts"
 import { hiddenHeaders, patchTargets, readPatch, type PatchSection } from "../patch.ts"
 import { createScriptTracker, isShellScript, resolveLike, shellDirectories, type ScriptTracker } from "../scripts.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { Scope } from "../config.ts"
 import type { ScopeResolver } from "../scopes.ts"
 import { RULE_DETAILS } from "../rules/details.ts"
-import { bySetting, type ActiveRules } from "../rules/features.ts"
-import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule } from "../rules/types.ts"
+import { bySetting, TARGETED_RULES, withoutWaivers, type ActiveRules } from "../rules/features.ts"
+import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule, type Waiver } from "../rules/types.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PermissionEvaluation } from "../types.ts"
 
@@ -34,6 +34,7 @@ export interface GateDeps {
   readonly decider: Decider
   readonly redactor: Redactor
   readonly home?: string
+  /** The user's rules when `scopes` is absent (otherwise those of the version in force). */
   readonly rules?: readonly CustomRule[]
   readonly protectedDirs?: readonly string[]
   /** The plugin's own directories among them (its settings: never left to the decision model). */
@@ -81,6 +82,8 @@ export const NO_EVASION = "Do not try to evade this check (obfuscation, rewordin
 const ruleNote = (rule?: string) => (rule ? ` (rule ${rule})` : "")
 /** Source and rule of a log line: `local, rule rm-critical`. */
 const sourceNote = (source: string, rule?: string) => (rule ? `${source}, rule ${rule}` : source)
+/** Log line of a finding lifted by an exception or the memory: its rule, how, and its targets (redacted by the log). */
+const liftedLine = (subject: string, waiver: Waiver) => `${subject} → lifted (${sourceNote(waiver.kind, waiver.rule)}): ${waiver.targets.join(", ")}`
 
 /** Rejection message. The `placeholder` rule specifically asks for another change: no instruction. */
 export function blockedMessage(reason: string, rule?: string): string {
@@ -117,7 +120,9 @@ function fit(value: string, limit: number): string {
  * exactly the rule's usual one, never another rule under the same name); last, the tool call kept whole if it can,
  * the reason cut at a word (the rule's name and at least `MIN_ACTION_REASON` code points of it), then the call cut too. A reason that names the call's target in parentheses (`write to a protected location (<path>)`) leaves it to the
  * tool call, shown once; when the call holds it deeper (an MCP tool's JSON, never a command or code), the call may
- * be reduced to the tool's name instead. The full reason is in the log. An error gives `GUARD_ACTION` alone (still asked).
+ * be reduced to the tool's name instead. For a shell command, a rule whose usual reason is followed by its files
+ * (`TARGETED_RULES`) leaves each file the command shows whole to it, and its reason without the list comes before a cut
+ * (a file is never shown cut there). The full reason is in the log. An error gives `GUARD_ACTION` alone (still asked).
  */
 export function guardAction(redactor: Redactor, reason: string, rule?: string, resource?: string, parts?: ReasonParts): string {
   try {
@@ -130,7 +135,10 @@ export function guardAction(redactor: Redactor, reason: string, rule?: string, r
     const split = call.indexOf(": ")
     const [tool, target] = split > 0 ? [call.slice(0, split), call.slice(split + 2)] : [call, ""]
     // The call's target (`write: <path>` → `<path>`) named once: by the call, not again by the reason.
-    const reasons = [target ? clean(own).replace(` (${target})`, "") : clean(own), ...(usual?.prompt && own === usual.reason ? [clean(usual.prompt)] : [])]
+    const first = target ? clean(own).replace(` (${target})`, "") : clean(own)
+    // A shell command's files after the rule's own reason (never another reason under the same name, never a tool's path).
+    const listed = tool === "shell" && rule !== undefined && TARGETED_RULES.has(rule) && usual !== undefined && own.startsWith(`${usual.reason} (`)
+    const reasons = [...(listed ? filesOnce(first, target) : [first]), ...(usual?.prompt && own === usual.reason ? [clean(usual.prompt)] : [])]
     // A target the reason names in parentheses and the call holds deeper, in the JSON of an input without a command,
     // path, URL, query or code (an MCP tool's): the call may then be reduced to its tool, the finding's reason naming
     // the target whole. Never a command or code, whose rest would no longer be seen.
@@ -158,6 +166,23 @@ export function guardAction(redactor: Redactor, reason: string, rule?: string, r
   }
 }
 
+/** A path of a reason's list shown whole by the call: between blanks, quotes or shell operators. */
+const shownWhole = (path: string, call: string) => new RegExp(`(?:^|[\\s'"=(<>|;&,])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[\\s'"|;&)<>,])`).test(call)
+
+/**
+ * A reason's list of files (`access to a credential file (<a>, <b> and 2 more)`, its first parentheses): the files the
+ * call shows whole left out, the list removed when none is left (the files not named are words of the call too), then,
+ * when a list remains, the reason without it.
+ */
+function filesOnce(reason: string, call: string): string[] {
+  const match = / \(([^()]+)\)/.exec(reason)
+  if (!match) return [reason]
+  const [, list, more = ""] = /^(.*?)( and \d+ more)?$/.exec(match[1]!)!
+  const kept = list!.split(", ").filter((path) => !shownWhole(path, call))
+  const bare = reason.replace(match[0], "")
+  return kept.length ? [reason.replace(match[0], () => ` (${kept.join(", ")}${more})`), bare] : [bare]
+}
+
 /**
  * Request made by this plugin: `GUARD_ACTION`, alone or followed by the separator, or `metadata.guard`. Broad on purpose:
  * recognizing a request only forces an ask, while missing ours would let it pass without a question (default agents
@@ -183,6 +208,8 @@ export const APPROVAL_TTL_MS = 60 * 60 * 1000
  * the call ends or is not executed.
  */
 export const GATE_TABLE_MAX = 10_000
+/** Sets of targets confirmed by the user and remembered (`rememberConfirmations`): at most this many, the oldest forgotten. */
+export const MAX_REMEMBERED = 1000
 /** Tools whose files created in full (write, patch, heredoc) or modified (edit, patch) are tracked. */
 const TRACKED_TOOLS = new Set(["write", "patch", "shell", "edit"])
 
@@ -288,6 +315,20 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
   const pending = timedMap<PendingCall>(clock)
   /** Directories of a shell command (`shellDirectories`), re-read by `evaluate` for its sub-commands. */
   const directories = timedMap<readonly string[]>(clock)
+  /**
+   * Memory of confirmations (`rememberConfirmations`): session + rule + exact set of targets → time the user confirmed it.
+   * Its entries expire with the table (1 h, the longest delay); the delay in force is read at each use.
+   */
+  const confirmed = timedMap<number>(clock, MAX_REMEMBERED)
+  const confirmedKey = (sessionID: string, rule: string, targets: readonly string[]) => JSON.stringify([sessionID, rule, [...targets].sort()])
+  const remembered = (sessionID: string) => (rule: string, targets: readonly string[], minutes: number) => {
+    const at = confirmed.get(confirmedKey(sessionID, rule, targets))
+    return at !== undefined && clock() - at < minutes * 60_000
+  }
+  /** Sets lifted by the memory in `execute.before`, per call: its sub-commands in `evaluate` name some of these files. */
+  const liftedSets = timedMap<ReadonlyArray<{ readonly rule: string; readonly targets: readonly string[] }>>(clock)
+  /** CodeMode calls in progress: their internal calls carry the same identifier, and nothing lifts their findings. */
+  const codeCalls = timedMap<true>(clock)
   deps.inspect?.(() => ({ approved: approved.size, pending: pending.size, directories: directories.size }))
   const scripts = deps.scripts ?? createScriptTracker({ home: deps.home })
   const directory = ctx.location.directory
@@ -424,6 +465,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     // The pending entry remains: simultaneous internal calls with the same identifier would lose tracking of a written file.
     approved.take(key)
     directories.take(key)
+    liftedSets.take(key)
+    // A call made by CodeMode code arrives with its identifier until its own `execute.after`.
+    const fromCode = event.tool !== CODEMODE_TOOL && codeCalls.has(key)
+    if (event.tool === CODEMODE_TOOL) codeCalls.add(key, true)
     // Unprotected agent chosen by the user: nothing, except the placeholder rule (integrity of the real secret).
     if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) {
       const kept = placeholderFinding(event.tool, event.input)
@@ -454,10 +499,13 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     }
     /**
      * Call not executed (denial, unattended mode, refused confirmation): OpenCode then does not trigger
-     * `execute.after` (packages/core/src/tool.ts, v2.0.31), and its directories are removed here.
+     * `execute.after` (packages/core/src/tool.ts, v2.0.31), and its directories and sets lifted by the memory are
+     * removed here.
      */
     const reject = (error: unknown): never => {
       directories.take(key)
+      liftedSets.take(key)
+      if (event.tool === CODEMODE_TOOL) codeCalls.take(key)
       throw error
     }
     // Directory where the command runs (error: session directory, as before).
@@ -482,6 +530,9 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         ...(cwds ? { cwds } : {}),
         ...(executed ? { scripts: executed } : {}),
         ...(scope ? { scope } : {}),
+        // Apart from the scope: a rule of the global guard.json still applies when the scope cannot be resolved.
+        ...(deps.scopes ? { rules: deps.scopes.rules() } : {}),
+        ...(fromCode ? { fromCode } : { remembered: remembered(event.sessionID) }),
       })
     } catch (error) {
       log.error("internal error while deciding", error)
@@ -494,6 +545,9 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
       }
       decision = { verdict: "ask", reason: "internal guard plugin error: confirmation required", rule: INTERNAL_ERROR_RULE, source: "default", redactedInput }
     }
+    for (const waiver of decision.waived ?? []) log.info(liftedLine(event.tool, waiver))
+    const recalled = (decision.waived ?? []).filter((waiver) => waiver.kind === "remembered")
+    if (recalled.length) liftedSets.add(key, recalled)
     // A denial stays as is; an ask also names the unchecked part; never an allow on it. The rule of an allow (heredoc
     // data decided by the model) does not name this ask.
     if (unchecked.length && decision.verdict === "allow")
@@ -559,6 +613,10 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     }
     log.info(`${event.tool} → confirmed by the user`)
     approved.add(key, "user")
+    // Memory of confirmations: only this confirmation by the user, of a finding whose targets are all known, with nothing
+    // left unchecked, while a delay is set for the call.
+    if (decision.rule && decision.targets?.length && !unchecked.length && ((scope?.policy ?? deps.active)?.rememberMinutes ?? 0) > 0)
+      confirmed.add(confirmedKey(event.sessionID, decision.rule, decision.targets), clock())
     // A long confirmation does not let directories expire before `evaluate`.
     if (cwds) directories.add(key, cwds)
     track()
@@ -568,6 +626,8 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     const key = approvalKey(event.sessionID, event.id)
     approved.take(key)
     directories.take(key)
+    liftedSets.take(key)
+    if (event.tool === CODEMODE_TOOL) codeCalls.take(key)
     const call = pending.take(key)
     // Failed call: file unchanged, tracking unchanged.
     if (!call || event.status !== "completed") return
@@ -636,7 +696,13 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     }
     // Defense in depth: sub-commands extracted by OpenCode's shell parser.
     if (event.action !== "shell" || event.effect === "deny") return undefined
-    const active = deps.scopes ? deps.scopes.resolve(event.sessionID, event.agent).policy : deps.active
+    const scoped = deps.scopes ? deps.scopes.resolve(event.sessionID, event.agent).policy : deps.active
+    // A shell request without a tool call (its ask is denied below), or from CodeMode code: neither an exception nor the
+    // memory lifts a finding.
+    const unwaived = event.source === undefined || codeCalls.has(approvalKey(event.sessionID, event.source.id))
+    const active = unwaived && scoped ? withoutWaivers(scoped) : scoped
+    // The user's rules of the version just resolved (the global guard.json's included).
+    const custom = deps.scopes ? deps.scopes.rules() : deps.rules
     // Call already confirmed in execute.before: no second ask, but a denial still applies. Allowed there by the decision
     // model on an ask a setting left to it: only the sub-command asks left to the model by a setting are discarded.
     const approval = event.source === undefined ? undefined : approved.get(approvalKey(event.sessionID, event.source.id))
@@ -645,15 +711,26 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     const cwds = event.source === undefined ? undefined : directories.get(approvalKey(event.sessionID, event.source.id))
     const credentialContent = deps.readContent ? createCredentialContent({ directories: cwds ?? [ctx.location.directory], home: deps.home }) : undefined
     const realPaths = deps.resolveLinks ? createRealPath({ directories: cwds ?? [ctx.location.directory] }) : undefined
+    // Memory: a set confirmed in this session, or for the call `execute.before` let through on a remembered set, any part
+    // of it (each sub-command names some of its files); never for another call.
+    const sets = event.source === undefined ? undefined : liftedSets.get(approvalKey(event.sessionID, event.source.id))
+    const recalls = remembered(event.sessionID)
+    const memory = (rule: string, targets: readonly string[], minutes: number) =>
+      recalls(rule, targets, minutes) || (sets ?? []).some((set) => set.rule === rule && targets.every((target) => set.targets.includes(target)))
+    // Findings lifted by an exception or the memory: logged once each.
+    const lifted = new Map<string, Waiver>()
+    const waived = (waiver: Waiver) => lifted.set(JSON.stringify([waiver.rule, waiver.kind, waiver.targets]), waiver)
     // A failing sub-command never masks another's denial: each is judged separately, and the error is kept
     // separate (outside `mostSevere`, which the confirmed-call rule would filter).
     let failed = false
-    const findings = event.resources.map((resource) => {
+    const findings = event.resources.map((resource, index) => {
       try {
         return shellFinding(resource, {
+          // An exception or the memory needs the other sub-commands of the call to only read, like a command's other parts.
+          ...(event.resources.length > 1 ? { others: event.resources.filter((_, other) => other !== index) } : {}),
           redactor: deps.redactor,
           home: deps.home,
-          custom: deps.rules,
+          custom,
           cwd: ctx.location.directory,
           ...(cwds ? { cwds } : {}),
           ...(credentialContent ? { credentialContent } : {}),
@@ -662,6 +739,8 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
           ...(deps.pluginDirs ? { pluginDirs: deps.pluginDirs } : {}),
           ...(deps.serviceDirs ? { serviceDirs: deps.serviceDirs } : {}),
           active,
+          ...(unwaived ? {} : { remembered: memory }),
+          waived,
         })
       } catch (error) {
         failed = true
@@ -672,6 +751,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         return undefined
       }
     })
+    for (const waiver of lifted.values()) note(liftedLine("shell sub-commands", waiver))
     // Ask coming only from heredoc data: already decided by the model in execute.before (discarded before
     // `mostSevere`, so as not to mask another sub-command); likewise an ask left to the model by a setting, once it
     // allowed the whole command.
