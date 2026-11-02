@@ -288,7 +288,6 @@ describe("review of H and C ported", () => {
     assert.deepEqual(w.read(), { rememberConfirmations: 30 })
     for (const args of [
       ["set", "rememberConfirmations", "30", "--agent", "build"],
-      ["unset", "rememberConfirmations", "--agent", "build"],
       ["rules", "ask", RULE, "--path", w.env],
       ["rules", "deny", RULE, "--path", w.env],
       ["rules", "off", "rm", "--path", w.env],
@@ -296,6 +295,7 @@ describe("review of H and C ported", () => {
       ["rules", "off", RULE, "--path", w.env, "--agent", "build"],
     ])
       assert.equal((await w.run(args)).code, 2, args.join(" "))
+    assert.equal((await w.run(["unset", "rememberConfirmations", "--agent", "build"])).code, 0)
     assert.deepEqual(w.read(), { rememberConfirmations: 30 })
     const explained = await w.run(["rules", "--explain", RULE])
     assert.match(explained.out, /exceptions/)

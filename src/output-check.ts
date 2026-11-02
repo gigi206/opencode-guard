@@ -30,13 +30,21 @@ function realPath(path: string): string {
 }
 
 /**
- * Configuration text as OpenCode reads it (`core/src/config/variable.ts`): `{env:NAME}` replaced by the
- * server environment value, or an empty string; JSONC comments and trailing commas removed.
+ * Configuration text as OpenCode reads it (`core/src/config/variable.ts`, v2.2.0): `{env:NAME}` replaced by the
+ * server environment value, or an empty string, as is; escaped for JSON only when the raw text does not parse;
+ * JSONC comments and trailing commas removed.
  */
 function parseConfigText(text: string, env: Record<string, string | undefined>): unknown {
-  const substituted = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => JSON.stringify(env[name] || "").slice(1, -1))
-  const stripped = substituted.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_, s) => s ?? "")
-  return JSON.parse(stripped.replace(/,(\s*[}\]])/g, "$1"))
+  const parse = (escape: boolean) => {
+    const substituted = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => (escape ? JSON.stringify(env[name] || "").slice(1, -1) : env[name] || ""))
+    const stripped = substituted.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_, s) => s ?? "")
+    return JSON.parse(stripped.replace(/,(\s*[}\]])/g, "$1")) as unknown
+  }
+  try {
+    return parse(false)
+  } catch {
+    return parse(true)
+  }
 }
 
 type FileResult = { readonly options?: Record<string, unknown>; readonly reason?: string }

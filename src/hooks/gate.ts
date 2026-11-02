@@ -12,7 +12,7 @@ import { RULE_DETAILS } from "../rules/details.ts"
 import { bySetting, TARGETED_RULES, withoutWaivers, type ActiveRules } from "../rules/features.ts"
 import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule, type Waiver } from "../rules/types.ts"
 import type { Redactor } from "../secrets/redact.ts"
-import type { GuardContext, Logger, PermissionEvaluation } from "../types.ts"
+import type { GuardContext, Logger, PermissionEvaluation, ToolBeforeEvent } from "../types.ts"
 
 /** Plugin-specific permission action ("ask" requests via `ctx.permission.assert`). */
 export const GUARD_ACTION = "guard"
@@ -202,8 +202,8 @@ interface Posed {
 const MAX_SUMMARY = 200
 export const APPROVAL_TTL_MS = 60 * 60 * 1000
 /**
- * Entries per table, never reached in practice (calls in progress within the hour): bounds memory and the cost of
- * purging. Eviction remains safe for approvals (second ask), less so for directories (`evaluate` falls back
+ * Entries per table, never reached in practice (calls in progress within the hour, CodeMode code still running): bounds
+ * memory and the cost of purging. Eviction remains safe for approvals (second ask), less so for directories (`evaluate` falls back
  * to the session directory) and pending calls (file tracking stopped): each entry is removed as soon as
  * the call ends or is not executed.
  */
@@ -215,13 +215,16 @@ const TRACKED_TOOLS = new Set(["write", "patch", "shell", "edit"])
 
 const args = (input: unknown) => (input !== null && typeof input === "object" ? (input as Record<string, unknown>) : {})
 
-/** Values timestamped by key (session + call id): purged on add, expiry checked on read, bounded size. */
-export function timedMap<V>(clock: () => number, max = GATE_TABLE_MAX) {
+/**
+ * Values timestamped by key (session + call id): purged on add, expiry checked on read, bounded size (the oldest
+ * forgotten). `ttlMs`: `Infinity` keeps an entry until it is taken or evicted.
+ */
+export function timedMap<V>(clock: () => number, max = GATE_TABLE_MAX, ttlMs = APPROVAL_TTL_MS) {
   const entries = new Map<string, { at: number; value: V }>()
   const fresh = (key: string) => {
     const entry = entries.get(key)
     if (entry === undefined) return undefined
-    if (clock() - entry.at <= APPROVAL_TTL_MS) return entry
+    if (clock() - entry.at <= ttlMs) return entry
     entries.delete(key)
     return undefined
   }
@@ -229,7 +232,7 @@ export function timedMap<V>(clock: () => number, max = GATE_TABLE_MAX) {
     add(key: string, value: V) {
       const now = clock()
       // Purge: a call whose `execute.after` never arrived (interrupted session) does not stay forever.
-      for (const [item, entry] of entries) if (now - entry.at > APPROVAL_TTL_MS) entries.delete(item)
+      for (const [item, entry] of entries) if (now - entry.at > ttlMs) entries.delete(item)
       entries.delete(key)
       while (entries.size >= max) entries.delete(entries.keys().next().value!)
       entries.set(key, { at: now, value })
@@ -327,8 +330,11 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
   }
   /** Sets lifted by the memory in `execute.before`, per call: its sub-commands in `evaluate` name some of these files. */
   const liftedSets = timedMap<ReadonlyArray<{ readonly rule: string; readonly targets: readonly string[] }>>(clock)
-  /** CodeMode calls in progress: their internal calls carry the same identifier, and nothing lifts their findings. */
-  const codeCalls = timedMap<true>(clock)
+  /**
+   * CodeMode calls in progress: their internal calls carry the same identifier, and nothing lifts their findings. Kept
+   * while the code runs (no delay), removed when it ends or is not run; lost on a reload of the plugin.
+   */
+  const codeCalls = timedMap<true>(clock, GATE_TABLE_MAX, Infinity)
   deps.inspect?.(() => ({ approved: approved.size, pending: pending.size, directories: directories.size }))
   const scripts = deps.scripts ?? createScriptTracker({ home: deps.home })
   const directory = ctx.location.directory
@@ -457,7 +463,18 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
         record(resolveLike(shell.cwd, file.path, deps.home), { judged: call.judged, equals: file.content, exact: true })
   }
 
+  // Any exit that does not run the call (denial, refused confirmation, unprotected agent, internal error) throws: an
+  // `execute` call then leaves no mark, as no `execute.after` will remove it (packages/core/src/tool.ts, v2.0.31).
   await ctx.tool.hook("execute.before", async (event) => {
+    try {
+      return await before(event)
+    } catch (error) {
+      if (event.tool === CODEMODE_TOOL) codeCalls.take(approvalKey(event.sessionID, event.id))
+      throw error
+    }
+  })
+
+  async function before(event: ToolBeforeEvent) {
     const key = approvalKey(event.sessionID, event.id)
     // An approval is valid only for the confirmed call. Removed here: a previous call with the same identifier (confirmed
     // then denied by OpenCode, without `execute.after`), or the `execute` call whose CodeMode script starts this internal call
@@ -505,7 +522,6 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     const reject = (error: unknown): never => {
       directories.take(key)
       liftedSets.take(key)
-      if (event.tool === CODEMODE_TOOL) codeCalls.take(key)
       throw error
     }
     // Directory where the command runs (error: session directory, as before).
@@ -620,7 +636,7 @@ export async function registerGate(ctx: GuardContext, deps: GateDeps): Promise<v
     // A long confirmation does not let directories expire before `evaluate`.
     if (cwds) directories.add(key, cwds)
     track()
-  })
+  }
 
   await ctx.tool.hook("execute.after", (event) => {
     const key = approvalKey(event.sessionID, event.id)

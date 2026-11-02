@@ -219,7 +219,8 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       const key = parsed.positionals[0]!
       if (key === "ruleOverrides") throw new UsageError("a rule's setting is changed with guard rules off|ask|deny|model|reset <rule>")
       if (!Object.hasOwn(SWITCHES, key)) throw new UsageError(`unknown setting ${key} (one of ${Object.keys(SWITCHES).join(", ")})`)
-      if (key === MINUTES && parsed.agent !== undefined) throw new UsageError(`${MINUTES} does not go with --agent: an agents section does not accept it`)
+      // Removal only: a value written by hand in an agents section (ignored by the plugin) can be taken out.
+      if (key === MINUTES && parsed.agent !== undefined && command === "set") throw new UsageError(`${MINUTES} does not go with --agent: an agents section does not accept it`)
       const target: Target = {
         ...(parsed.agent === undefined ? {} : { agent: parsed.agent }),
         ...(parsed.project === undefined ? {} : { project: directoryOf(io, parsed.project === true ? undefined : parsed.project, command === "unset") }),

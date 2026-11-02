@@ -39,7 +39,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "  --path <file>", text: "rules off|reset secret-file-read only: add or remove the file's real path in the rule's exceptions there, the rest of the rule unchanged (top level or --project, never --agent)" },
       { usage: "set <setting> <value>", text: "a policy setting: profile, localAsks, selfProtectionByModel, dangerousCommands, sensitiveFiles, scripts, decisionModel, rememberConfirmations (minutes, 1 to 60)" },
       { usage: "unset <setting>", text: "remove that setting there" },
-      { usage: "  --agent <name>", text: "rules <setting>|reset, set, unset: in the section of this agent (main agent, or subagent); never with --path or rememberConfirmations" },
+      { usage: "  --agent <name>", text: "rules <setting>|reset, set, unset: in the section of this agent (main agent, or subagent); never with --path, nor set rememberConfirmations (unset removes a value written there)" },
       { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
       { usage: "rules add <id>", text: "add one of your rules to rules of the global guard.json (top level only)" },
       { usage: "  --pattern <regex>", text: "required: the regular expression it looks for (in the command, or in the tool's input)" },

@@ -11,6 +11,7 @@ import {
   pathTokens,
   protectedWriteClass,
   realFile,
+  strictestKind,
   systemWrite,
   targetable,
   uncheckedCredentialReason,
@@ -108,9 +109,9 @@ const mentionsNetwork = (command: string) => runsNetwork(command) || NETWORK_WOR
 
 /**
  * Another OpenCode agent or server launched by the agent: a nested `opencode run --auto` would approve all
- * requests, and OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT / OPENCODE_CONFIG_DIR can remove the plugin from it.
+ * requests (also without a subcommand, and with the hidden aliases of `--auto`, OpenCode 2.2.0), and OPENCODE_CONFIG / OPENCODE_CONFIG_CONTENT / OPENCODE_CONFIG_DIR can remove the plugin from it.
  */
-const NESTED_OPENCODE = commandRegex("opencode", "(?:\\s+(?:run|serve|web|acp|attach)\\b|(?=[^;&|\\n]{0,500}?\\s--auto\\b))")
+const NESTED_OPENCODE = commandRegex("opencode", "(?:\\s+(?:run|serve|web|acp|attach)\\b|(?=[^;&|\\n]{0,500}?\\s--(?:auto|yolo|dangerously-skip-permissions)\\b))")
 const OPENCODE_CONFIG_VARIABLE = /\bOPENCODE_CONFIG(?:_DIR|_CONTENT)?=/
 /**
  * With a nested OpenCode launch (OpenCode 2.2.0): the other variables that change the configuration or the plugins it
@@ -2412,6 +2413,68 @@ function interpreterDangerousCode(command: string): boolean {
   return false
 }
 
+/** String literal of inline code: single, double or backtick quotes, with escapes. */
+const CODE_LITERAL = /'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/g
+/** A literal that may launch the plugin's command line or another OpenCode. */
+const NAMES_LAUNCH = /\b(?:guard|opencode)\b/
+/** A call that writes the path it is given (Python, Node, Bun, Ruby, Perl, PHP), just before its opening parenthesis. */
+const WRITE_CALL =
+  /(?:\b(?:write\w*|append\w*|createWriteStream|copy\w*|cp(?:Sync)?|rename\w*|move\w*|unlink\w*|remove|rm(?:Sync|tree|dir\w*)?|symlink\w*|link(?:Sync)?|truncate\w*|file_put_contents|touch|mkdir\w*|makedirs|chmod\w*|install)|\bos\.replace)\s*$/
+/** Between that parenthesis and the literal: nothing, or one argument without parentheses (destination of a copy, move or link). */
+const FIRST_ARGUMENTS = /^\s*(?:[^()\n;]*,\s*)?$/
+/** An open call just before a literal path, then its write mode after it (`open(p, 'w')`, `fopen(p, "a+")`, `{ flag: 'w' }`). */
+const OPEN_BEFORE = /\b(?:open\w*|fopen)\s*\(\s*$/
+const WRITE_MODE_AFTER = /^\s*,\s*(?:\{\s*)?(?:(?:mode|flags?)\s*[=:]\s*)?['"`][rbt]*[wax+][rwxabt+]*['"`]/
+/** A path object of the literal, then a method that writes it (`Path(p).write_text(…)`). */
+const PATH_BEFORE = /\bPath\s*\(\s*$/
+const PATH_WRITE_AFTER = /^\s*\)\s*\.\s*(?:write_\w+|touch|unlink|rename|replace|symlink_to|hardlink_to|mkdir|rmdir|chmod|open\s*\(\s*(?:mode\s*=\s*)?['"][rbt]*[wax+])/
+/** A literal that may be a path to the plugin's settings: a slash, or a JSON name (`guard.json`, `service.json`…). */
+const SETTINGS_CANDIDATE = /^[^\s;&|<>()'"`]*(?:\/[^\s;&|<>()'"`]*|\.jsonc?)$/
+
+/**
+ * Equivalent shell form of what inline interpreter code launches or writes, for the rules that protect the plugin's
+ * settings (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`): with an execution sink, each literal
+ * (or list of literals separated by commas, one command) that names `guard` or `opencode`, as a command; a redirection
+ * to each literal path that holds the plugin's settings and that a call writes (argument of a write, copy, move or
+ * removal call, opened for writing, Perl's `>` target), never one only read. Literal paths only (a path built by the
+ * code or known once the shell runs is not followed); `undefined` without either. Judged in addition to the command, for those rules only
+ * (`CODE_VIEW_RULES`).
+ */
+function interpreterCodeView(command: string, ctx: ShellRuleContext): string | undefined {
+  if (!HAS_INTERPRETER_CODE.test(command)) return undefined
+  const text = reentersShell(withoutData(command)) ? command : withoutHeredocBodies(command)
+  const lines: string[] = []
+  for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
+    const quoted = match[2] ?? ""
+    let code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
+    if (code.length === 0 || code.length > INLINE_CODE_LIMIT) continue
+    if (quoted.startsWith('"')) code = code.replace(/\\([\\"$`])/g, "$1")
+    const sink = hasExecutionSink(code)
+    const groups: string[] = []
+    let end = -1
+    for (const literal of code.matchAll(CODE_LITERAL)) {
+      const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
+      if (end >= 0 && /^\s*,\s*$/.test(code.slice(end, literal.index))) groups[groups.length - 1] += ` ${value}`
+      else groups.push(value)
+      end = literal.index + literal[0].length
+      const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
+      const path = perl ? value.slice(perl.length) : value
+      if (!SETTINGS_CANDIDATE.test(path)) continue
+      const before = code.slice(Math.max(0, literal.index - 240), literal.index)
+      const after = code.slice(end, end + 80)
+      const call = before.lastIndexOf("(")
+      const written =
+        perl !== undefined ||
+        (call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))) ||
+        (OPEN_BEFORE.test(before) && WRITE_MODE_AFTER.test(after)) ||
+        (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
+      if (written && protectedWriteClass(path, ctx.home, ctx) === "settings") lines.push(`: >${path}`)
+    }
+    if (sink) lines.push(...groups.filter((group) => NAMES_LAUNCH.test(group)))
+  }
+  return lines.length ? lines.join("\n") : undefined
+}
+
 /** Code passed to an interpreter too long for `interpreterDangerousCode` (not examined); no cost on a shorter command. */
 function interpreterCodeTooLong(command: string): boolean {
   if (command.length <= INLINE_CODE_LIMIT) return false
@@ -3333,8 +3396,28 @@ function namesGuardCli(command: string, ctx: ShellRuleContext): boolean {
 
 /** Kinds of protected locations targeted by the command's writes (`protectedWriteClass`). */
 function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteClass | undefined> {
-  return writtenTargets(command).map((target) => protectedWriteClass(target, ctx.home, ctx))
+  // A directory known once the shell runs a substitution whose text ends with it (`"$(echo <dir>)/plugin/x.ts"`): the
+  // joined form too, for self-protection only (a substitution that names no OpenCode location changes nothing).
+  const selfProtection = (joined: string) => {
+    const kind = protectedWriteClass(joined, ctx.home, ctx)
+    return kind === "settings" || kind === "opencode" ? kind : undefined
+  }
+  const kinds = writtenTargets(command).map((target) => {
+    const kind = protectedWriteClass(target, ctx.home, ctx)
+    const joined = target.replace(SUBSTITUTION_END, "")
+    return joined === target ? kind : strictestKind(kind, selfProtection(joined))
+  })
+  if (/\$\(|`/.test(command)) for (const match of command.matchAll(SUBSTITUTION_REDIRECT)) kinds.push(selfProtection(`${match[1]}${match[2]}`))
+  return kinds
 }
+
+/** End of a command substitution (and a quote closed just before it) followed by the rest of a path. */
+const SUBSTITUTION_END = /["']?[)`](?=\/)/g
+/**
+ * Redirection to a target that starts with a command substitution followed by a path, which `writeTargets` does not read
+ * past the parenthesis: the last word of the substitution and the path.
+ */
+const SUBSTITUTION_REDIRECT = /(?:^|[^<>])(?:\d|&)?>>?\|?\s*["']?(?:\$\(|`)(?:[^()`;&|\n]*\s)?([^\s()`;&|'"]+)["']?[)`]["']?(\/[^\s;&|<>()'"]*)/g
 
 /** Targets of the command's writes. */
 function writtenTargets(command: string): string[] {
@@ -3353,7 +3436,10 @@ const PATH_EXECUTION = /(?:^|[;&|(`\n{])[^\S\n]*(?:sudo\s+)?(?:\.{1,2}\/|~\/|\/)
 const MAKE_EXECUTABLE = /\bchmod\s[^;&|\n]*\+[rw]*x/
 
 function reentersShell(command: string): boolean {
-  return SHELL_REENTRY.test(command) || PATH_EXECUTION.test(command) || MAKE_EXECUTABLE.test(command)
+  // A launcher name in quotes (`"bash" <<EOF`) is read without them: only a quoted piece without a blank or a separator,
+  // so that no separator comes out of quoted text.
+  const unquoted = /["']/.test(command) && SHELL_REENTRY.test(command.replace(/'([^'\s;&|()<>`]*)'|"([^"\s;&|()<>`$\\]*)"/g, "$1$2"))
+  return SHELL_REENTRY.test(command) || unquoted || PATH_EXECUTION.test(command) || MAKE_EXECUTABLE.test(command)
 }
 
 /** Code passed to a non-shell interpreter (`node -e "…"`, `python3 -c '…'`, `perl -E`, `php -r`, `deno eval`). */
@@ -4231,6 +4317,12 @@ function dequoteWord(text: string, i: number, end: number): string {
 }
 
 const SHELL_LAUNCHER = /^(?:sh|bash|zsh|dash|ksh|mksh|ash|yash|fish)$/
+/** A wrapper of `commandRegex`, as a whole word (`command -v` is told apart by its next word). */
+const WRAPPER_WORD = new RegExp(`^(?:${WRAPPERS})$`)
+/** The options of `find` that launch the next word, as in `commandRegex`. */
+const FIND_EXEC = /^-(?:exec|execdir|ok|okdir)$/
+/** A string written as a single quoted piece with a literal value: single quotes, or double quotes without expansion or escape. */
+const LITERAL_STRING = /^(?:'[^']*'|"[^"\\$`]*")$/
 
 /**
  * View where the word in command position is reduced to its literal value (choice 1), so that the rules recognize the
@@ -4241,8 +4333,13 @@ const SHELL_LAUNCHER = /^(?:sh|bash|zsh|dash|ksh|mksh|ash|yash|fish)$/
  * Literal that would keep a separator: a single word. `flag`, reason for an ask: substitution attached to
  * other characters (program fixed at run time, choice 2; except a substitution alone or followed by a slash);
  * oversized head word (> 1024) with a special character, or exhausted budget (undetermined program), if a special character
- * remains outside heredoc data bodies (`outside`, no body attached to the shell that reads it). Zero cost without a
- * special character; not descended into a substitution or a wrapper string (limit).
+ * remains outside heredoc data bodies (`outside`, no body attached to the shell that reads it). Behind a wrapper of
+ * `commandRegex` or a `find -exec`, the words it may launch (`reach`: the wrapper's nine, its own bound) are reduced the
+ * same way, a nested wrapper renewing the reach (the view is judged additionally: reducing an argument is never less
+ * strict). The string after a `-c` option (any program, as `commandRegex` opens there) written as a single literal
+ * quoted piece, and bash's `$'…'` after a shell launcher, is replaced by its own view, quoted again (single quotes unless
+ * it holds one). Zero cost without a
+ * special character; not descended into a substitution (limit).
  */
 function commandWordView(command: string): { view: string; flag?: string } {
   if (!COMMAND_WORD_SPECIAL.test(command)) return { view: command }
@@ -4250,11 +4347,13 @@ function commandWordView(command: string): { view: string; flag?: string } {
   const text = data !== command && !reentersShell(data) ? data : command
   const budget = { left: 8 * text.length + 1024 }
   let [out, cursor, changed, i, head, launcher, flag, mask] = ["", 0, false, 0, true, false, undefined as string | undefined, undefined as string | undefined]
+  let [reach, wrapper, string] = [0, "", false]
   const outside = (from: number, to?: number) => COMMAND_WORD_SPECIAL.test((mask ??= heredocsAreReal(text) ? withoutHeredocBodies(text, false, true) : text).slice(from, to))
   while (i < text.length && budget.left > 0) {
     const c = text[i]!
-    if (/[;&|\n({]/.test(c)) [head, launcher, i] = [true, false, i + 1]
-    else if (/[)<>]/.test(c)) [head, launcher, i] = [false, false, i + 1]
+    if (/[;&|\n({]/.test(c)) [head, launcher, reach, string, i] = [true, false, 0, false, i + 1]
+    else if (c === ")") [head, launcher, reach, string, i] = [false, false, 0, false, i + 1]
+    else if (/[<>]/.test(c)) [head, launcher, i] = [false, false, i + 1]
     else if (/\s/.test(c)) i++
     else if (c === "#" && (i === 0 || /[\s;&|()<>]/.test(text[i - 1]!))) i = Math.min(text.indexOf("\n", i) >>> 0, text.length)
     else {
@@ -4265,16 +4364,21 @@ function commandWordView(command: string): { view: string; flag?: string } {
       const small = word.length <= 1024
       const assign = head && /^[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=/.test(word)
       if (head && !assign && !small && end >= 0 && outside(i, stop)) flag ??= UNDETERMINED_WORD_REASON
-      if (launcher && small && word.startsWith("$'")) {
-        const decoded = dequoteWord(text, i, stop).replace(/[\\"$`]/g, "\\$&")
-        ;[out, cursor, changed] = [out + text.slice(cursor, i) + `"${decoded}"`, stop, true]
-      } else if (head && !assign && small) {
+      const candidate = (head && !assign) || reach > 0
+      let rewritten = false
+      if (small && ((launcher && word.startsWith("$'")) || (string && LITERAL_STRING.test(word)))) {
+        const decoded = dequoteWord(text, i, stop)
+        const view = commandWordView(decoded).view
+        const quoted = view.includes("'") ? `"${view.replace(/[\\"$`]/g, "\\$&")}"` : `'${view}'`
+        if (word.startsWith("$'") || view !== decoded) [out, cursor, changed, rewritten] = [out + text.slice(cursor, i) + quoted, stop, true, true]
+      }
+      if (!rewritten && candidate && small) {
         const literal = subs.length === 0 ? dequoteWord(text, i, stop) : word
         if (SHELL_LAUNCHER.test(literal)) launcher = true
         if (COMMAND_WORD_SPECIAL.test(word)) {
           if (subs.length === 0) {
             if (literal !== word && literal !== "" && !/[\s;&|()<>`]/.test(literal)) [out, cursor, changed] = [out + text.slice(cursor, i) + literal, stop, true]
-          } else {
+          } else if (head && !assign) {
             const first = subs[0]!
             const before = dequoteWord(text, i, text[first[0] - 1] === "(" ? first[0] - 2 : first[0] - 1)
             const after = subs.length === 1 ? dequoteWord(text, first[1] + 1, stop) : "x"
@@ -4284,6 +4388,13 @@ function commandWordView(command: string): { view: string; flag?: string } {
       }
       // Budget exhausted during this word: text unread or misread, from this word to the end.
       if ((budget.left < 0 || (budget.left === 0 && stop < text.length)) && (outside(i) || mask === text)) flag ??= UNDETERMINED_WORD_REASON
+      const literal = small && subs.length === 0 ? dequoteWord(text, i, stop) : word
+      const name = literal.replace(/^[\\=]/, "").split("/").pop()!
+      if (candidate && WRAPPER_WORD.test(name)) [reach, wrapper] = [9, name]
+      else if (FIND_EXEC.test(literal)) [reach, wrapper] = [1, ""]
+      else if (wrapper === "command" && /^-[a-zA-Z]*[vV]$/.test(literal)) reach = 0
+      else if (reach > 0) reach--
+      string = /^-[a-zA-Z]*c$/.test(literal)
       ;[head, i] = [assign, stop]
     }
   }
@@ -4304,7 +4415,7 @@ function commandWordView(command: string): { view: string; flag?: string } {
  * can decide): at equal strength, the finding of the original view is kept.
  */
 function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
-  const [base, normalized, flag] = viewFindings(command, ctx)
+  const [base, normalized, flag, coded] = viewFindings(command, ctx)
   if (base?.verdict === "deny") return base
   let [continued, unstable, failed]: Array<Finding | undefined> = []
   try {
@@ -4317,7 +4428,7 @@ function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefin
     failed = hardened(ANALYSIS_FAILED, ctx.active)
   }
   // Findings of the original view first, in their order; an added finding takes the place only if it is stronger.
-  return [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag]))
+  return [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag, coded]))
 }
 
 /**
@@ -4333,20 +4444,45 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
   return other?.verdict === "deny" ? other : { verdict: "ask", rule: found.rule, reason: found.reason }
 }
 
+/** Rules the equivalent shell form of inline interpreter code is judged for (`interpreterCodeView`): the others judge the command alone. */
+const CODE_VIEW_RULES: ReadonlySet<string> = new Set(["guard-cli", "nested-opencode", "self-protection", "opencode-service"])
+
+/**
+ * Context of that view: groups turned off, settings of `CODE_VIEW_RULES` only (a setting turns a rule on in a disabled
+ * group), no user rule. Only the always-active rules remain, so a deny of another rule never hides their ask.
+ */
+function codeViewContext(ctx: ShellRuleContext): ShellRuleContext {
+  const overrides = new Map([...(ctx.active?.overrides ?? [])].filter(([rule]) => CODE_VIEW_RULES.has(rule)))
+  const byModel = { ...(ctx.active?.localAsksByModel ? { localAsksByModel: true } : {}), ...(ctx.active?.selfProtectionByModel ? { selfProtectionByModel: true } : {}) }
+  return { ...ctx, custom: [], active: { dangerousCommands: false, sensitiveFiles: false, ...(overrides.size ? { overrides } : {}), ...byModel } }
+}
+
 /**
  * Findings of a view, in order: finding of the rules and of the view without leading assignments (`assignedFinding`);
- * without a deny, that of the view of the word in command position (`commandWordView`) and the ask of its flag. Internal
- * error of the latter: prudent ask in its place (`ANALYSIS_FAILED`).
+ * without a deny, that of the view of the word in command position (`commandWordView`), the ask of its flag, and that of
+ * the equivalent shell form of inline interpreter code (`interpreterCodeView`), for `CODE_VIEW_RULES` only. Internal error of one of the latter two:
+ * prudent ask in its place (`ANALYSIS_FAILED`), the other's finding kept.
  */
 function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | undefined> {
   const base = assignedFinding(command, ctx, layeredShellFinding(command, ctx).finding)
   if (base?.verdict === "deny") return [base]
+  let coded: Finding | undefined
+  try {
+    const code = interpreterCodeView(command, ctx)
+    if (code !== undefined) {
+      const only = codeViewContext(ctx)
+      const found = assignedFinding(code, only, layeredShellFinding(code, only).finding)
+      coded = found && CODE_VIEW_RULES.has(found.rule) ? found : undefined
+    }
+  } catch {
+    coded = hardened(ANALYSIS_FAILED, ctx.active)
+  }
   try {
     const { view, flag } = commandWordView(command)
     const normalized = view !== command ? assignedFinding(view, ctx, layeredShellFinding(view, ctx).finding) : undefined
-    return [base, normalized, flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined]
+    return [base, normalized, flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined, coded]
   } catch {
-    return [base, hardened(ANALYSIS_FAILED, ctx.active)]
+    return [base, hardened(ANALYSIS_FAILED, ctx.active), undefined, coded]
   }
 }
 

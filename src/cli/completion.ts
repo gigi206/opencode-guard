@@ -4,7 +4,7 @@
 // runs the bash function through `bashcompinit`. Nothing is run on a completion.
 import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
-import { SETTINGS, SWITCHES } from "./write.ts"
+import { MINUTES, SETTINGS, SWITCHES } from "./write.ts"
 
 export const COMMANDS = ["rules", "redaction", "show", "last", "status", "test", "set", "unset", "trust", "untrust", "help", "completion"] as const
 export const SHELLS = ["bash", "zsh"] as const
@@ -49,6 +49,7 @@ function bashFunction(): string {
           case $sub in
 ${values}
           esac
+        elif [[ $sub == ${MINUTES} ]]; then words="--project"
         else words="--agent --project"; fi ;;
       unset)
         if [[ $COMP_CWORD -eq 2 ]]; then words=$settings; else words="--agent --project"; fi ;;

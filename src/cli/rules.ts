@@ -7,7 +7,7 @@ import { GUARD_FILE, readGuardFiles } from "../guard-file.ts"
 import { RULE_DETAILS, ruleSettings } from "../rules/details.ts"
 import { RULE_FEATURES, type RuleFeature } from "../rules/features.ts"
 import type { CustomRule } from "../rules/types.ts"
-import { CliError, readSources, resolution, type CliIo, type Pretty, type Sources } from "./context.ts"
+import { CliError, mayKeepNote, readSources, resolution, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import { type Segment } from "./style.ts"
 
@@ -167,7 +167,8 @@ function guardRules(io: CliIo, sources: Sources): GuardRules | undefined {
   if (!file.data) return { path, unread: `ignored: ${file.reason ?? "it cannot be read"} (a running plugin keeps the rules it read from it last)` }
   const version = resolution(io, sources, undefined, [file])
   const rows = (version.guardRules ?? []).map(rowOf)
-  const setAside = version.warnings.filter((warning) => GUARD_RULES_WARNING.test(warning)).map((warning) => warning.replace(/^global guard\.json: /, ""))
+  const kept = mayKeepNote(version)
+  const setAside = [...version.warnings.filter((warning) => GUARD_RULES_WARNING.test(warning)).map((warning) => warning.replace(/^global guard\.json: /, "")), ...(kept ? [kept] : [])]
   return rows.length || setAside.length ? { path, rows, setAside } : undefined
 }
 

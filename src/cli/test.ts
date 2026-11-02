@@ -15,7 +15,7 @@ import { isRegularFile } from "../real-path.ts"
 import { TARGETED_RULES } from "../rules/features.ts"
 import { shellDirectories } from "../scripts.ts"
 import { createRedactor } from "../secrets/redact.ts"
-import { CliError, readSources, realOrUndefined, serverEnv, type CliIo } from "./context.ts"
+import { CliError, mayKeepNote, readSources, realOrUndefined, serverEnv, type CliIo } from "./context.ts"
 import { title } from "./pretty.ts"
 import type { Segment } from "./style.ts"
 
@@ -65,6 +65,8 @@ export async function testCall(io: CliIo, request: TestRequest, client?: ModelCl
   // The plugin keeps the rules it read last from a global guard.json that became unusable: unknown here.
   const ignored = files.find((file) => file.global && !file.data)
   if (ignored) notes.push(`the global guard.json is ignored (${ignored.reason ?? "it cannot be read"}): a running plugin keeps the rules it read from it last, not seen here`)
+  const kept = mayKeepNote(version)
+  if (kept) notes.push(`the global guard.json: ${kept}, not seen here`)
   const redactor = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config) })
   redactor.setDisabledTypes(version.redactionOff ?? [])
   const { protectedDirs, pluginDirs, serviceDirs } = guardDirectories(env, sources.globalDir)

@@ -98,6 +98,18 @@ export function resolution(io: CliIo, sources: Sources, project: string | undefi
   return resolveVersion(config.layers!, files)
 }
 
+/**
+ * The global guard.json's rules a running plugin may keep while this reading sets them aside (`Version.mayKeep`): their
+ * identifiers only, never a pattern.
+ */
+export function mayKeepNote(version: Version): string | undefined {
+  const kept = version.mayKeep
+  if (kept === undefined) return undefined
+  if (kept === "all") return "its rules is not a list: a running plugin may keep the rules it read from it last, until it is valid again"
+  const which = kept.length === 1 ? `entry ${JSON.stringify(kept[0])}` : `entries ${kept.map((id) => JSON.stringify(id)).join(", ")}`
+  return `${which} set aside: a running plugin may keep the rule it read last under ${kept.length === 1 ? "that identifier" : "each"}, until it is valid again`
+}
+
 /** Project of the current directory: the first one, going up, that holds a `.git` entry; otherwise the current directory. */
 export function projectDirectory(cwd: string): string {
   const start = realOrUndefined(cwd) ?? resolve(cwd)

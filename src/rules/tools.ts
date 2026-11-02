@@ -17,6 +17,7 @@ import {
   uncheckedCredentialReason,
   uncheckedWriteReason,
   type CredentialContext,
+  type WriteClass,
   type WritePathContext,
 } from "./sensitive-paths.ts"
 import { shellFinding } from "./shell.ts"
@@ -137,12 +138,12 @@ function openCodeWritePath(path: string, ctx: ToolRuleContext): string | undefin
  * OpenCode configuration and plugin directory: self-protection (always active), like an unchecked real path (limit);
  * other protected locations. `edit`, `write`, and `patch` tools: written form (`protectedWriteClass`) and OpenCode exact
  * form, which keeps whitespace and leading/trailing quotes (`exactWriteClass`); the strictest wins. A location that
- * holds the plugin's settings is never left to the decision model (user's decision).
+ * holds the plugin's settings is never left to the decision model (user's decision). `classified`: the class of the path
+ * computed beforehand (`writeClass`), so that the other forms of several targets are looked up only once all are classified.
  */
-function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined {
+function protectedWrite(path: string, ctx: ToolRuleContext, classified = writeClass(path, ctx)): Finding | undefined {
   if (!path) return undefined
-  const exact = openCodeWritePath(path, ctx)
-  const kind = strictestKind(protectedWriteClass(path, ctx.home, ctx), exact === undefined ? undefined : exactWriteClass(exact, ctx))
+  const { exact, kind } = classified
   const system = () => entrusted(overridden({ verdict: "ask", rule: "protected-write", reason: `write to a protected location (${path})` }, ctx.active), ctx.active)
   const anySystem = () => systemWrite(path, ctx.home, ctx) || (exact !== undefined && exactSystemWrite(exact, ctx))
   if (kind === "settings" || kind === "opencode") {
@@ -153,6 +154,13 @@ function protectedWrite(path: string, ctx: ToolRuleContext): Finding | undefined
     return withSystemForm(overridden({ verdict: "ask", rule: "self-protection", reason: uncheckedWriteReason("write to a location", path) }, ctx.active), system, anySystem, ctx)
   if (kind === "system" && ruleEnabled("protected-write", ctx.active)) return system()
   return undefined
+}
+
+/** Strictest class of a path written by `edit`, `write` or `patch`: written form and OpenCode exact form. */
+function writeClass(path: string, ctx: ToolRuleContext): { exact?: string; kind?: WriteClass } {
+  if (!path) return {}
+  const exact = openCodeWritePath(path, ctx)
+  return { exact, kind: strictestKind(protectedWriteClass(path, ctx.home, ctx), exact === undefined ? undefined : exactWriteClass(exact, ctx)) }
 }
 
 /**
@@ -369,12 +377,15 @@ export function toolFinding(tool: string, input: unknown, ctx: ToolRuleContext):
     case "edit":
     case "write":
       return mostSevere([placeholderOf(), write(str(args.path)), ...custom])
-    // Each file a header can designate (broad read and its pieces): an excess costs only one confirmation.
+    // Each file a header can designate (broad read and its pieces): an excess costs only one confirmation. All targets
+    // classified before the other forms of any are looked up: a limit reached by those never hides a later target's class.
     case "patch": {
       const patch = str(args.patchText)
-      const targets = checked("the protected location check", ctx, () =>
-        mostSevere(strictestProtected(patchTargets(patch, { pieces: true }).map((target) => protectedWrite(target, ctx)))),
-      )
+      const targets = checked("the protected location check", ctx, () => {
+        const paths = patchTargets(patch, { pieces: true })
+        const classes = paths.map((target) => writeClass(target, ctx))
+        return mostSevere(strictestProtected(paths.map((target, index) => protectedWrite(target, ctx, classes[index]))))
+      })
       return mostSevere([placeholderOf(), targets, ...custom])
     }
     // The whole input (v2.0.29: url, format, timeout / query…): robust to added headers or a body.

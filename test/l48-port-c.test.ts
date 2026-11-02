@@ -203,7 +203,7 @@ describe("command line", () => {
     const agent = await w.run(["set", "rememberConfirmations", "5", "--agent", "build"])
     assert.equal(agent.code, 2)
     assert.ok(agent.err.startsWith("guard: rememberConfirmations does not go with --agent"), agent.err)
-    assert.equal((await w.run(["unset", "rememberConfirmations", "--agent", "build"])).code, 2)
+    assert.equal((await w.run(["unset", "rememberConfirmations", "--agent", "build"])).code, 0)
     assert.equal((await w.run(["set", "rememberConfirmations", "30", "--project"])).code, 0)
     assert.deepEqual(w.read(), { rememberConfirmations: 5, projects: { [w.project]: { rememberConfirmations: 30 } } })
     const unset = await w.run(["unset", "rememberConfirmations"])
@@ -247,7 +247,7 @@ describe("command line", () => {
   it("PC-11: help and completion know --path and rememberConfirmations", { skip: !bash() && "bash not installed" }, async () => {
     const w = await world()
     const help = (await w.run(["help"])).out
-    for (const word of ["--path <file>", "rules off|reset secret-file-read only", "rememberConfirmations (minutes, 1 to 60)", "never with --path or rememberConfirmations"]) assert.ok(help.includes(word), word)
+    for (const word of ["--path <file>", "rules off|reset secret-file-read only", "rememberConfirmations (minutes, 1 to 60)", "never with --path, nor set rememberConfirmations"]) assert.ok(help.includes(word), word)
     const { completionScript } = (await import(new URL("../src/cli/completion.ts", import.meta.url).href)) as { completionScript: (shell: string) => string }
     const complete = (...line: string[]) => {
       const words = ["guard", ...line]

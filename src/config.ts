@@ -1067,6 +1067,16 @@ export function parseConfig(
     if (why) warnings.push(`${REDACTION_OFF}: turning off the built-in format ${type} ignored: ${why}`)
     return !why
   })
+  // Strings never redacted: a relaxation of every rule on secrets and of what the model and the log see, kept in a project
+  // trusted at startup, otherwise each only when a global or system declaration lists it too (never quoted).
+  const requestedAllowlist = allowlistOption(options.allowlist, warnings)
+  const allowlist = requestedAllowlist.filter(
+    (item) => (trustedAtStart ??= inputs !== undefined && trustedProject(loaded(), inputs)) || !refusal((declaration) => allowlistOption(declaration.allowlist, []).includes(item)),
+  )
+  if (allowlist.length < requestedAllowlist.length) {
+    const dropped = requestedAllowlist.length - allowlist.length
+    warnings.push(`allowlist: ${dropped} ${dropped === 1 ? "entry" : "entries"} ignored: ${refusal(() => false)}`)
+  }
   const modelUndeclared = decision ? undeclaredModel(loaded(), { decision, maxStateChars, thresholds, secretPatterns, disabledPatterns }) : "no decision model"
   const layers = inputs && scopeLayers(options, { rules, overrides: new Map(overrides), exceptions, remember, profile, refusal, declarations: loaded(), modelUndeclared }, inputs, warnings)
   const version = layers && (inputs!.files.length > 0 || layers.keyed) ? resolveVersion(layers, inputs!.files) : undefined
@@ -1160,7 +1170,7 @@ export function parseConfig(
       cacheMax: num(options.cacheMax, 500, "cacheMax", warnings, 0, MAX_CACHE_ENTRIES),
       secretPatterns,
       disabledPatterns,
-      allowlist: allowlistOption(options.allowlist, warnings),
+      allowlist,
       rules,
       unprotectedAgent: unprotectedAgentOption(options.unprotectedAgent, warnings),
       outputCheck: guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK),
@@ -1323,6 +1333,11 @@ export interface Version {
   readonly rules: readonly CustomRule[]
   /** The global guard.json's (read now, or kept while it cannot be used); absent: none. */
   readonly guardRules?: readonly CustomRule[]
+  /**
+   * The global guard.json's entries discarded now, by identifier, none read under it ("all": its `rules` is not a list):
+   * a running plugin may keep the rule it read last under each, which a version without `previous` cannot see.
+   */
+  readonly mayKeep?: readonly string[] | "all"
   /** Sources, sections and trust, for the log. */
   readonly summary: string
   /** Built-in formats turned off by the global guard.json (`redactionOff`), on top of `secretPatterns`; absent: none. */
@@ -1678,12 +1693,16 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
   const globalGuard = files.find((file) => file.global)
   let guardRules: readonly CustomRule[] = []
   const stay = (count: number) => (count === 1 ? "the rule read from it last stays" : `the ${count} rules read from it last stay`)
+  let mayKeep: readonly string[] | "all" | undefined
   if (globalGuard?.data) {
     // A deny rule never lost to an edit either: `rules` no longer a list, or an entry discarded (pattern, verdict).
     const discarded: string[] = []
     const unusable = globalGuard.data.rules !== undefined && !Array.isArray(globalGuard.data.rules)
     guardRules = rulesOption(globalGuard.data.rules, warnings, GUARD_RULES, discarded)
     const read = guardRules
+    const unread = [...new Set(discarded.filter((id) => !read.some((rule) => rule.id === id)))]
+    if (unusable) mayKeep = "all"
+    else if (unread.length) mayKeep = unread
     const kept = (previous?.guardRules ?? []).filter((rule) => unusable || (discarded.includes(rule.id) && !read.some((current) => current.id === rule.id)))
     if (kept.length) {
       guardRules = [...guardRules, ...kept]
@@ -1840,6 +1859,7 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
     ...(errors.length ? { errors } : {}),
     rules,
     ...(guardRules.length ? { guardRules } : {}),
+    ...(mayKeep ? { mayKeep } : {}),
     listed,
     settings(main) {
       const state = stateFor(main, undefined, undefined)

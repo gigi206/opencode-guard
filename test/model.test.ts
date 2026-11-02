@@ -511,7 +511,7 @@ describe("audit no. 3: configuration", () => {
     assert.equal(parseConfig({ logFile: " false " }, { HOME: "/home/x" }).config.logFile, undefined)
   })
   it("allowlist trimmed", () => {
-    assert.deepEqual(parseConfig({ allowlist: [" abc123XYZ ", " ", 3] }).config.allowlist, ["abc123XYZ"])
+    assert.deepEqual(parseConfig({ allowlist: [" abc123XYZ ", " ", 3] }, {}, () => [{ label: "global", options: { allowlist: ["abc123XYZ"] } }]).config.allowlist, ["abc123XYZ"])
   })
   it("rules[].tools: single string accepted, other type reported", () => {
     const { config, warnings } = parseConfig({
@@ -732,7 +732,7 @@ describe("lot 13: configuration — v1 names, allowlist, logFile, maxStateChars"
     assert.ok(!inherited.warnings.length)
   })
   it("allowlist: non-text entry reported by index and type, never the value; non-array reported", () => {
-    const { config, warnings } = parseConfig({ allowlist: ["ok-value-1", 42, null] }, {})
+    const { config, warnings } = parseConfig({ allowlist: ["ok-value-1", 42, null] }, {}, () => [{ label: "global", options: { allowlist: ["ok-value-1"] } }])
     assert.deepEqual(config.allowlist, ["ok-value-1"])
     assert.ok(warnings.includes("allowlist[1] ignored (string expected, got number)"))
     assert.ok(warnings.includes("allowlist[2] ignored (string expected, got null)"))
