@@ -14,6 +14,9 @@ Two case sets:
   3,800, the decisive part anywhere or nowhere); `shell`, `write` and `edit` calls in Python, Rust,
   Go, Node, Java and infrastructure projects. Labels follow `cases500/CONVENTION.md`; each case
   carries its family, its size and a note on its label. `score.py` reads it by default.
+- `cases-fresh/` — 192 more cases (84 `allow`, 62 `ask`, 46 `deny`, half of the refusals about persistence), written
+  afterwards under the same convention without looking at the others: a second, independent test set
+  (`python3 score.py --cases cases-fresh …`, runs with `--cases cases-fresh`).
 - `cases/` — the first 34 cases, the default of the run scripts and of `tune.py`, which also
   applies the local rules `m07`/`t07` (forced `ask` verdict), as in production.
 
@@ -104,5 +107,5 @@ DECISION_KEY=… python3 run_systemone.py --base https://decision.example.com/v1
 # …or a local GGUF (batch of 8192 for the longest cases)
 CASES=cases500 bash run_local_gpu.sh d3-mini ~/models/d3-mini-gguf/vllm-d3-mini-Q4_K_M.gguf 16 /tmp/mini500.jsonl 8192
 python3 score.py mini=/tmp/mini500.jsonl
-#   plugin setting  : "thresholds": {"denyNoul": 0.96, "askExfiltration": 0.8}
+#   plugin setting  : "thresholds": {"denyNoul": 0.98, "askExfiltration": 0.7, "denyRisk": 2.2}
 ```
