@@ -2433,7 +2433,7 @@ const SETTINGS_CANDIDATE = /^[^\s;&|<>()'"`]*(?:\/[^\s;&|<>()'"`]*|\.jsonc?)$/
 
 /**
  * Equivalent shell form of what inline interpreter code launches or writes, for the rules that protect the plugin's
- * settings (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`): with an execution sink, each literal
+ * settings (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`, `opencode-server-api`): with an execution sink, each literal
  * (or list of literals separated by commas, one command) that names `guard` or `opencode`, as a command; a redirection
  * to each literal path that holds the plugin's settings and that a call writes (argument of a write, copy, move or
  * removal call, opened for writing, Perl's `>` target), never one only read. Literal paths only (a path built by the
@@ -4445,7 +4445,7 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
 }
 
 /** Rules the equivalent shell form of inline interpreter code is judged for (`interpreterCodeView`): the others judge the command alone. */
-const CODE_VIEW_RULES: ReadonlySet<string> = new Set(["guard-cli", "nested-opencode", "self-protection", "opencode-service"])
+const CODE_VIEW_RULES: ReadonlySet<string> = new Set(["guard-cli", "nested-opencode", "self-protection", "opencode-service", "opencode-server-api"])
 
 /**
  * Context of that view: groups turned off, settings of `CODE_VIEW_RULES` only (a setting turns a rule on in a disabled
