@@ -10,7 +10,7 @@ PORT=8099
 LOG="$DIR/server-$(basename "$OUT" .jsonl).log"
 mkdir -p "$(dirname "$OUT")"
 
-"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -b 4096 -ub 4096 -np 1 --no-webui > "$LOG" 2>&1 &
+"$BIN" -m "$GGUF" --alias "$LABEL" --port "$PORT" -c 8192 -b "${UB:-4096}" -ub "${UB:-4096}" -np 1 --no-webui > "$LOG" 2>&1 &
 pid=$!
 ready=""
 for _ in $(seq 1 180); do
@@ -24,7 +24,7 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-"$PY" "$DIR/run_local.py" --alias "$LABEL" --port "$PORT" --out "$OUT" --timeout "$TIMEOUT"
+"$PY" "$DIR/run_local.py" --alias "$LABEL" --port "$PORT" --out "$OUT" --timeout "$TIMEOUT" ${CASES:+--cases "$CASES"}
 status=$?
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null

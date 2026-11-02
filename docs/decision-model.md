@@ -126,23 +126,24 @@ The questions that decide actions (risk, destruction, exfiltration…) are not s
 
 ## Measured models
 
-On 2026-10-17 and 18, seven models were scored on a bench of 34 tool calls with hand-checked verdicts (10 benign, 8 modifying, 8 dangerous, 8 trickier shell and tool payloads; 30 unambiguous, 4 debatable). `d1-2B` was added on 2026-11-01, on the same bench. Every model gets the same redacted inputs, and its answers alone are mapped to verdicts with the thresholds above — the local rules are identical for every model and would hide the differences. The d3 models were served locally by llama.cpp (`systemone` path), `nox-4b` through an OpenAI-compatible gateway, `d1-2B` through its official GGUF in llama.cpp b12024 and through Transformers 5.22 (CPU, and 8-bit on the GPU). "Recommended" is the best threshold set found on that bench while keeping all ten expected refusals; the last column adds the two rules below, which apply before the model is called.
+Eight models (nine builds, with both `d1-2B` files) were scored on the 500 cases of `tools/model-bench/cases500/`: 215 to allow, 156 to confirm and 129 to refuse, across reads, builds, installs, git, deletions, in-place edits, tool configuration, destruction, persistence, privileges, containers, exfiltration, credentials, legitimate uploads, injections, opaque or indirect execution and false positives, with small, medium and large inputs (up to 3,800 characters). The labels follow the bench's `CONVENTION.md`. Every model gets the same inputs, and its answers alone are mapped to verdicts — the local rules are identical for every model and would hide the differences. The d3 models answered with their original weights through vllm-sr's System One API (`https://decision.vllm-sr.ai/v1`), `nox-4b` through its OpenAI-compatible gateway, `d1-2B` through its official GGUF files in llama.cpp.
 
-| Model | With the defaults | Recommended `thresholds` | With them | With the two rules | Notes |
+"Recommended" is the best of 4,800 threshold sets for correct verdicts minus three per expected refusal allowed. Since it is chosen on the cases it scores, the table gives the cross-validated score instead: thresholds chosen on one half of the cases, scored on the other — what to expect on new calls, within about ±3.5 points on 500 cases. "Refusals allowed" counts expected refusals the model allows; "false alarms", calls to allow that it confirms or refuses.
+
+| Model | Defaults: score, refusals allowed, false alarms | Recommended `thresholds` | Cross-validated | With them: refusals allowed, false alarms | Notes |
 |---|---|---|---|---|---|
-| `nox-4b` | 26/34 | `{ "askRisk": 1.2, "denyRisk": 2.2 }` | 30/34 | 32/34 | the current default; indulgent on risk-only cases (installs, `crontab`, `curl \| bash`), which these thresholds turn into confirmations |
-| `d3-mini` | 28/34 | `{ "denyNoul": 0.94, "denyRisk": 2.8 }` | 31/34 | 33/34 | best of the local models, and the minimum recommended for a local decision model: over-strict with the defaults |
-| `d3-flash` (Q4_K_M) | 26/34 | `{ "denyNoul": 0.98 }` | 30/34 | 30/34 | measured on the same bench; Q4_K_M with 8 layers on a 4 GB GPU; errors m04, t03, t05, t08 |
-| `d3-nano` | 23/34 | `{ "denyNoul": 0.94, "denyRisk": 2.2, "askRisk": 1.2 }` | 25/34 | 27/34 | below `nox-4b` |
-| `d3-lite` | 21/34 | `{ "askRisk": 1.2 }` | 23/34 | 24/34 | below `nox-4b` |
-| `d3-edge` | 22/34 | `{ "denyNoul": 0.86, "askNoul": 0.6 }` | 25/34 | 27/34 | identical verdicts on CPU and GPU; denies two benign network commands, indulgent on installs |
-| `d1-2B` (Q4_K_M) | 25/34 | the defaults (no set does better while keeping the ten refusals) | 25/34 | 27/34 | measured on 2026-11-01 with the official `LiquidAI/d1-2B-GGUF`; Q8_0: 23/34, 25/34 with `{ "denyNoul": 0.96 }`, 27/34 with the rules. With the model server's `score_readout="mean"` (Transformers), Q4 gives 26/34 with `{ "askRisk": 1.2 }` and 27/34 with the rules, but llama.cpp returns the median. Fits a 4 GB GPU (Q4: 2.4 GiB with an 8k context) |
+| `d3-ultra` (27B) | 78.0 %, 0, 7 | `{ "denyNoul": 0.995, "askNoul": 0.5, "askExfiltration": 0.9, "denyRisk": 2.8, "askRisk": 1.2 }` | 81.0 % | 0, 11 | never allows an expected refusal; turns many confirmations into allow or deny; about 19 GB in `Q4_K_M`, far beyond a 4 GB GPU |
+| `d3-mini` (4B) | 79.4 %, 2, 14 | `{ "denyNoul": 0.96, "askExfiltration": 0.8 }` | 80.6 % | 2, 14 | the best local model, already well set at the defaults; the minimum recommended for a local decision model |
+| `d3-flash` (9B) | 72.8 %, 0, 48 | `{ "denyNoul": 0.99, "askNoul": 0.9, "askExfiltration": 0.7 }` | 79.2 % | 2, 15 | at the defaults, confirms many writes of long project files; does not fit entirely on a 4 GB GPU |
+| `d3-nano` (2B) | 69.4 %, 4, 45 | `{ "denyNoul": 0.98, "askNoul": 0.5, "askExfiltration": 0.8, "denyRisk": 2.2, "askRisk": 1.2 }` | 70.2 % | 1, 67 | |
+| `nox-4b` | 62.6 %, 14, 20 | `{ "askRisk": 1.2, "denyRisk": 2.2 }` | 66.4 % (set on real traffic, not on this bench) | 11, 37 | the current default; the best set on this bench, `{ "denyNoul": 0.8, "askExfiltration": 0.8, "denyRisk": 2.0, "askRisk": 1.2 }` (68.0 % cross-validated), is within the margin and lowers `askExfiltration` below the 0.85 set from real traffic (see Calibration); allows persistence, tool configuration and in-place edits at any setting with a reasonable number of false alarms |
+| `d3-lite` (0.8B) | 64.6 %, 3, 72 | `{ "denyNoul": 0.98, "askNoul": 0.6, "askExfiltration": 0.9, "denyRisk": 2.2 }` | 63.4 % | 1, 80 | many false alarms |
+| `d1-2B` Q8_0 | 59.4 %, 8, 68 | `{ "denyNoul": 0.8, "askNoul": 0.8, "askExfiltration": 0.7, "denyRisk": 2.2, "askRisk": 1.2 }` | 60.0 % | 8, 64 | Q4_K_M: 60.4 % at the defaults (6, 72), 57.4 % cross-validated; fits a 4 GB GPU (Q4: 2.4 GiB, Q8: 3.1 GiB with an 8k context) |
+| `d3-edge` (0.6B) | 55.8 %, 32, 53 | `{ "denyNoul": 0.96, "askNoul": 0.5, "askExfiltration": 0.7, "denyRisk": 2.2, "askRisk": 0.8 }` | 51.8 % | 10, 109 | no threshold set balances refusals and false alarms |
 
-One other model was measured as well; its recommended value: `d3-27b` `{ "denyNoul": 0.96 }`.
+Most models score lowest on the calls to confirm (`d3-mini` 80 of 156, `d3-ultra` 55): they tend to allow or refuse them outright. The values do not transfer from one model to another; to set them for another model or another version, run it on `cases500/` and let `tools/model-bench/score.py` print the `thresholds` value (see the bench's README).
 
-The values do not transfer from one model to another: the `0.94` would drop three expected refusals from `nox-4b`, and `nox-4b`'s values do nothing for `d3-mini`. They were searched on this same bench, so the last points are optimistic: watch real traffic with `debug: true`.
-
-**Where to get the models.** The original d3 weights and their runtime are published on Hugging Face under [`vllm-sr`](https://huggingface.co/vllm-sr) (`d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`, `d3-flash`); the GGUF conversions served here are under [`ggml-org`](https://huggingface.co/ggml-org), one `vllm-d3-<model>-GGUF` repository per model, each with a `BF16` file (the original precision) and a `Q8_0` file; `Q4_K_M` is also published for `d3-mini` and `d3-flash`. The main table used `Q4_K_M` for `d3-mini` and `Q8_0` for `d3-nano`, `d3-lite` and `d3-edge`; the `d3-flash` measurements used `Q4_K_M`. `d3-mini`'s `BF16` file was measured too (on CPU, since it is 9.1 GiB): 27/34 at the defaults, 31/34 with the recommended values, 33/34 with the rules — the same verdicts as `Q4_K_M` once tuned, so quantizing costs nothing measurable.
+**Where to get the models.** The original d3 weights and their runtime are published on Hugging Face under [`vllm-sr`](https://huggingface.co/vllm-sr) (`d3-mini`, `d3-nano`, `d3-lite`, `d3-edge`, `d3-flash`); the GGUF conversions served here are under [`ggml-org`](https://huggingface.co/ggml-org), one `vllm-d3-<model>-GGUF` repository per model, each with a `BF16` file (the original precision) and a `Q8_0` file; `Q4_K_M` is also published for `d3-mini` and `d3-flash`. On the first 34 cases of the bench (`tools/model-bench/cases/`), the GGUF files served locally (`d3-mini` `Q4_K_M`, `d3-edge` `Q8_0`) gave the same verdicts as the original weights, and `d3-mini`'s `BF16` file the same verdicts as `Q4_K_M` once tuned: quantizing costs nothing measurable there.
 
 ### Secret checks (prompts and tool outputs)
 
@@ -208,7 +209,7 @@ In the global `~/.config/opencode/opencode.json` (a project file may be applied 
 }
 ```
 
-`model` must match the server's `--alias` (`d3-mini` here; the script prints the exact block at startup). `timeoutMs` is per call and mandatory; `5000` is enough for `d3-mini` on short calls, use `8000` for `d3-flash`. A long call takes much more when part of the model runs on the CPU: with 26 of `d3-mini`'s 32 layers on the GPU, about 1.1 s for a 2,000-character prompt part, but 9 to 14 s for a decision on a 4,000-character input, beyond `5000` (the call then fails and the plugin asks for confirmation); a larger `timeoutMs` has it judged, at the cost of the wait. This `decision` block replaces the Nox-4B one from [Installation](../README.md#installation); thresholds, rules and the other options are independent of the model. For `d3-mini`, add under `options` the recommended set from the table above — `"thresholds": { "denyNoul": 0.94, "denyRisk": 2.8 }` — rather than the Nox-4B defaults (31/34 instead of 28/34; 33/34 with the two rules). OpenCode reads the configuration when the server starts, so restart it after editing the file.
+`model` must match the server's `--alias` (`d3-mini` here; the script prints the exact block at startup). `timeoutMs` is per call and mandatory; `5000` is enough for `d3-mini` on short calls, use `8000` for `d3-flash`. A long call takes much more when part of the model runs on the CPU: with 26 of `d3-mini`'s 32 layers on the GPU, about 1.1 s for a 2,000-character prompt part, but 9 to 14 s for a decision on a 4,000-character input, beyond `5000` (the call then fails and the plugin asks for confirmation); a larger `timeoutMs` has it judged, at the cost of the wait. This `decision` block replaces the Nox-4B one from [Installation](../README.md#installation); thresholds, rules and the other options are independent of the model. For `d3-mini`, add under `options` the recommended set from the table above — `"thresholds": { "denyNoul": 0.96, "askExfiltration": 0.8 }` — rather than the Nox-4B defaults (80.6 % cross-validated instead of 79.4 %). OpenCode reads the configuration when the server starts, so restart it after editing the file.
 
 For manual control, download the GGUF and start the same server yourself:
 
@@ -226,7 +227,7 @@ llama-server -m models/d3-mini/vllm-d3-mini-Q4_K_M.gguf --alias d3-mini --port 8
   -c 8192 -b 4096 -ub 4096 -np 1 -ngl 99 --no-webui
 ```
 
-The bench harness behind the table above lives in `tools/model-bench/` (see its README). `run_local_gpu.sh` starts the same server on port 8099, runs the 34 cases, then stops it:
+The bench harness behind the table above lives in `tools/model-bench/` (see its README). `run_local_gpu.sh` starts the same server on port 8099, runs the cases, then stops it (the first 34 by default; `CASES=tools/model-bench/cases500` with a batch of 8192 for the 500, whose longest requests reach about 6,000 tokens):
 
 ```sh
 bash tools/model-bench/run_local_gpu.sh d3-mini \
@@ -235,7 +236,7 @@ bash tools/model-bench/run_local_gpu.sh d3-mini \
 
 `model` must equal the `--alias`. Each layer moved to the CPU slows every call; keep the batch at 4096 and lower `-ngl` until the server loads (`tools/serve.sh` defaults to 26, which needs 3.7 GiB). A batch of 8192 (for a decision with several long scripts, about 6,600 tokens) fits only with `-ngl 16`, slower on every call. The lighter models fit entirely with `-ngl 99` and a batch of 4096: `d3-nano` Q8_0 (~2.4 GiB), `d3-lite` Q8_0 (~1.2 GiB) and `d3-edge` Q8_0 (~0.9 GiB). `d3-flash` Q4_K_M is 6.6 GB and does not fit entirely on a 4 GB GPU; with a batch of 4096 it runs there with `-ngl 8`.
 
-**Shared blind spots.** Every model in the table allows an in-place file edit (`sed -i`) and misses a secret looked up in the shell history (`history | grep`). Two [custom rules](configuration.md#configuration-reference) settle both for any model, before it is called:
+**Shared blind spots.** The models often allow an in-place file edit (`sed -i`) and a secret looked up in the shell history (`history | grep`). Two [custom rules](configuration.md#configuration-reference) settle both for any model, before it is called:
 
 ```jsonc
 "rules": [

@@ -18,7 +18,7 @@ import time
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_local import QUESTIONS, STATE_NOTE, load_cases  # same cases, same questions
+from run_local import CASE_DIR, QUESTIONS, STATE_NOTE, load_cases  # same cases, same questions
 
 
 def post(url, payload, headers, timeout=30):
@@ -36,6 +36,7 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--key-env", help="environment variable containing the key (optional)")
+    ap.add_argument("--cases", default=CASE_DIR, help="directory of cases*.json files (default: cases/, the 34 cases)")
     args = ap.parse_args()
 
     headers = {}
@@ -45,7 +46,7 @@ def main():
             sys.exit(f"{args.key_env} is not set in the environment.")
         headers["Authorization"] = f"Bearer {key}"
 
-    cases = load_cases()
+    cases = load_cases(args.cases)
     url = f"{args.base.rstrip('/')}/chat/completions"
     print(f"{len(cases)} cases against {url} (model {args.model})", flush=True)
 

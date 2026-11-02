@@ -73,9 +73,10 @@ def main():
     ap.add_argument("--port", type=int, default=8099)
     ap.add_argument("--out", required=True)
     ap.add_argument("--timeout", type=int, default=60, help="max timeout per request in seconds")
+    ap.add_argument("--cases", default=CASE_DIR, help="directory of cases*.json files (default: cases/, the 34 cases)")
     args = ap.parse_args()
 
-    cases = load_cases()
+    cases = load_cases(args.cases)
     url = f"http://127.0.0.1:{args.port}/v1/systemone"
     print(f"{len(cases)} cases against {url}", flush=True)
 

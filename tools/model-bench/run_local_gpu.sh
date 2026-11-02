@@ -24,7 +24,7 @@ if [ -z "$ready" ]; then
 fi
 
 echo "VRAM after loading: $(nvidia-smi --query-gpu=memory.used --format=csv,noheader)"
-"$PY" "$DIR/run_local.py" --alias "$LABEL" --port "$PORT" --out "$OUT"
+"$PY" "$DIR/run_local.py" --alias "$LABEL" --port "$PORT" --out "$OUT" ${CASES:+--cases "$CASES"}
 status=$?
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
