@@ -103,8 +103,9 @@ describe("quality batch, short review of Q25C", () => {
     const differ: string[] = []
     for (const [i, form] of forms.entries()) for (const [j, active] of settings.entries()) if (here(form(PASSWORD), active) !== here(form(CREDENTIALS), active)) differ.push(`form ${i} setting ${j}: ${here(form(PASSWORD), active)} / ${here(form(CREDENTIALS), active)}`)
     console.log(`RV25C-5 differ: ${differ.join(" | ")}`)
-    // Known rest of Q25C (text only printed to an HTTP send, network program off): nothing, the credential file refused.
-    assert.deepEqual(differ.filter((line) => !line.startsWith("form 2 ") || !line.includes("none / deny")), [])
+    // Since Q26 the credential file launched to a remote connection by the code is refused, the printed secret still asks
+    // (model setting); the rest of Q25C (text only printed to an HTTP send, network program off) is closed.
+    assert.deepEqual(differ.filter((line) => line.startsWith("form 2 ") || !line.endsWith("ask:secret-file-network / deny:secret-file-network")), [])
   })
 
   it("RV25C-6: default settings and the ask taken over from the code view: no new deny, no new ask, never weaker than q25-c2", async () => {
@@ -129,7 +130,8 @@ describe("quality batch, short review of Q25C", () => {
         const then = before(command, active)
         if (now !== then) changes.push(`${now} <- ${then}`)
         if (now.startsWith("deny") && !then.startsWith("deny")) assert.fail(`new deny: ${command}`)
-        if (then === "none") assert.equal(now, "none", command)
+        // Since Q26, the text only printed to an HTTP send, network program turned off: the ask of the credential file.
+        if (then === "none") assert.equal(now, active?.dangerousCommands === false && active.sensitiveFiles && command === commands[2] ? "ask:secret-file-network" : "none", command)
         if (command.includes("//") && command.startsWith(`node -e "//`)) continue
         assert.ok(rank(now) >= rank(then), `${command}: ${now} < ${then}`)
       }

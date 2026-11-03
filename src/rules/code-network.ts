@@ -1,5 +1,5 @@
-// Network access from JavaScript code: decoding of Unicode escapes, shared by the CodeMode rule (tools.ts) and by
-// the network check of inline code (shell.ts); network function identifier, used by the latter.
+// Network access from inline code: decoding of Unicode escapes, shared by the CodeMode rule (tools.ts) and by
+// the network check of inline code (shell.ts); network function identifier and Python HTTP calls, used by the latter.
 
 /**
  * Unicode escapes (`\u0065`, `\u{65}`) decoded as the CodeMode parser (acorn) does for identifiers
@@ -19,3 +19,11 @@ export function decodeUnicodeEscapes(code: string): string {
  * kept there for safety (CodeMode does not know it) but common in a real engine, where it signals no network access.
  */
 export const NETWORK_FUNCTION = /\bfetch\b/
+
+/**
+ * Request call of a Python HTTP library (closed list, docs/rules.md): `urllib.request`'s `urlopen` and `urlretrieve`,
+ * `http.client`'s connections, and the module-level calls of `requests`, `httpx`, `urllib3` and `aiohttp`. Tested on the
+ * code with its literals and comments blanked: an import alone, or a name in a string or a comment, does not count.
+ */
+export const PYTHON_HTTP_CALL =
+  /\b(?:(?:urlopen|urlretrieve|HTTPS?Connection)|(?:requests|httpx)\s*\.\s*(?:get|post|put|patch|delete|head|options|request|stream|Session|Client|AsyncClient)|urllib3\s*\.\s*(?:request|PoolManager|ProxyManager)|aiohttp\s*\.\s*(?:request|ClientSession))\s*\(/

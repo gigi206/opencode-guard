@@ -1,6 +1,6 @@
 import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
-import { decodeUnicodeEscapes, NETWORK_FUNCTION } from "./code-network.ts"
+import { decodeUnicodeEscapes, NETWORK_FUNCTION, PYTHON_HTTP_CALL } from "./code-network.ts"
 import { entrusted, hardened, overrideOf, ruleEnabled, waivable, waiverOf, withoutLowered, type ActiveRules } from "./features.ts"
 import {
   credentialFile,
@@ -2519,11 +2519,39 @@ function codeLaunchesPrinted(text: string): boolean {
     const inline = inlineCode(match[2] ?? "")
     const code = inline === undefined ? undefined : withoutComments(inline, interpreter)
     if (code === undefined || !hasExecutionSink(code)) continue
-    const javascript = JAVASCRIPT_ENGINES.test(interpreter)
     for (const group of literalGroups(code)) {
-      if (!NAMES_LAUNCH.test(group.text)) continue
-      const launched = (group.backtick && !javascript) || LAUNCH_BEFORE.test(code.slice(Math.max(0, group.start - 80), group.start))
-      if (launched && opencodeKinds(group.text).has("printed")) return true
+      if (NAMES_LAUNCH.test(group.text) && launchedLiteral(code, group, interpreter) && opencodeKinds(group.text).has("printed")) return true
+    }
+  }
+  return false
+}
+
+/** A literal group of comment-free code given directly to a call that launches a process, or a backtick literal outside a JavaScript engine. */
+const launchedLiteral = (code: string, group: { start: number; backtick: boolean }, interpreter: string) =>
+  (group.backtick && !JAVASCRIPT_ENGINES.test(interpreter)) || LAUNCH_BEFORE.test(code.slice(Math.max(0, group.start - 80), group.start))
+
+/** Python literals, triple-quoted ones first (over several lines; an unclosed one runs to the end), then `#` comments. */
+const PYTHON_LITERALS_AND_COMMENTS = new RegExp(String.raw`'''(?:[^\\]|\\[\s\S])*?(?:'''|$)|"""(?:[^\\]|\\[\s\S])*?(?:"""|$)|${CODE_LITERAL.source}|#[^\n]*`, "g")
+
+/**
+ * Inline code delimited in `text` that sends a credential file without reaching the network as `codeReachesNetwork`
+ * sees it: a literal (or list) launched as in `codeLaunchesPrinted` that runs a network tool with the file (the deny
+ * table's test, on that literal: an ssh key given to `-i` does not count), or, in Python, a request call of an HTTP
+ * library (`PYTHON_HTTP_CALL`, literals, triple-quoted ones included, and comments blanked) with the file anywhere in `text`, as for `fetch`.
+ */
+function codeSendsCredentialFile(text: string, ctx: CredentialContext): boolean {
+  // Files of the whole text, computed at most once (linear cost with many code blocks).
+  let inText: boolean | undefined
+  for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
+    const interpreter = /^\S+/.exec(match[1] ?? "")?.[0] ?? ""
+    const inline = inlineCode(match[2] ?? "")
+    if (inline === undefined) continue
+    const python = /^python/.test(interpreter)
+    if (python && PYTHON_HTTP_CALL.test(inline.replace(PYTHON_LITERALS_AND_COMMENTS, (found) => found.replace(/[^\n]/g, " "))) && (inText ??= sentSecretFiles(text, ctx).length > 0)) return true
+    const code = withoutComments(inline, interpreter)
+    if (!hasExecutionSink(code)) continue
+    for (const group of literalGroups(code)) {
+      if (launchedLiteral(code, group, interpreter) && runsNetwork(group.text) && sentSecretFiles(group.text, ctx).length > 0) return true
     }
   }
   return false
@@ -4010,7 +4038,12 @@ const LONG_NETWORK_CODE: Finding = {
 
 function networkCodeFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const seen = { view: command, long: false }
-  if (!inlineCodeNetwork(command, seen)) return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? hardened(LONG_NETWORK_CODE, ctx.active) : undefined
+  if (!inlineCodeNetwork(command, seen)) {
+    // Sent by the code without other network access recognized: only the deny of the credential file, never an ask.
+    const sent = NETWORK_CODE_RULES[0]!
+    if (ruleEnabled(sent.id, ctx.active) && codeSendsCredentialFile(seen.view, ctx)) return { verdict: "deny", rule: sent.id, reason: sent.reason }
+    return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? hardened(LONG_NETWORK_CODE, ctx.active) : undefined
+  }
   const rule = NETWORK_CODE_RULES.find((candidate) => ruleEnabled(candidate.id, ctx.active) && candidate.test(seen.view, ctx))
   return rule && entrusted(hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason }, ctx.active), ctx.active)
 }
@@ -4048,11 +4081,12 @@ function addedShellFinding(command: string, ctx: ShellRuleContext): Finding | un
  * A deny pattern present only in code passed to an interpreter or in a heredoc (e.g. test strings
  * `node -e "…'shred /dev/sda'…"`) becomes an ask: never less. Excluded: the placeholder, user
  * rules and any shell re-entry outside that data. An ask becomes that of a printed OpenCode secret cited in the code
- * (`printedInCodeFinding`).
+ * (`printedInCodeFinding`), and so does nothing found only because the settings turn rules off (`silencedPrintedFinding`).
  */
 function existingShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const finding = evaluate(command, ctx)
   if (finding?.verdict === "ask") return printedInCodeFinding(command, ctx) ?? (onlyInHeredocData(command, ctx) ? inHeredocData(command, finding, ctx) : finding)
+  if (finding === undefined) return silencedPrintedFinding(command, ctx)
   // Rule set to `deny` (`ruleOverrides`): final, never reduced to an ask.
   if (finding?.verdict !== "deny" || finding.rule === "placeholder" || ctx.custom?.some((rule) => rule.id === finding.rule) || overrideOf(finding.rule, ctx.active) === "deny")
     return finding
@@ -4081,6 +4115,20 @@ function printedInCodeFinding(command: string, ctx: ShellRuleContext): Finding |
   if (ctx.custom?.some((rule) => rule.id === PRINTED_NETWORK.id) || overrideOf(PRINTED_NETWORK.id, ctx.active) === "deny")
     return { verdict: "deny", rule: PRINTED_NETWORK.id, reason: PRINTED_NETWORK.reason }
   return { verdict: "ask", rule: PRINTED_NETWORK.id, reason: `${PRINTED_NETWORK.reason}, only inside code passed to an interpreter or a heredoc: confirmation required` }
+}
+
+/**
+ * Nothing found under settings that turn rules off (`dangerousCommands`, a rule set to `off`), where the same command with
+ * those rules on gets a finding: the finding of a printed OpenCode secret cited in the code (`printedInCodeFinding`), as a
+ * credential path at the same place gets. With the default settings nothing changes (the evaluation is the same).
+ */
+function silencedPrintedFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+  const active = ctx.active
+  if (!active || (active.dangerousCommands && ![...(active.overrides?.values() ?? [])].includes("off"))) return undefined
+  const printed = printedInCodeFinding(command, ctx)
+  if (!printed) return undefined
+  const overrides = active.overrides && new Map([...active.overrides].filter(([, override]) => override !== "off"))
+  return evaluate(command, { ...ctx, active: { ...active, dangerousCommands: true, overrides } }) ? printed : undefined
 }
 
 /**
