@@ -2445,18 +2445,11 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
   const text = reentersShell(withoutData(command)) ? command : withoutHeredocBodies(command)
   const lines: string[] = []
   for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
-    const quoted = match[2] ?? ""
-    let code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
-    if (code.length === 0 || code.length > INLINE_CODE_LIMIT) continue
-    if (quoted.startsWith('"')) code = code.replace(/\\([\\"$`])/g, "$1")
-    const sink = hasExecutionSink(code)
-    const groups: string[] = []
-    let end = -1
+    const code = inlineCode(match[2] ?? "")
+    if (code === undefined) continue
     for (const literal of code.matchAll(CODE_LITERAL)) {
       const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
-      if (end >= 0 && /^\s*,\s*$/.test(code.slice(end, literal.index))) groups[groups.length - 1] += ` ${value}`
-      else groups.push(value)
-      end = literal.index + literal[0].length
+      const end = literal.index + literal[0].length
       const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
       const path = perl ? value.slice(perl.length) : value
       if (!SETTINGS_CANDIDATE.test(path)) continue
@@ -2470,9 +2463,85 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
         (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
       if (written && protectedWriteClass(path, ctx.home, ctx) === "settings") lines.push(`: >${path}`)
     }
-    if (sink) lines.push(...groups.filter((group) => NAMES_LAUNCH.test(group)))
+    if (hasExecutionSink(code)) lines.push(...literalGroups(code).map((group) => group.text).filter((group) => NAMES_LAUNCH.test(group)))
   }
   return lines.length ? lines.join("\n") : undefined
+}
+
+/** Code of a quoted block of `INTERPRETER_DANGEROUS_CODE`, double-quote escapes removed; `undefined` if empty or too long. */
+function inlineCode(quoted: string): string | undefined {
+  const code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
+  if (code.length === 0 || code.length > INLINE_CODE_LIMIT) return undefined
+  return quoted.startsWith('"') ? code.replace(/\\([\\"$`])/g, "$1") : code
+}
+
+/** Literals of inline code, a list of literals separated by commas as one command: text, start, backtick literal. */
+function literalGroups(code: string): Array<{ text: string; start: number; backtick: boolean }> {
+  const groups: Array<{ text: string; start: number; backtick: boolean }> = []
+  let end = -1
+  for (const literal of code.matchAll(CODE_LITERAL)) {
+    const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
+    if (end >= 0 && /^\s*,\s*$/.test(code.slice(end, literal.index))) groups[groups.length - 1]!.text += ` ${value}`
+    else groups.push({ text: value, start: literal.index, backtick: literal[3] !== undefined })
+    end = literal.index + literal[0].length
+  }
+  return groups
+}
+
+/** Just before a literal: the opening of a call that launches a process (`subprocess.run(`, `os.system(`, `execSync(`, `system `…), a list included. */
+const LAUNCH_BEFORE =
+  /\b(?:system|popen\w*|run|call|check_call|check_output|Popen|getoutput|getstatusoutput|exec\w*|spawn\w*|shell_exec|passthru|proc_open|capture\w*)(?:\s*\(\s*\[?|\s+)\s*$/
+
+/** Literals of inline code, then its comments by language (a comment marker inside a literal stays in the literal). */
+const commentsOf = (comment: string) => new RegExp(`${CODE_LITERAL.source}|(${comment})`, "g")
+const JAVASCRIPT_COMMENTS = commentsOf(String.raw`\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)`)
+const PHP_COMMENTS = commentsOf(String.raw`#[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)`)
+const HASH_COMMENTS = commentsOf(String.raw`#[^\n]*`)
+
+/**
+ * Inline code with its comments outside literals blanked (line breaks and positions kept): `//` and `/* *\/` in a
+ * JavaScript engine, `#` in Python, Ruby and Perl, all three in PHP. Other comment forms (Ruby's `=begin`, Perl's POD) stay.
+ */
+function withoutComments(code: string, interpreter: string): string {
+  const comments = JAVASCRIPT_ENGINES.test(interpreter) ? JAVASCRIPT_COMMENTS : /^php/.test(interpreter) ? PHP_COMMENTS : HASH_COMMENTS
+  return code.replace(comments, (found, ...groups) => (groups[3] === undefined ? found : found.replace(/[^\n]/g, " ")))
+}
+
+/**
+ * Inline code delimited in `text` that launches an OpenCode subcommand that prints a secret (`opencodeKinds`): a literal
+ * (or list) that names `opencode`, given directly to a call that launches a process, or a backtick literal outside a
+ * JavaScript engine, comments of the code left out (`withoutComments`). A literal only printed or kept in a variable
+ * does not count (the ask of the code stays).
+ */
+function codeLaunchesPrinted(text: string): boolean {
+  for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
+    const interpreter = /^\S+/.exec(match[1] ?? "")?.[0] ?? ""
+    const inline = inlineCode(match[2] ?? "")
+    const code = inline === undefined ? undefined : withoutComments(inline, interpreter)
+    if (code === undefined || !hasExecutionSink(code)) continue
+    const javascript = JAVASCRIPT_ENGINES.test(interpreter)
+    for (const group of literalGroups(code)) {
+      if (!NAMES_LAUNCH.test(group.text)) continue
+      const launched = (group.backtick && !javascript) || LAUNCH_BEFORE.test(code.slice(Math.max(0, group.start - 80), group.start))
+      if (launched && opencodeKinds(group.text).has("printed")) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Inline code outside heredoc bodies that names a network tool and holds a literal (or list) naming an OpenCode
+ * subcommand that prints a secret (`opencodeKinds`), launched or not: the place where a credential path gives the
+ * deny of the table reduced to an ask (`existingShellFinding`).
+ */
+function codeCitesPrinted(command: string): boolean {
+  if (!command.includes("opencode")) return false
+  for (const match of withoutHeredocBodies(command).matchAll(INTERPRETER_DANGEROUS_CODE)) {
+    const code = inlineCode(match[2] ?? "")
+    if (code === undefined || !runsNetwork(code)) continue
+    for (const group of literalGroups(code)) if (NAMES_LAUNCH.test(group.text) && opencodeKinds(group.text).has("printed")) return true
+  }
+  return false
 }
 
 /** Code passed to an interpreter too long for `interpreterDangerousCode` (not examined); no cost on a shorter command. */
@@ -3921,12 +3990,13 @@ const NETWORK_CODE_RULES: readonly RegexRule[] = [
     reason: "secret found in a command whose inline interpreter code makes network requests (exfiltration)",
     test: (view, ctx) => ctx.redactor.containsSecret(view),
   },
-  // Output of an OpenCode subcommand that prints a secret: same place as in the deny table.
+  // Output of an OpenCode subcommand that prints a secret, run by the shell or by the inline code: same place as in the
+  // deny table.
   {
     id: "secret-file-network",
     verdict: "deny",
     reason: "OpenCode credentials or service secrets printed in a command whose inline interpreter code makes network requests (exfiltration)",
-    test: (view) => opencodeKinds(view).has("printed"),
+    test: (view) => opencodeKinds(view).has("printed") || codeLaunchesPrinted(view),
   },
   { id: "interpreter-network", verdict: "ask", reason: "inline interpreter code making network requests", test: () => true },
 ]
@@ -3977,11 +4047,12 @@ function addedShellFinding(command: string, ctx: ShellRuleContext): Finding | un
 /**
  * A deny pattern present only in code passed to an interpreter or in a heredoc (e.g. test strings
  * `node -e "…'shred /dev/sda'…"`) becomes an ask: never less. Excluded: the placeholder, user
- * rules and any shell re-entry outside that data.
+ * rules and any shell re-entry outside that data. An ask becomes that of a printed OpenCode secret cited in the code
+ * (`printedInCodeFinding`).
  */
 function existingShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const finding = evaluate(command, ctx)
-  if (finding?.verdict === "ask") return onlyInHeredocData(command, ctx) ? inHeredocData(command, finding, ctx) : finding
+  if (finding?.verdict === "ask") return printedInCodeFinding(command, ctx) ?? (onlyInHeredocData(command, ctx) ? inHeredocData(command, finding, ctx) : finding)
   // Rule set to `deny` (`ruleOverrides`): final, never reduced to an ask.
   if (finding?.verdict !== "deny" || finding.rule === "placeholder" || ctx.custom?.some((rule) => rule.id === finding.rule) || overrideOf(finding.rule, ctx.active) === "deny")
     return finding
@@ -3994,6 +4065,22 @@ function existingShellFinding(command: string, ctx: ShellRuleContext): Finding |
     rule: finding.rule,
     reason: `${finding.reason}, only inside code passed to an interpreter or a heredoc: confirmation required`,
   }
+}
+
+/** Last entry of the deny table: the output of an OpenCode subcommand that prints a secret. */
+const PRINTED_NETWORK = DENY_RULES.findLast((rule) => rule.id === "secret-file-network")!
+
+/**
+ * Ask of a command that already asks, when its inline code cites a printed OpenCode secret with a network tool
+ * (`codeCitesPrinted`): what a credential path at the same place gets, by the settings only: a deny if the rule is set
+ * to `deny` or a user rule has its identifier (as in `existingShellFinding`), otherwise an ask without a mark (never
+ * `entrusted`), even where that path's deny is not reduced.
+ */
+function printedInCodeFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+  if (!ruleEnabled(PRINTED_NETWORK.id, ctx.active) || !codeCitesPrinted(command)) return undefined
+  if (ctx.custom?.some((rule) => rule.id === PRINTED_NETWORK.id) || overrideOf(PRINTED_NETWORK.id, ctx.active) === "deny")
+    return { verdict: "deny", rule: PRINTED_NETWORK.id, reason: PRINTED_NETWORK.reason }
+  return { verdict: "ask", rule: PRINTED_NETWORK.id, reason: `${PRINTED_NETWORK.reason}, only inside code passed to an interpreter or a heredoc: confirmation required` }
 }
 
 /**
@@ -4473,6 +4560,8 @@ function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | u
       const only = codeViewContext(ctx)
       const found = assignedFinding(code, only, layeredShellFinding(code, only).finding)
       coded = found && CODE_VIEW_RULES.has(found.rule) ? found : undefined
+      // The only ask, from this view: that of a printed OpenCode secret cited in the code, as for an ask of the command.
+      if (coded?.verdict === "ask" && base === undefined) coded = printedInCodeFinding(command, ctx) ?? coded
     }
   } catch {
     coded = hardened(ANALYSIS_FAILED, ctx.active)
