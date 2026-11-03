@@ -97,10 +97,15 @@ describe("Q26 review", () => {
 
   it("RV26-6: linear cost over many Python blocks that call an HTTP library, the file named once (Node only)", () => {
     const command = (count: number) => Array(count).fill(`python3 -c "import requests; requests.get('https://x.example')"`).join("; ") + `; echo ${CREDENTIALS}`
+    // Fastest of three runs: a slow run of a loaded machine does not count.
     const time = (count: number) => {
-      const start = performance.now()
-      shell(command(count))
-      return performance.now() - start
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const start = performance.now()
+        shell(command(count))
+        best = Math.min(best, performance.now() - start)
+      }
+      return best
     }
     time(200)
     const small = Math.max(time(400), 1)

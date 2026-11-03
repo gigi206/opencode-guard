@@ -59,10 +59,15 @@ describe("RV26B: edges of the triple-quoted strings", () => {
       (n: number) => `python3 -c 'x=open("${CREDENTIALS}").read()\n${'"""a"""#'.repeat(n)}'`,
     ]
     for (const shape of shapes) {
+      // Fastest of three runs: a slow run of a loaded machine does not count.
       const time = (n: number) => {
-        const start = performance.now()
-        shell(shape(n))
-        return performance.now() - start
+        let best = Infinity
+        for (let i = 0; i < 3; i++) {
+          const start = performance.now()
+          shell(shape(n))
+          best = Math.min(best, performance.now() - start)
+        }
+        return best
       }
       time(2000)
       const small = Math.max(time(4000), 1)

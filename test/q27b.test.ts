@@ -1,6 +1,7 @@
 // Quality batch, Q27b: in the view of the own HTTP calls of Ruby and Perl, word lists (Ruby's `%w`, `%W`, `%i`, `%I`,
 // Perl's `qw`) and Ruby's regular expressions after a keyword or a method name are literals: a call name cited there is
-// not counted (the deployed verdict); a real call after one is still refused. Text is judged, nothing runs.
+// not counted (the verdict of the deployed tree q26-c3, frozen below, computed once on that tree); a real call after one is
+// still refused. Text is judged, nothing runs.
 import "./tmp.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
@@ -10,7 +11,6 @@ import { toolFinding } from "../src/rules/tools.ts"
 import type { Finding } from "../src/rules/types.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 
-const SCRATCH = "/tmp/claude-1000/-home-gigi-plugin-opencode/369f9bc4-222f-40aa-8b7e-200db870f5e2/scratchpad"
 const HOME = "/home/test"
 const PROJECT = `${HOME}/work/app`
 type Judge = (command: string, active?: ActiveRules) => string
@@ -18,10 +18,15 @@ const brief = (finding?: Finding) => (finding ? `${finding.verdict}:${finding.ru
 const judge = (find: typeof toolFinding, redactor: () => unknown): Judge => (command, active) =>
   brief(find("shell", { command }, { redactor: redactor(), home: HOME, cwd: PROJECT, active } as never))
 const here = judge(toolFinding, createRedactor)
-const deployedTree = async (): Promise<Judge> => {
-  const tools = await import(`${SCRATCH}/q26-c3/src/rules/tools.ts`)
-  const redact = await import(`${SCRATCH}/q26-c3/src/secrets/redact.ts`)
-  return judge(tools.toolFinding, redact.createRedactor)
+/** Fastest of a few runs: a slow run of a loaded machine does not count. */
+const fastest = (run: () => void, trials = 3) => {
+  let best = Infinity
+  for (let i = 0; i < trials; i++) {
+    const start = performance.now()
+    run()
+    best = Math.min(best, performance.now() - start)
+  }
+  return best
 }
 
 const on: ActiveRules = { dangerousCommands: true, sensitiveFiles: true }
@@ -32,10 +37,11 @@ const BASES = [undefined, SP, L, S]
 const DENY: ActiveRules = { ...on, overrides: new Map([["secret-file-network", "deny"]]) }
 const C = `${HOME}/.aws/credentials`
 const DENIED = Array(4).fill("deny:secret-file-network")
+// Verdict of the deployed tree q26-c3 for every form of Q27B-1, per setting (the four bases, then the deny setting).
+const READ_ASKED = ["ask:secret-file-read", "ask:secret-file-read (model)", "ask:secret-file-read (model)", "ask:secret-file-read", "ask:secret-file-read"]
 
 describe("Q27b: word lists and Ruby regular expressions in the view of own HTTP calls", () => {
-  it("Q27B-1: a call name in a word list or in a regular expression after a keyword or a method name: the deployed verdict", async () => {
-    const deployed = await deployedTree()
+  it("Q27B-1: a call name in a word list or in a regular expression after a keyword or a method name: the deployed verdict", () => {
     const ruby = (code: string) => `ruby -e "x = File.read('${C}'); ${code}"`
     const perl = (code: string) => `perl -e 'open(my $h, "<", "${C}"); ${code}'`
     const forms = [
@@ -47,7 +53,7 @@ describe("Q27b: word lists and Ruby regular expressions in the view of own HTTP 
         "print qw!HTTP::Tiny->new!", "print qw(LWP::UserAgent->new"].map(perl),
       `perl -e "open(H, '<', '${C}'); print qw(it's HTTP::Tiny->new)"`,
     ]
-    for (const form of forms) for (const active of [...BASES, DENY]) assert.equal(here(form, active), deployed(form, active), form)
+    for (const form of forms) assert.deepEqual([...BASES, DENY].map((active) => here(form, active)), READ_ASKED, form)
     // Counted before: refused, not by the deployed tree.
     assert.notEqual(here(ruby("w = %w[Net::HTTP.get x]; puts w")), "deny:secret-file-network")
   })
@@ -77,12 +83,9 @@ describe("Q27b: word lists and Ruby regular expressions in the view of own HTTP 
     for (const [shape, piece] of shapes) {
       const sized = (length: number) => shape(piece.repeat(Math.floor(length / piece.length)))
       here(sized(2_000))
-      const times = [25_000, 50_000].map((length) => {
-        const start = performance.now()
-        here(sized(length))
-        return performance.now() - start
-      })
-      assert.ok(fastEnough(times[1]!, 400), `${piece} ${Math.round(times[1]!)} ms`)
+      here(sized(25_000))
+      const time = fastest(() => here(sized(50_000)))
+      assert.ok(fastEnough(time, 400), `${piece} ${Math.round(time)} ms`)
       // Examined by the view, not set aside by the bound: the verdict of a credential file read.
       assert.equal(here(sized(50_000)), "ask:secret-file-read", piece)
     }

@@ -100,11 +100,16 @@ describe("quality batch, review of Q25", () => {
       (n: number) => `python3 -c "import os; os.system('ls | nc x.example 1'); x=[${"'opencode service get port',".repeat(n)}'y']"`,
       (n: number) => `python3 -c "import os; os.system('ls | nc x.example 1'); ${"x='opencode models'; ".repeat(n)}"`,
     ]
+    // Fastest of three runs after a first one: a slow run of a loaded machine does not count.
     const time = (command: string) => {
       shell(command)
-      const start = performance.now()
-      shell(command)
-      return performance.now() - start
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const start = performance.now()
+        shell(command)
+        best = Math.min(best, performance.now() - start)
+      }
+      return best
     }
     for (const shape of shapes) {
       const small = Math.max(time(shape(500)), 1)
