@@ -281,7 +281,7 @@ describe("output check v2 (fake model)", () => {
       assert.equal(event.result.output, `page with ${MARK} inside`)
     }
     assert.equal(fake.asserts.length, 2)
-    assert.equal(fake.asserts[0]!.action, "guard · approve to pass on, reject to withhold: webfetch output not fully checked (model timeout)")
+    assert.equal(fake.asserts[0]!.action, "guard · MODEL TIMEOUT: approve to pass on, reject to withhold: webfetch output not fully checked")
     assert.match(String(fake.asserts[0]!.metadata?.reason), /the output check could not finish \(model timeout\)/)
     assert.deepEqual(fake.asserts[0]!.source, { type: "tool", messageID: "msg_1", id: "a" })
     assert.equal(lines.filter((line) => line.startsWith("WARN")).length, 1)

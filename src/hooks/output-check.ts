@@ -13,7 +13,7 @@ import { CODEMODE_TOOL } from "../rules/tools.ts"
 import type { GuardContext, Logger, ToolAfterEvent, ToolResult } from "../types.ts"
 import { guardAction, summarize, timedMap } from "./gate.ts"
 import { REDACTION_NOTE, withRedactionNote } from "./redaction.ts"
-import { createSecretChecker, maskWords, type TextOutcome } from "./secret-check.ts"
+import { createSecretChecker, maskWords, shownCause, type TextOutcome } from "./secret-check.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 
 export interface OutputCheckDeps {
@@ -262,8 +262,9 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
       resource = `${summarize(event.tool, deps.redactor.redactDeep(event.input).value)} (output check)`
     } catch {}
     const reason = `${what}: approve to pass the output of ${event.tool} to the agent with what was masked (a secret may remain), reject to withhold it`
-    // The prompt's action, at most 120 characters: the choice first, so that a long tool name never hides it.
-    const prompt = `approve to pass on, reject to withhold: ${event.tool} output not fully checked (${cause})`
+    // The prompt's action, at most 120 characters: the cause first (a failure of the check in capitals; short), then the
+    // choice, so that a long tool name never hides either.
+    const prompt = `${shownCause(cause)}: approve to pass on, reject to withhold: ${event.tool} output not fully checked`
     try {
       await ctx.permission.assert({
         sessionID: event.sessionID,

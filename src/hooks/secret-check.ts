@@ -147,6 +147,12 @@ export interface TextOutcome {
 
 const isNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value)
 
+/** Causes where the check did not run to its end (model failure, limits): shown in capitals at the head of a confirmation. */
+const CHECK_FAILURES = new Set(["model timeout", "model unavailable", "internal error", "check too slow", "too long to check"])
+
+/** A cause as the head of a confirmation's action: a failure of the check in capitals, any other as is. */
+export const shownCause = (cause: string) => (CHECK_FAILURES.has(cause) ? cause.toUpperCase() : cause)
+
 /** Failure cause, class only: a gateway may copy the request, so the text, into its error message. */
 export const failureCause = (error: unknown) => (error instanceof ModelError ? (error.timeout ? "model timeout" : "model unavailable") : "internal error")
 

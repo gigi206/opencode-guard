@@ -244,7 +244,7 @@ describe("prompt check: hook (fake model)", () => {
     const event = await send("the passphrase is correct horse battery staple")
     assert.equal(fake.asserts.length, 1)
     const asked = fake.asserts[0]!
-    assert.match(asked.action, /^guard · prompt: approve to send as is \(a secret may remain\), reject to retype/)
+    assert.match(asked.action, /^guard · prompt: [^:]*, not (all )?located: may hold a secret; approve to send as is, reject to retype$/)
     assert.ok(!JSON.stringify(asked).includes("horse"), JSON.stringify(asked))
     assert.equal(event.prompt.text, "the passphrase is correct horse battery staple")
   })
@@ -269,7 +269,7 @@ describe("prompt check: hook (fake model)", () => {
       await send("mon mdp est soleil42")
       assert.equal(fake.asserts.length, 1)
       assert.ok(!lines.join("\n").includes("soleil42"), lines.join("\n"))
-      assert.match(fake.asserts[0]!.action, /model (timeout|unavailable)/)
+      assert.match(fake.asserts[0]!.action, /^guard · prompt: MODEL (TIMEOUT|UNAVAILABLE): may hold a secret; approve to send as is, reject to retype$/)
     }
   })
   it("fails closed: an error that is not a ModelError (bug) → confirmation, never the text sent silently", async () => {
@@ -308,7 +308,7 @@ describe("prompt check: hook (fake model)", () => {
     assert.ok(withinBudget(start, 1000, Date.now))
     assert.equal(out.block, undefined)
     assert.equal(fake.asserts.length, 1)
-    assert.match(fake.asserts[0]!.action, /check too slow/)
+    assert.match(fake.asserts[0]!.action, /^guard · prompt: CHECK TOO SLOW: may hold a secret; approve to send as is, reject to retype$/)
     assert.equal(calls, 1)
   })
   it("long prompt: parts of 1,000 characters, stage 2 only for the part that holds the secret; too long → confirmation without a call", async () => {

@@ -11,7 +11,7 @@ import { DEFAULT_PROMPT_QUESTIONS, promptQuestions, type PromptQuestionTexts } f
 import { placeholder, type Redactor } from "../secrets/redact.ts"
 import type { GuardContext, Logger, PromptEvent } from "../types.ts"
 import { guardAction } from "./gate.ts"
-import { createSecretChecker, maskWords } from "./secret-check.ts"
+import { createSecretChecker, maskWords, shownCause } from "./secret-check.ts"
 
 export { promptWords } from "./secret-check.ts"
 
@@ -103,8 +103,8 @@ export function createPromptGate(ctx: GuardContext, deps: PromptCheckDeps): Prom
 
   async function confirm(event: PromptEvent, cause: string): Promise<PromptBlockedError | undefined> {
     if (deps.askAs === "deny") return new PromptBlockedError(blockedMessage("unattended mode (askAs: deny) blocks it"))
-    // The choice first: approving sends what could not be masked.
-    const prompt = `approve to send as is (a secret may remain), reject to retype: the prompt may hold a secret (${cause})`
+    // The cause first (a failure of the check in capitals), then the choice: approving sends what could not be masked.
+    const prompt = `${shownCause(cause)}: may hold a secret; approve to send as is, reject to retype`
     try {
       await ctx.permission.assert({
         sessionID: event.sessionID,
