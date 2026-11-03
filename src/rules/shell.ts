@@ -1,6 +1,6 @@
 import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
-import { decodeUnicodeEscapes, NETWORK_FUNCTION, PYTHON_HTTP_CALL } from "./code-network.ts"
+import { decodeUnicodeEscapes, NETWORK_FUNCTION, OWN_HTTP_CALLS, PYTHON_HTTP_CALL, UNPARSED_QUOTING } from "./code-network.ts"
 import { entrusted, hardened, overrideOf, ruleEnabled, waivable, waiverOf, withoutLowered, type ActiveRules } from "./features.ts"
 import {
   credentialFile,
@@ -2415,6 +2415,64 @@ function interpreterDangerousCode(command: string): boolean {
 
 /** String literal of inline code: single, double or backtick quotes, with escapes. */
 const CODE_LITERAL = /'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)"|`((?:[^`\\]|\\.)*)`/g
+
+/**
+ * Quotes of `code` that open a `CODE_LITERAL` literal (it is closed), in one pass from the end per quote: the body of a
+ * literal, from a position, reaches its closing quote or not whatever comes before (an escape takes any character but a
+ * line terminator, as `.`; a line break ends a single or double quoted literal).
+ */
+function closingQuotes(code: string): Uint8Array {
+  const closes = new Uint8Array(code.length)
+  for (const quote of ["'", '"', "`"]) {
+    const reaches = new Uint8Array(code.length + 2)
+    for (let i = code.length - 1; i >= 0; i--) {
+      const char = code[i]!
+      if (char === quote) closes[i] = reaches[i + 1]!
+      reaches[i] =
+        char === quote ? 1
+        : char === "\\" ? (i + 1 < code.length && !"\n\r  ".includes(code[i + 1]!) ? reaches[i + 2]! : 0)
+        : char === "\n" && quote !== "`" ? 0
+        : reaches[i + 1]!
+    }
+  }
+  return closes
+}
+
+const STICKY = new Map<RegExp, RegExp>()
+
+/**
+ * Matches of a global `pattern` of inline code whose alternatives start with a quote, `#` or `/` (`CODE_LITERAL`, alone or
+ * with comments and triple quotes), the same as `matchAll` gives, in linear time: a quote that opens no literal is passed
+ * without an attempt (nothing matches there: no closed literal, and no triple quote, whose first two quotes would close
+ * one), where each attempt would scan up to the end of the literal (quadratic cost with many unclosed quotes).
+ */
+function codeMatches(code: string, pattern: RegExp): RegExpExecArray[] {
+  const closes = closingQuotes(code)
+  let sticky = STICKY.get(pattern)
+  if (!sticky) STICKY.set(pattern, (sticky = new RegExp(pattern.source, "y")))
+  const found: RegExpExecArray[] = []
+  for (let i = 0; i < code.length; ) {
+    const char = code[i]!
+    sticky.lastIndex = i
+    const match = "#/".includes(char) || ("'\"`".includes(char) && closes[i]) ? sticky.exec(code) : null
+    if (match) found.push(match)
+    // Every alternative matches at least one character.
+    i += match ? match[0].length : 1
+  }
+  return found
+}
+
+/** `code` with the matches of `codeMatches` that `blank` selects blanked, line breaks and positions kept. */
+function blankedCode(code: string, pattern: RegExp, blank: (match: RegExpExecArray) => boolean = () => true): string {
+  let blanked = ""
+  let end = 0
+  for (const match of codeMatches(code, pattern)) {
+    if (!blank(match)) continue
+    blanked += code.slice(end, match.index) + match[0].replace(/[^\n]/g, " ")
+    end = match.index + match[0].length
+  }
+  return blanked + code.slice(end)
+}
 /** A literal that may launch the plugin's command line or another OpenCode. */
 const NAMES_LAUNCH = /\b(?:guard|opencode)\b/
 /** A call that writes the path it is given (Python, Node, Bun, Ruby, Perl, PHP), just before its opening parenthesis. */
@@ -2447,7 +2505,7 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
   for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
     const code = inlineCode(match[2] ?? "")
     if (code === undefined) continue
-    for (const literal of code.matchAll(CODE_LITERAL)) {
+    for (const literal of codeMatches(code, CODE_LITERAL)) {
       const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
       const end = literal.index + literal[0].length
       const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
@@ -2479,7 +2537,7 @@ function inlineCode(quoted: string): string | undefined {
 function literalGroups(code: string): Array<{ text: string; start: number; backtick: boolean }> {
   const groups: Array<{ text: string; start: number; backtick: boolean }> = []
   let end = -1
-  for (const literal of code.matchAll(CODE_LITERAL)) {
+  for (const literal of codeMatches(code, CODE_LITERAL)) {
     const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
     if (end >= 0 && /^\s*,\s*$/.test(code.slice(end, literal.index))) groups[groups.length - 1]!.text += ` ${value}`
     else groups.push({ text: value, start: literal.index, backtick: literal[3] !== undefined })
@@ -2504,7 +2562,7 @@ const HASH_COMMENTS = commentsOf(String.raw`#[^\n]*`)
  */
 function withoutComments(code: string, interpreter: string): string {
   const comments = JAVASCRIPT_ENGINES.test(interpreter) ? JAVASCRIPT_COMMENTS : /^php/.test(interpreter) ? PHP_COMMENTS : HASH_COMMENTS
-  return code.replace(comments, (found, ...groups) => (groups[3] === undefined ? found : found.replace(/[^\n]/g, " ")))
+  return blankedCode(code, comments, (match) => match[4] !== undefined)
 }
 
 /**
@@ -2534,27 +2592,83 @@ const launchedLiteral = (code: string, group: { start: number; backtick: boolean
 const PYTHON_LITERALS_AND_COMMENTS = new RegExp(String.raw`'''(?:[^\\]|\\[\s\S])*?(?:'''|$)|"""(?:[^\\]|\\[\s\S])*?(?:"""|$)|${CODE_LITERAL.source}|#[^\n]*`, "g")
 
 /**
- * Inline code delimited in `text` that sends a credential file without reaching the network as `codeReachesNetwork`
- * sees it: a literal (or list) launched as in `codeLaunchesPrinted` that runs a network tool with the file (the deny
- * table's test, on that literal: an ssh key given to `-i` does not count), or, in Python, a request call of an HTTP
- * library (`PYTHON_HTTP_CALL`, literals, triple-quoted ones included, and comments blanked) with the file anywhere in `text`, as for `fetch`.
+ * Literals of Ruby and Perl (single, double and backtick quotes, over several lines; an unclosed one runs to the end), then
+ * `#` comments; for PHP, its `//` and `/* *\/` comments too; then the other literals of `quoted` (`RUBY_LITERALS`,
+ * `PERL_LITERALS`). Each attempt matches up to where it stops: linear cost.
  */
-function codeSendsCredentialFile(text: string, ctx: CredentialContext): boolean {
+const scriptLiterals = (comment: string, quoted?: string) =>
+  new RegExp(String.raw`'((?:[^'\\]|\\[\s\S]?)*)(?:'|$)|"((?:[^"\\]|\\[\s\S]?)*)(?:"|$)|\x60((?:[^\x60\\]|\\[\s\S]?)*)(?:\x60|$)|(${comment})${quoted === undefined ? "" : `|(${quoted})`}`, "g")
+/**
+ * A word list after `lead`: between paired brackets (nesting not followed: the list ends at the first closing one) or
+ * between two `other` characters; an unclosed one runs to the end. Its delimiter is group 6 of `scriptLiterals`.
+ */
+const wordList = (lead: string, other: string) =>
+  String.raw`${lead}(?:\((?:[^)\\]|\\[\s\S]?)*(?:\)|$)|\[(?:[^\]\\]|\\[\s\S]?)*(?:\]|$)|\{(?:[^}\\]|\\[\s\S]?)*(?:\}|$)|<(?:[^>\\]|\\[\s\S]?)*(?:>|$)|(${other})(?:(?!\6)[^\\]|\\[\s\S]?)*(?:\6|$))`
+/** Keywords after which a slash opens a Ruby regular expression. */
+const RUBY_REGEXP_KEYWORDS = "when|if|elsif|unless|while|until|and|or|not|return|then"
+/**
+ * Ruby literals of the view of `OWN_HTTP_CALLS` beyond quotes: word lists (`%w`, `%W`, `%i`, `%I`, not right after a name,
+ * `)` or `]`), and a regular expression closed on its line, after a keyword of `RUBY_REGEXP_KEYWORDS`, or after a method
+ * name written after a dot and followed by a space when no space or `=` follows the slash (a bare name: a division).
+ */
+const RUBY_LITERALS = scriptLiterals(
+  String.raw`#[^\n]*`,
+  String.raw`${wordList(String.raw`(?<![\w)\]])%[wWiI]`, String.raw`[^\w\s([{<]`)}|(?<=(?<![\w.:$@])(?:${RUBY_REGEXP_KEYWORDS})[ \t]*)\/(?:[^/\\\n]|\\[^\n])*\/|(?<=\.[ \t]*\w+[?!]?[ \t]+)\/(?![\s=])(?:[^/\\\n]|\\[^\n])*\/`,
+)
+/** Perl literals of the view of `OWN_HTTP_CALLS` beyond quotes: `qw` word lists (after the same characters as `UNPARSED_QUOTING`, `#` not taken as delimiter). */
+const PERL_LITERALS = scriptLiterals(String.raw`#[^\n]*`, wordList(String.raw`(?<![\w$@%&:>])qw\s*`, String.raw`[^\w\s#,;=)>}\]([{<]`))
+const PHP_LITERALS = scriptLiterals(String.raw`#[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)`)
+/** A literal kept by the view of `OWN_HTTP_CALLS`: an `http(s)://` URL, or the name of the `http` or `https` module. */
+const HTTP_URL = /^https?:\/\//i
+const HTTP_MODULE = /^(?:node:)?https?$/
+
+/**
+ * Request call of the code's own HTTP functions: in Python, a call of `PYTHON_HTTP_CALL` with literals (triple-quoted ones
+ * included) and comments blanked; in Ruby, Perl, PHP and a JavaScript engine, a call of `OWN_HTTP_CALLS` in its view
+ * (literals of `RUBY_LITERALS`, `PERL_LITERALS`, `PHP_LITERALS` or `JAVASCRIPT_COMMENTS`), never with quoting that view
+ * leaves out (`UNPARSED_QUOTING`).
+ */
+function callsOwnHttp(code: string, interpreter: string): boolean {
+  if (/^python/.test(interpreter)) return PYTHON_HTTP_CALL.test(blankedCode(code, PYTHON_LITERALS_AND_COMMENTS))
+  const language = JAVASCRIPT_ENGINES.test(interpreter) ? "javascript" : /^ruby/.test(interpreter) ? "ruby" : /^perl/.test(interpreter) ? "perl" : /^php/.test(interpreter) ? "php" : undefined
+  if (language === undefined) return false
+  const literals = language === "javascript" ? codeMatches(code, JAVASCRIPT_COMMENTS) : code.matchAll(language === "php" ? PHP_LITERALS : language === "ruby" ? RUBY_LITERALS : PERL_LITERALS)
+  let view = ""
+  let end = 0
+  for (const match of literals) {
+    // A word list or a regular expression (group 5): no URL kept.
+    const value = match[1] ?? match[2] ?? match[3] ?? (match[5] === undefined ? undefined : "")
+    view += code.slice(end, match.index) + (value === undefined ? " " : HTTP_URL.test(value) ? '"http:"' : HTTP_MODULE.test(value) ? '"https"' : '""')
+    end = match.index + match[0].length
+  }
+  view += code.slice(end)
+  return OWN_HTTP_CALLS[language].test(view) && !UNPARSED_QUOTING[language].test(view)
+}
+
+/**
+ * Inline code delimited in `text` that sends a credential file without reaching the network as `codeReachesNetwork`
+ * sees it, the deny rule of the network examination it gives: a literal (or list) launched as in `codeLaunchesPrinted`
+ * that runs a network tool with the file (the deny table's test, on that literal: an ssh key given to `-i` does not
+ * count) or with an OpenCode subcommand that prints a secret, or a request call of the code's own HTTP functions
+ * (`callsOwnHttp`) with the file anywhere in `text`, as for `fetch`.
+ */
+function codeSendsCredentialFile(text: string, ctx: CredentialContext): RegexRule | undefined {
   // Files of the whole text, computed at most once (linear cost with many code blocks).
   let inText: boolean | undefined
   for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
     const interpreter = /^\S+/.exec(match[1] ?? "")?.[0] ?? ""
     const inline = inlineCode(match[2] ?? "")
     if (inline === undefined) continue
-    const python = /^python/.test(interpreter)
-    if (python && PYTHON_HTTP_CALL.test(inline.replace(PYTHON_LITERALS_AND_COMMENTS, (found) => found.replace(/[^\n]/g, " "))) && (inText ??= sentSecretFiles(text, ctx).length > 0)) return true
+    if (callsOwnHttp(inline, interpreter) && (inText ??= sentSecretFiles(text, ctx).length > 0)) return NETWORK_CODE_RULES[0]
     const code = withoutComments(inline, interpreter)
     if (!hasExecutionSink(code)) continue
     for (const group of literalGroups(code)) {
-      if (launchedLiteral(code, group, interpreter) && runsNetwork(group.text) && sentSecretFiles(group.text, ctx).length > 0) return true
+      if (!launchedLiteral(code, group, interpreter) || !runsNetwork(group.text)) continue
+      if (sentSecretFiles(group.text, ctx).length > 0) return NETWORK_CODE_RULES[0]
+      if (NAMES_LAUNCH.test(group.text) && opencodeKinds(group.text).has("printed")) return NETWORK_CODE_RULES[2]
     }
   }
-  return false
+  return undefined
 }
 
 /**
@@ -4039,9 +4153,10 @@ const LONG_NETWORK_CODE: Finding = {
 function networkCodeFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   const seen = { view: command, long: false }
   if (!inlineCodeNetwork(command, seen)) {
-    // Sent by the code without other network access recognized: only the deny of the credential file, never an ask.
-    const sent = NETWORK_CODE_RULES[0]!
-    if (ruleEnabled(sent.id, ctx.active) && codeSendsCredentialFile(seen.view, ctx)) return { verdict: "deny", rule: sent.id, reason: sent.reason }
+    // Sent by the code without other network access recognized: only the deny of a credential file or of a printed
+    // OpenCode secret, never an ask.
+    const sent = ruleEnabled(NETWORK_CODE_RULES[0]!.id, ctx.active) ? codeSendsCredentialFile(seen.view, ctx) : undefined
+    if (sent) return { verdict: "deny", rule: sent.id, reason: sent.reason }
     return seen.long && ruleEnabled(LONG_NETWORK_CODE.rule, ctx.active) ? hardened(LONG_NETWORK_CODE, ctx.active) : undefined
   }
   const rule = NETWORK_CODE_RULES.find((candidate) => ruleEnabled(candidate.id, ctx.active) && candidate.test(seen.view, ctx))

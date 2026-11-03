@@ -129,7 +129,8 @@ describe("quality batch, short review of Q25C", () => {
         const now = here(command, active)
         const then = before(command, active)
         if (now !== then) changes.push(`${now} <- ${then}`)
-        if (now.startsWith("deny") && !then.startsWith("deny")) assert.fail(`new deny: ${command}`)
+        // Since Q27, the subcommand launched with a remote connection in one literal is refused, as the credential file.
+        if (now.startsWith("deny") && !then.startsWith("deny") && ![0, 1, 6].includes(commands.indexOf(command))) assert.fail(`new deny: ${command}`)
         // Since Q26, the text only printed to an HTTP send, network program turned off: the ask of the credential file.
         if (then === "none") assert.equal(now, active?.dangerousCommands === false && active.sensitiveFiles && command === commands[2] ? "ask:secret-file-network" : "none", command)
         if (command.includes("//") && command.startsWith(`node -e "//`)) continue
