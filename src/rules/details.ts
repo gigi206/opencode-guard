@@ -57,7 +57,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "opencode-server-api",
     detail(
-      "Recognizes a call to the OpenCode server API that can switch a session's agent, send a prompt or a command, replace a voice call's instructions or answer a permission request, as well as exporting the OpenCode credentials and writing a copy of the server's memory. These actions can bypass the guard.",
+      "Recognizes a call to the OpenCode server API that can switch a session's agent, send a prompt or a command, replace a voice call's instructions or answer a permission request, as well as exporting the OpenCode credentials and writing a copy of the server's memory, and an artifact written with OpenCode's artifact tools whose page code calls one of these routes. These actions can bypass the guard.",
       "call to the OpenCode server API that switches the agent, sends a prompt or a command, replaces the instructions of a voice call, or answers a permission request: it can bypass the guard",
       "an OpenCode server API call",
     ),

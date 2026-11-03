@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url"
 import { patchTargets } from "../patch.ts"
 import { resolveLike } from "../scripts.ts"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
+import { artifactFinding } from "./artifacts.ts"
 import { decodeUnicodeEscapes } from "./code-network.ts"
 import { entrusted, overridden, ruleEnabled, waivable, waiverOf, type ActiveRules } from "./features.ts"
 import {
@@ -418,6 +419,8 @@ export function toolFinding(tool: string, input: unknown, ctx: ToolRuleContext):
         placeholderOf(),
         checked("the secret check", ctx, () => exfiltration(input, ctx, "the tool arguments")),
         located,
+        // Artifact pages: what they run once opened (outside the hooks).
+        checked("the artifact files", ctx, () => artifactFinding(tool, input, ctx.active)),
         ...custom,
       ])
     }

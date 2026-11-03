@@ -19,7 +19,7 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
       ["self-protection", "ask", "writing to OpenCode's configuration or to the plugin directory; adding or removing a plugin or an MCP server through opencode"],
       ["nested-opencode", "ask", "starting another OpenCode agent or server or changing its configuration; a command whose program the plugin cannot determine"],
       ["opencode-service", "ask", "changing the OpenCode service, or printing its password, environment or settings"],
-      ["opencode-server-api", "ask", "a call to the OpenCode server API that can bypass the guard; exporting the OpenCode credentials; a copy of the server's memory"],
+      ["opencode-server-api", "ask", "a call to the OpenCode server API that can bypass the guard, also from an artifact's page code; exporting the OpenCode credentials; a copy of the server's memory"],
       ["guard-cli", "ask", "running or naming the guard command line, which changes the plugin's settings (another program named guard too)"],
       ["secret-file-read", "ask", "reading a credential file"],
       ["secret-file-network", "deny", "a credential file and a network tool in the same command, or in inline code that makes network requests"],

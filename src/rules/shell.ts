@@ -308,6 +308,13 @@ interface RegexRule {
 
 const re = (regex: RegExp) => (command: string) => regex.test(command)
 
+/**
+ * Server API routes that bypass the guard with the server password (rule `opencode-server-api`), also looked for in the
+ * code of an artifact's pages (`artifacts.ts`). Documentation template (`/api/session/{sessionID}/prompt`) excluded: a
+ * real identifier has no brace. OpenCode 2.1.3 voice route: replaces the instructions of a voice call of the session.
+ */
+export const SERVER_API_ROUTE = /\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/
+
 const WRITE_COMMANDS = new Set(["cp", "mv", "ln", "install", "rm", "unlink", "truncate", "tee", "touch", "rsync"])
 const unquote = (token: string) => token.replace(/^["']+|["']+$/g, "")
 
@@ -3287,9 +3294,7 @@ const ASK_RULES: readonly RegexRule[] = [
     id: "opencode-server-api",
     verdict: "ask",
     reason: "call to the OpenCode server API that switches the agent, sends a prompt or a command, replaces the instructions of a voice call, or answers a permission request: it can bypass the guard",
-    // Documentation template (`/api/session/{sessionID}/prompt`) excluded: a real identifier has no brace. OpenCode
-    // 2.1.3 voice route: replaces the instructions of a voice call of the session.
-    test: re(/\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/),
+    test: re(SERVER_API_ROUTE),
   },
   // Its configuration or plugins changed by its environment, or its confirmations approved: never left to the decision
   // model (user's decision); another launch can be.
