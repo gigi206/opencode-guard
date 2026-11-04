@@ -313,7 +313,7 @@ const re = (regex: RegExp) => (command: string) => regex.test(command)
  * code of an artifact's pages (`artifacts.ts`). Documentation template (`/api/session/{sessionID}/prompt`) excluded: a
  * real identifier has no brace. OpenCode 2.1.3 voice route: replaces the instructions of a voice call of the session.
  */
-export const SERVER_API_ROUTE = /\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/
+export const SERVER_API_ROUTE = /\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions|plugin\/update)\b/
 
 const WRITE_COMMANDS = new Set(["cp", "mv", "ln", "install", "rm", "unlink", "truncate", "tee", "touch", "rsync"])
 const unquote = (token: string) => token.replace(/^["']+|["']+$/g, "")
@@ -2750,7 +2750,7 @@ const OPENCODE_COMMANDS = new Map<string, readonly string[]>([
 ])
 
 /** Findings of a call (`printed`: output that prints a secret); `OPENCODE_KINDS`: without examining arguments. */
-type OpencodeKind = "nested" | "service-config" | "service-change" | "service-secret" | "credentials" | "printed" | "heap-dump" | "api" | "config" | "unchecked" | "long"
+type OpencodeKind = "nested" | "service-config" | "service-change" | "service-secret" | "credentials" | "printed" | "heap-dump" | "api" | "config" | "plugin-update" | "unchecked" | "long"
 const OPENCODE_KINDS = new Map<string, readonly OpencodeKind[]>([
   ...["run", "serve", "acp"].map((name) => [name, ["nested"]] as const),
   // `service set` and `unset` write the service's settings and environment (`service.json`); the others leave them as they are.
@@ -2760,6 +2760,7 @@ const OPENCODE_KINDS = new Map<string, readonly OpencodeKind[]>([
   ["auth export", ["credentials", "printed"]],
   ["debug heap-dump", ["heap-dump"]],
   ...["plugin add", "plugin remove", "mcp add"].map((name) => [name, ["config"]] as const),
+  ["plugin update", ["plugin-update"]],
 ])
 
 /**
@@ -3106,6 +3107,7 @@ const OPENCODE_ASK_RULES: readonly RegexRule[] = (
     ["nested-opencode", "long", "OpenCode command line longer than the plugin checks (1024 characters after the program name): it cannot be checked"],
     ["nested-opencode", "unchecked", "OpenCode command line with an unknown option or a word known only at run time in its subcommand: it cannot be checked"],
     ["self-protection", "config", "OpenCode command that adds or removes a plugin or adds an MCP server: rewrites OpenCode's configuration (self-protection)"],
+    ["self-protection", "plugin-update", "OpenCode command that updates package plugins: it can replace the guard's code (self-protection)"],
   ] as const
 ).map(([id, kind, reason]): RegexRule => ({
   id,
@@ -3115,7 +3117,7 @@ const OPENCODE_ASK_RULES: readonly RegexRule[] = (
   ...(kind === "long" || kind === "unchecked" ? { unfinished: true } : {}),
   // Rewrites opencode.json, or the service's environment (`{env:…}` of the plugin's settings, OpenCode's configuration
   // directory or content): a change of the plugin's settings.
-  ...(kind === "config" || kind === "service-config" ? { userOnly: true } : {}),
+  ...(kind === "config" || kind === "plugin-update" || kind === "service-config" ? { userOnly: true } : {}),
 }))
 
 const ASK_RULES: readonly RegexRule[] = [

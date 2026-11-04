@@ -228,7 +228,7 @@ describe("Q28 review", () => {
 
   it("Q28R-8: the exported route expression is the shell rule's former one; other tools unchanged", async () => {
     const shellModule = (await import("../src/rules/shell.ts")) as { SERVER_API_ROUTE?: RegExp }
-    const former = /\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions)\b/
+    const former = /\/api\/(?:session\/[^\s"'\/{}]+\/(?:agent|command|prompt|permission)|experimental\/voice\/session\/[^\s"'\/{}]+\/instructions|plugin\/update)\b/
     assert.equal(shellModule.SERVER_API_ROUTE?.source, former.source)
     assert.equal(shellModule.SERVER_API_ROUTE?.flags, former.flags)
     const files = { "index.html": html(`<script>${post(ROUTE)}</script>`) }

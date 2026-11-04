@@ -3,7 +3,7 @@
 // options (project configuration loaded after the global one): it cannot thereby enable sending outputs or prompts to
 // its own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
-import { isAbsolute, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { checkRequested, declaredDecision, normalizedURL, type PluginDeclaration } from "./config.ts"
 
 /**
@@ -26,6 +26,36 @@ function realPath(path: string): string {
     return realpathSync(path)
   } catch {
     return resolve(path)
+  }
+}
+
+/**
+ * Where OpenCode installed a package plugin (`packages/util/src/npm.ts`, v2.2.5):
+ * `<cache>/npm/<key>/<generation>/node_modules/<name>`. `entry` holds every generation of one package specifier, and
+ * OpenCode loads the highest one. Undefined for a plugin directory of any other form (a local plugin).
+ */
+export function packageInstall(pluginDir: string): { readonly entry: string; readonly generation: string; readonly name: string } | undefined {
+  const modules = dirname(pluginDir)
+  const generation = dirname(modules)
+  if (basename(modules) !== "node_modules" || !/^\d+$/.test(basename(generation))) return undefined
+  return { entry: dirname(generation), generation, name: basename(pluginDir) }
+}
+
+/**
+ * Does a configured plugin target designate this plugin? An absolute target by its path. A package specifier only when
+ * it is, word for word, the one this generation was installed from (the `package.json` OpenCode writes next to
+ * `node_modules`): a name alone would also accept someone else's package. At the slightest doubt: no.
+ */
+export function declaresPlugin(target: string, pluginDir: string): boolean {
+  if (isAbsolute(target)) return realPath(target) === pluginDir || resolve(target) === pluginDir
+  const install = packageInstall(pluginDir)
+  if (!install) return false
+  try {
+    const manifest = JSON.parse(readFileSync(join(install.generation, "package.json"), "utf8")) as unknown
+    const dependencies = isRecord(manifest) ? manifest.dependencies : undefined
+    return isRecord(dependencies) && dependencies[install.name] === target
+  } catch {
+    return false
   }
 }
 
@@ -70,7 +100,7 @@ function pluginOptions(dir: string, pluginDir: string, env: Record<string, strin
     if (!Array.isArray(plugins)) continue
     for (const entry of plugins) {
       const target = typeof entry === "string" ? entry : isRecord(entry) ? entry.package : undefined
-      if (typeof target !== "string" || !isAbsolute(target) || (realPath(target) !== pluginDir && resolve(target) !== pluginDir)) continue
+      if (typeof target !== "string" || !declaresPlugin(target, pluginDir)) continue
       return { options: isRecord(entry) && isRecord(entry.options) ? entry.options : {} }
     }
   }

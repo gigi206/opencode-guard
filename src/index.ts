@@ -18,7 +18,7 @@ import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
 import { isRegularFile } from "./real-path.ts"
-import { declaredOutputCheck, declaredPluginOptions, globalConfigDirectory, type OutputCheckState } from "./output-check.ts"
+import { declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, type OutputCheckState } from "./output-check.ts"
 import { RULE_FEATURES, waiverSummary } from "./rules/features.ts"
 import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
@@ -65,7 +65,7 @@ export function enforcedBySystemConfig(pluginDir: string, systemDir: string): bo
         Array.isArray(plugins) &&
         plugins.some((entry) => {
           const target = typeof entry === "string" ? entry : (entry as { package?: unknown } | null)?.package
-          return typeof target === "string" && isAbsolute(target) && (realPath(target) === pluginDir || resolve(target) === pluginDir)
+          return typeof target === "string" && declaresPlugin(target, pluginDir)
         })
       )
     } catch {
@@ -119,7 +119,10 @@ export function guardDirectories(env: Record<string, string | undefined>, global
   // The plugin directory is hot-reloaded: modifying it would disable the guardrail. Real form too (plugin loaded
   // through a path containing a symbolic link).
   const pluginDir = resolve(fileURLToPath(new URL("..", import.meta.url)))
-  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir)])]
+  // Installed from a package: OpenCode loads the highest generation of the entry, so a new one written beside this
+  // directory would replace the plugin at the next start. The whole entry counts as the plugin.
+  const install = packageInstall(pluginDir)
+  const pluginDirs = [...new Set([pluginDir, realPath(pluginDir), ...(install ? [install.entry, realPath(install.entry)] : [])])]
   // OpenCode global configuration directory resolved from the server environment (`OPENCODE_CONFIG_DIR`,
   // `XDG_CONFIG_HOME`): protected like the default directory, which the rules recognize by name only.
   const configDir = globalDir ? resolve(globalDir) : undefined
