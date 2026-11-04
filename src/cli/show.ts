@@ -2,7 +2,8 @@
 // section it comes from, the exceptions retained, the project's trust and the settings set aside with the reason (the
 // warnings of the plugin's resolution). Only from the files read faithfully here; no other option of the configuration is
 // ever printed.
-import { resolve } from "node:path"
+import { existsSync } from "node:fs"
+import { join, resolve } from "node:path"
 import { parseConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { PLUGIN_DIR, readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
@@ -13,6 +14,13 @@ import { pluginVersion, runGit } from "./version.ts"
 const NOT_READ =
   "Not read: the plugin options OpenCode merges from a project's opencode.json (.opencode included) or from OPENCODE_CONFIG_CONTENT; where they are set, the plugin may run with other settings (its log shows them at startup)."
 
+/** The configuration file of a directory: the one that exists, in the order the plugin reads them, else the usual name. */
+function configurationFile(directory: string | undefined): string {
+  if (directory === undefined) return "opencode.json"
+  const [file, ...others] = ["opencode.json", "opencode.jsonc"].map((name) => join(directory, name))
+  return [file!, ...others].find((path) => existsSync(path)) ?? file!
+}
+
 export function show(io: CliIo, agent: string | undefined, offline = false): void {
   const sources = readSources(io)
   const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
@@ -21,7 +29,7 @@ export function show(io: CliIo, agent: string | undefined, offline = false): voi
   const version = resolution(io, sources, directory, files)
   // Each source read, with its state: `good` read, `dim` absent, `warn` ignored or not declaring the plugin.
   const read: Array<{ readonly name: string; readonly state: string; readonly style: Style }> = sources.declarations.map((entry) => ({
-    name: `${entry.label} configuration (opencode.json)`,
+    name: `${entry.label} configuration (${configurationFile(entry.label === "system" ? io.systemDir : sources.globalDir)})`,
     state: entry.options ? "declares the plugin" : (entry.reason ?? "not read"),
     style: entry.options ? "good" : "warn",
   }))

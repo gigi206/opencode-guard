@@ -43,6 +43,13 @@ const LOG = [
 ]
 
 describe("guard show and guard last in a terminal", () => {
+  it("guard show gives the path of the global and system configuration files", () => {
+    const run = world()
+    const lines = plain(run(undefined, "show").out)
+    assert.ok(lines.some((line) => /^ {2}global configuration \(\/.+\/global\/opencode\.json\): declares the plugin$/.test(line)))
+    assert.ok(lines.some((line) => /^ {2}system configuration \(\/.+\/system\/opencode\.json\): /.test(line)))
+  })
+
   it("guard show keeps the state of a long name beside it when both fit, and below it otherwise", () => {
     const run = world()
     const row = /^ {4}global guard\.json \(.+\)$/

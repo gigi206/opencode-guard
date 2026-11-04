@@ -392,7 +392,7 @@ describe("lot 48 step D: show and last", () => {
     assert.equal(r.code, 0, r.err)
     for (const pattern of [
       new RegExp(`^Settings for ${join(w.project, "sub")} with the main agent build, read from:$`, "m"),
-      /^ {2}global configuration \(opencode\.json\): declares the plugin$/m,
+      /^ {2}global configuration \(\/.+\/opencode\.json\): declares the plugin$/m,
       /^ {2}Not read: the plugin options OpenCode merges from a project's opencode\.json/m,
       /^This project: not trusted \(trustedProjects: none\)$/m,
       /^ {2}dangerousCommands\s+true\s+default$/m,
