@@ -34,6 +34,21 @@ function world(global: Json = {}) {
 const strip = (text: string) => ESCAPES.reduce((acc, escape) => acc.split(escape).join(""), text)
 
 describe("guard help and guard rules <setting> <rule>", () => {
+  it("HL-1b: -h and --help after a verb are the help, colored in a terminal, and leave the rest of a command alone", () => {
+    const w = world()
+    const colored = w.run(["help"], { width: 100, color: true }).out.join("\n")
+    for (const verb of ["rules", "redaction", "set", "unset", "show", "last", "status", "test", "completion", "trust"])
+      for (const flag of ["-h", "--help"]) {
+        const result = w.run([verb, flag], { width: 100, color: true })
+        assert.equal(result.code, 0, `${verb} ${flag}`)
+        assert.equal(result.out.join("\n"), colored, `${verb} ${flag}`)
+        assert.deepEqual(result.err, [], `${verb} ${flag}`)
+      }
+    for (const args of [["rules", "off", "-h"], ["redaction", "off", "--help"]]) assert.equal(w.run(args, { width: 100, color: true }).out.join("\n"), colored)
+    assert.equal(w.run(["set", "-h"]).out.join("\n"), USAGE)
+    assert.equal(w.run(["rules", "off", "upload", "-h"], { width: 100, color: true }).code, 2)
+  })
+
   it("HL-1: help is the plain text outside a terminal, the same words in color in one, and plain after a usage error", () => {
     const w = world()
     assert.equal(w.run(["help"]).out.join("\n"), USAGE)

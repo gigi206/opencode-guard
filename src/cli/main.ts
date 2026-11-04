@@ -301,11 +301,16 @@ function redacted(io: CliIo): CliIo {
 
 const WITHHELD = "(line withheld: redaction failed)"
 
+const isHelp = (word: string | undefined) => word === "--help" || word === "-h"
+
+/** `guard <verb> -h`, and `guard rules <word> -h`, `guard redaction <word> -h`: the help, not a usage error. */
+const helpAfter = (command: string, args: readonly string[]) => isHelp(args[0]) || ((command === "rules" || command === "redaction") && isHelp(args[1]))
+
 /** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error. `test` is asynchronous. */
 export function main(argv: readonly string[], terminal: CliIo): number | Promise<number> {
   const io = redacted(terminal)
   const [command, ...args] = argv
-  if (command === undefined || command === "help" || command === "--help" || command === "-h") {
+  if (command === undefined || command === "help" || isHelp(command) || helpAfter(command, args)) {
     // In a terminal, the colored layout; otherwise (and after a usage error, on the error output) the plain text.
     if (io.pretty) prettyHelp(io.pretty)
     else for (const line of USAGE.split("\n")) io.out(line)
