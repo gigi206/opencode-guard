@@ -23,6 +23,8 @@ export interface CliIo {
   readonly err: (line: string) => void
   /** The terminal, when the standard output is one (`terminalOf`, decided by the launcher): grouped, colored layout. */
   readonly terminal?: Terminal
+  /** The error output is a terminal too (decided by the launcher): a usage error then gets the colored help. */
+  readonly errorTerminal?: boolean
   /** `git` for the plugin's version (`runGit` by default). */
   readonly git?: Git
   /** Set by `main` around the redaction, for a terminal only. */

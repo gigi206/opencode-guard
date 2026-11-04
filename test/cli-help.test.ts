@@ -21,10 +21,10 @@ function world(global: Json = {}) {
   for (const dir of [globalDir, systemDir, home, data, project]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: global }] }))
   const env = { HOME: home, OPENCODE_CONFIG_DIR: globalDir, XDG_DATA_HOME: data }
-  const run = (args: string[], terminal?: { width: number; color: boolean }) => {
+  const run = (args: string[], terminal?: { width: number; color: boolean }, errorTerminal = false) => {
     const out: string[] = []
     const err: string[] = []
-    const code = main(args, { env, cwd: project, systemDir, out: (line) => out.push(line), err: (line) => err.push(line), ...(terminal ? { terminal } : {}) })
+    const code = main(args, { env, cwd: project, systemDir, out: (line) => out.push(line), err: (line) => err.push(line), errorTerminal, ...(terminal ? { terminal } : {}) })
     return { code, out, err }
   }
   const guardFile = join(globalDir, "guard.json")
@@ -64,6 +64,20 @@ describe("guard help and guard rules <setting> <rule>", () => {
     assert.equal(error.code, 2)
     assert.ok(!ESCAPES.some((escape) => error.err.join("\n").includes(escape)))
     assert.equal(terminalOf({ NO_COLOR: "1" }, true, 100)?.color, false)
+  })
+
+  it("HL-1c: a usage error gets the colored help when both outputs are terminals, never on a redirected error output", () => {
+    const w = world()
+    const help = w.run(["help"], { width: 100, color: true }).out.join("\n")
+    const both = w.run(["nosuchverb"], { width: 100, color: true }, true)
+    assert.equal(both.code, 2)
+    assert.equal(both.out.join("\n"), help)
+    assert.deepEqual(both.err, ["guard: unknown command nosuchverb"])
+    const redirected = w.run(["nosuchverb"], { width: 100, color: true })
+    assert.equal(redirected.code, 2)
+    assert.deepEqual(redirected.out, [])
+    assert.equal(redirected.err.slice(1).join("\n"), USAGE)
+    assert.deepEqual(w.run(["nosuchverb"], undefined, true).out, [])
   })
 
   it("HL-2: rules off|ask|deny|model|reset write the global guard.json; the former forms are usage errors that name the new one", () => {

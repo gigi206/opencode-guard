@@ -353,7 +353,8 @@ export function main(argv: readonly string[], terminal: CliIo): number | Promise
   const io = redacted(terminal)
   const [command, ...args] = argv
   if (command === undefined || command === "help" || isHelp(command) || helpAfter(command, args)) {
-    // In a terminal, the colored layout; otherwise (and after a usage error, on the error output) the plain text.
+    // In a terminal, the colored layout; otherwise the plain text. After a usage error, the plain text on the error output
+    // unless both outputs are terminals (a redirected error output never gets colors).
     if (io.pretty) prettyHelp(io.pretty)
     else for (const line of USAGE.split("\n")) io.out(line)
     return command === undefined ? 2 : 0
@@ -361,7 +362,8 @@ export function main(argv: readonly string[], terminal: CliIo): number | Promise
   const failed = (error: unknown) => {
     if (error instanceof UsageError) {
       io.err(`guard: ${error.message}`)
-      for (const line of USAGE.split("\n")) io.err(line)
+      if (io.pretty && io.errorTerminal) prettyHelp(io.pretty)
+      else for (const line of USAGE.split("\n")) io.err(line)
       return 2
     }
     io.err(`guard: ${error instanceof CliError ? error.message : `internal error: ${String(error)}`}`)

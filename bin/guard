@@ -19,5 +19,6 @@ process.exitCode = await main(process.argv.slice(2), {
   systemDir: systemConfigDirectory(),
   out: (line) => process.stdout.write(`${line}\n`),
   err: (line) => process.stderr.write(`${line}\n`),
+  errorTerminal: Boolean(process.stderr.isTTY),
   ...(terminal ? { terminal } : {}),
 })
