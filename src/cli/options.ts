@@ -211,6 +211,7 @@ export function optionRows(terminal: CliIo, agent: string | undefined) {
   for (const [key, row] of policy)
     if (key.startsWith("ruleOverrides.") || key.startsWith("exceptions."))
       rows.push({ name: key, value: String(row.value), fallback: "none", origin: fileOf(row.origin), state: "overridden" })
+  rows.sort((a, b) => a.name.localeCompare(b.name, "en"))
   return { rows, warnings: [...parsed.warnings, ...version.warnings] }
 }
 

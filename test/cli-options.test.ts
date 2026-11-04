@@ -107,6 +107,13 @@ describe("guard options: table", () => {
     assert.deepEqual(row(lines, "decision.timeoutMs")?.slice(2, 4), ["5000", "5000"])
     assert.deepEqual(row(lines, "decision.protocol")?.slice(2, 4), ["chat", "chat"])
   })
+  it("options are listed in alphabetical order, a rule set right under ruleOverrides", () => {
+    const lines = world({ ruleOverrides: { eval: "deny" } })(["options"]).out.filter((line) => !line.startsWith("Not read"))
+    const listed = lines.map((line) => line.split(" ")[0]!)
+    assert.deepEqual(listed, [...listed].sort((a, b) => a.localeCompare(b, "en")))
+    assert.equal(listed[listed.indexOf("ruleOverrides") + 1], "ruleOverrides.eval")
+    assert.equal(listed[0], "agents")
+  })
   it("a secret is never printed, in the table or the explanation", () => {
     const run = world({ decision: { ...BASE, apiKey: KEY, headers: { "X-Test": KEY } }, allowlist: [KEY] })
     for (const args of [["options"], ["options", "--explain", "all"], ["options", "--explain", "decision.apiKey"]]) {
