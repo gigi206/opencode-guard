@@ -898,7 +898,7 @@ function unprotectedAgentOption(value: unknown, warnings: string[]): string | un
     warnings.push(`invalid value for unprotectedAgent (${shown(value)}): no unprotected agent`)
     return undefined
   }
-  if (["build", "plan", "general", "explore", "title", "compaction", "summary"].includes(id)) {
+  if (BUILTIN_AGENTS.includes(id)) {
     warnings.push(`unprotectedAgent cannot be the built-in agent "${id}": no unprotected agent`)
     return undefined
   }
@@ -1216,6 +1216,24 @@ export function redactionOffOption(value: unknown, label: string, warnings: stri
   })
 }
 
+/** Protections an `agents` section may switch off for that agent: the only keys of the plugin options it accepts. */
+export const RELAX_SWITCHES = ["redactOutputs", "redactPrompt", "redactWire", "outputCheck", "promptCheck"] as const
+export type RelaxSwitch = (typeof RELAX_SWITCHES)[number]
+const RELAX_KEYS = ["guard", ...RELAX_SWITCHES, "models"]
+/** Agents OpenCode runs by itself or that every session may reach: never relaxed. */
+const BUILTIN_AGENTS = ["build", "plan", "general", "explore", "title", "compaction", "summary"]
+
+/** What the global sources relax for one agent (`agents.<id>`), read per request by `scopes.ts`. */
+export interface AgentRelaxation {
+  /** `"guard": "off"`: nothing checked and nothing redacted, like `unprotectedAgent`. */
+  readonly guardOff: boolean
+  readonly off: ReadonlySet<RelaxSwitch>
+  /** Provider/model the relaxation is limited to; absent: any model; empty (invalid list): none. */
+  readonly models?: readonly string[]
+  /** Source of each key, for `guard show`. */
+  readonly origins: ReadonlyMap<string, string>
+}
+
 /** Settings of one call: rule policy, decision model, checks of scripts written then run. */
 export interface Scope {
   readonly policy: ActiveRules
@@ -1255,6 +1273,8 @@ interface Section {
   readonly profile?: Profile
   /** Source and section, for `guard show`. */
   readonly label: string
+  /** `agents.<id>` only: the keys of `RELAX_KEYS` it sets. */
+  readonly relax?: ReadonlyMap<string, boolean | string | readonly string[]>
 }
 interface ProjectSection {
   readonly dir: string
@@ -1322,6 +1342,8 @@ export interface Version {
   scope(main: string | undefined, sub: string | undefined, call: string | undefined): Scope
   /** Agents with a section in some source. */
   readonly agents: ReadonlySet<string>
+  /** What the global sources relax, by agent; absent: nothing. */
+  readonly relaxations?: ReadonlyMap<string, AgentRelaxation>
   /** Some scope checks scripts: the files written are tracked. */
   readonly tracking: boolean
   readonly profile: Profile
@@ -1536,8 +1558,66 @@ function readAgents(value: unknown, where: string, rules: readonly CustomRule[],
   }
   for (const [name, section] of Object.entries(value))
     if (!isRecord(section)) warnings.push(`${where}: agents[${JSON.stringify(name)}] must be an object, ignored`)
-    else agents.set(name, readSection(section, `${where}, agents.${name}`, rules, warnings, POLICY_KEYS))
+    else {
+      const place = `${where}, agents.${name}`
+      const relax = relaxOption(section, place, warnings)
+      agents.set(name, { ...readSection(section, place, rules, warnings, [...POLICY_KEYS, ...RELAX_KEYS]), ...(relax.size ? { relax } : {}) })
+    }
   return agents
+}
+
+/** The keys of `RELAX_KEYS` of an `agents` section. An invalid `models` limits to no model: never wider than written. */
+function relaxOption(section: Readonly<Record<string, unknown>>, where: string, warnings: string[]) {
+  const relax = new Map<string, boolean | string | readonly string[]>()
+  if (section.guard === "off" || section.guard === "on") relax.set("guard", section.guard)
+  else if (section.guard !== undefined) warnings.push(`${where}: invalid value for guard (${shown(section.guard)}), "off" or "on" expected, ignored`)
+  for (const name of RELAX_SWITCHES) {
+    const set = flag(section[name])
+    if (set === null) warnings.push(`${where}: invalid value for ${name} (${shown(section[name])}), ignored`)
+    else if (set !== undefined) relax.set(name, set)
+  }
+  if (section.models !== undefined) {
+    const valid = Array.isArray(section.models) && section.models.length > 0 && section.models.every((model) => typeof model === "string" && /^[^\s/]+\/\S+$/.test(model))
+    if (!valid) warnings.push(`${where}: models must be a list of provider/model: this section relaxes for no model`)
+    // `linagora/qwen3.8#high`, as an agent's model is written: the variant is not part of a request's model.
+    relax.set("models", valid ? (section.models as string[]).map((model) => model.split("#")[0]!) : [])
+  }
+  return relax
+}
+
+/**
+ * Relaxations by agent: the global sources key by key, then what a project guard.json hardens (it never relaxes, even
+ * trusted: `guard: "on"` or a switch at `true` takes a relaxation back). A built-in agent is refused.
+ */
+function agentRelaxations(global: readonly Pick<Source, "agents" | "label">[], projects: readonly Pick<Source, "agents" | "label">[], warnings: string[]) {
+  const states = new Map<string, Map<string, { value: boolean | string | readonly string[]; label: string }>>()
+  for (const source of global)
+    for (const [agent, section] of source.agents)
+      for (const [key, value] of section.relax ?? []) {
+        if (BUILTIN_AGENTS.includes(agent)) {
+          warnings.push(`${section.label}: ${key} ignored: the built-in agent ${agent} cannot be relaxed`)
+          continue
+        }
+        const state = states.get(agent) ?? new Map()
+        state.set(key, { value, label: section.label })
+        states.set(agent, state)
+      }
+  for (const source of projects)
+    for (const [agent, section] of source.agents)
+      for (const [key, value] of section.relax ?? []) {
+        if (value === "on" || value === true) states.get(agent)?.delete(key)
+        else warnings.push(`${section.label}: ${key} ignored: only the global configuration relaxes an agent`)
+      }
+  const relaxations = new Map<string, AgentRelaxation>()
+  for (const [agent, state] of states) {
+    const off = new Set(RELAX_SWITCHES.filter((name) => state.get(name)?.value === false))
+    const guardOff = state.get("guard")?.value === "off"
+    if (!guardOff && off.size === 0) continue
+    const models = state.get("models")?.value as readonly string[] | undefined
+    const origins = new Map([...state].filter(([key, item]) => key === "models" || item.value === false || item.value === "off").map(([key, item]) => [key, item.label]))
+    relaxations.set(agent, { guardOff, off, ...(models ? { models } : {}), origins })
+  }
+  return relaxations
 }
 
 /** Global source or guard.json; `report`: warnings of the top level and `agents` (the global file's repeat the effective options'). */
@@ -1847,11 +1927,13 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
   for (const source of projectGuards) if (source.top.profile === "standard" || (source.top.profile && source.trusted)) shownProfile = source.top.profile
   const read = files.filter((file) => file.data).map((file) => file.label)
   // Formats turned off by the global guard.json: its top level only (a project's file or section is reported by `readSection`).
+  const relaxations = agentRelaxations([layers.globalFile, ...globalGuards, ...matched, layers.systemFile], projectGuards, warnings)
   const redactionOff = [...new Set(files.filter((file) => file.global && file.data).flatMap((file) => redactionOffOption(file.data?.[REDACTION_OFF], file.label, warnings)))]
   return {
     base,
     scope: (main, sub, call) => scope(main, sub, call),
     agents,
+    ...(relaxations.size ? { relaxations } : {}),
     tracking: base.scripts || [...effective.agents.values()].flat().some((op) => op.key === "scripts" && op.value === true) || sections.some((section) => section.entries.get("scripts") === true),
     profile: shownProfile,
     trusted,

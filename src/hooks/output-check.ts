@@ -14,6 +14,7 @@ import type { GuardContext, Logger, ToolAfterEvent, ToolResult } from "../types.
 import { guardAction, summarize, timedMap } from "./gate.ts"
 import { REDACTION_NOTE, withRedactionNote } from "./redaction.ts"
 import { createSecretChecker, maskWords, shownCause, type TextOutcome } from "./secret-check.ts"
+import type { RelaxationOf } from "../scopes.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 
 export interface OutputCheckDeps {
@@ -29,6 +30,8 @@ export interface OutputCheckDeps {
   readonly askAs: "ask" | "deny"
   readonly log: Logger
   readonly unprotected?: UnprotectedGate
+  /** What an `agents` section relaxes for a call; absent: nothing. */
+  readonly relaxation?: RelaxationOf
   readonly now?: () => number
   /** Question texts (`outputCheck.questions`); absent = the defaults. */
   readonly questions?: OutputQuestionTexts
@@ -293,6 +296,7 @@ export async function registerOutputCheck(ctx: GuardContext, deps: OutputCheckDe
       if (event.tool === CODEMODE_TOOL) codeMode.take(callKey)
       // Internal call of a CodeMode script: the model only sees the result of the outer `execute`.
       else if (codeMode.has(callKey)) return
+      if (deps.relaxation?.(event.sessionID, event.agent)?.off.has("outputCheck")) return
       // Skipped tools: their successful output only (an `edit` error quotes lines of the file).
       if (skip.has(event.tool) && event.status === "completed") return
       // Technically redacted copy first, regardless of `redactOutputs` and hook order: never a known secret sent, and

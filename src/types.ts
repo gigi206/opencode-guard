@@ -77,10 +77,17 @@ export interface PromptEvent {
   }
 }
 
+/** Provider and model of a session or a request. */
+export interface ModelRef {
+  readonly providerID: string
+  readonly id: string
+}
+
 export interface HttpRequestEvent {
   readonly kind: string
   readonly sessionID?: string
   readonly agent?: string
+  readonly model?: ModelRef
   request: Request
 }
 
@@ -88,6 +95,7 @@ export interface WsSendEvent {
   readonly kind: string
   readonly sessionID?: string
   readonly agent?: string
+  readonly model?: ModelRef
   frame: string
 }
 
@@ -118,10 +126,10 @@ export interface GuardContext {
   }
   readonly agent: {
     transform(callback: (editor: AgentEditorLike) => void): Promise<unknown>
-    get(input: { agentID: string; location?: { directory?: string } }): Promise<{ readonly data: { readonly mode: string } }>
+    get(input: { agentID: string; location?: { directory?: string } }): Promise<{ readonly data: { readonly mode: string; readonly model?: ModelRef } }>
   }
   readonly session: {
-    get(input: { sessionID: string }): Promise<{ readonly agent?: string; readonly parentID?: string }>
+    get(input: { sessionID: string }): Promise<{ readonly agent?: string; readonly parentID?: string; readonly model?: ModelRef }>
     hook(name: "prompt", callback: Hook<PromptEvent>): Promise<unknown>
     hook(name: "http.request", callback: Hook<HttpRequestEvent>): Promise<unknown>
     hook(name: "experimental.ws.send", callback: Hook<WsSendEvent>): Promise<unknown>

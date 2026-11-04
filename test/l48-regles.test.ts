@@ -202,6 +202,7 @@ describe("lot 48 step H: rules in the global guard.json", () => {
       tracking: () => false,
       refresh() {},
       rules: () => rules,
+      relaxation: () => undefined,
     }
     await registerGate(fake.ctx, { decider, redactor, rules: config.rules, scopes, log: { debug() {}, info() {}, warn() {}, error() {} } } as Parameters<typeof registerGate>[1])
     const event = { sessionID: "ses_1", agent: "build", messageID: "msg_0", id: "call_1", tool: "shell", input: { command: `echo ${MARK}` } }

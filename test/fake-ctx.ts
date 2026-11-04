@@ -17,6 +17,8 @@ export function fakeContext(options: Record<string, unknown> = {}) {
     ["build", { mode: "primary", permissions: [{ action: "*", resource: "*", effect: "allow" }, { action: "question", resource: "*", effect: "allow" }] }],
   ])
   const sessionAgents = new Map<string, string>()
+  const sessionModels = new Map<string, { providerID: string; id: string }>()
+  const sessionParents = new Map<string, string>()
   let failLookups = false
   const lookups = { session: 0, agent: 0 }
   const ctx = {
@@ -55,7 +57,8 @@ export function fakeContext(options: Record<string, unknown> = {}) {
       get: async ({ sessionID }: { sessionID: string }) => {
         lookups.session++
         if (failLookups) throw new Error("lookup failed")
-        return { agent: sessionAgents.get(sessionID) }
+        const [model, parentID] = [sessionModels.get(sessionID), sessionParents.get(sessionID)]
+        return { agent: sessionAgents.get(sessionID), ...(model ? { model } : {}), ...(parentID ? { parentID } : {}) }
       },
     },
   } as unknown as GuardContext
@@ -85,6 +88,9 @@ export function fakeContext(options: Record<string, unknown> = {}) {
     lookups,
     /** Server-side session agent (TUI: Shift+Tab then `switchAgent` before sending; or switch through the API). */
     switchAgent: (sessionID: string, agent: string) => sessionAgents.set(sessionID, agent),
+    switchModel: (sessionID: string, providerID: string, id: string) => sessionModels.set(sessionID, { providerID, id }),
+    /** Child session of `parentID` (subagent). */
+    setParent: (sessionID: string, parentID: string) => sessionParents.set(sessionID, parentID),
     failLookups: (value: boolean) => {
       failLookups = value
     },

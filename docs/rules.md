@@ -233,6 +233,8 @@ Setting it on the background service (`opencode service set env GUARD_ASK_AS den
 
 ### Unprotected agent (`unprotectedAgent`)
 
+For several agents, or to lift only the redaction of one agent and keep its rules, use an `agents` section: see [Relaxing one agent](configuration.md#settings-by-agent-and-by-project-guardjson).
+
 With `"unprotectedAgent": "build-unprotected"`, the plugin adds a primary agent of that name (same permissions as `build`, unless your configuration defines it) that you select with **Shift+Tab**. For that agent the plugin does nothing: no local rule, no decision model, no confirmation, and **no redaction** (tool outputs, prompt, requests sent to the provider). One exception: writing a redaction placeholder into a file is still refused, because a session started with another agent contains placeholders and writing one back would destroy the real secret. OpenCode's own permissions (such as `read *.env`) still apply.
 
 **Only your choice counts.** The agent is unprotected only if it was the session's agent when **you** sent your last message (the TUI switches the agent just before sending). If the session is switched during a turn by anything else, for example through the server API, it stays protected until your next message. Sub-agents launched by the model (they run a sub-agent such as `general`), a session with no message from you since the plugin was (re)loaded, an unknown agent, and an agent redefined by a project as `all` or `subagent` (which a model could launch) are always protected. In unattended mode (`askAs: "deny"`) the agent is not created at all: `opencode run --agent build-unprotected` stops with `Agent not found`.

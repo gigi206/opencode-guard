@@ -1,4 +1,4 @@
-import type { GuardContext, Logger } from "../types.ts"
+import type { GuardContext, Logger, ModelRef } from "../types.ts"
 
 // Main agent of each session, for the `agents` sections: the session agent at the user's last prompt, primary mode
 // checked, recorded by a `prompt` hook of its own (independent of `unprotectedAgent` and `askAs`). A child session
@@ -11,6 +11,10 @@ export interface SessionAgents {
   readonly main: string
   /** Agent of a child session at its last prompt. */
   readonly sub?: string
+  /** A child session (subagent), even when its own agent is unknown. */
+  readonly child?: true
+  /** Model of the root session at its last prompt: tool hooks are not told the model. */
+  readonly model?: ModelRef
 }
 
 export interface MainAgents {
@@ -23,7 +27,7 @@ const MAX_SESSIONS = 1000
 
 export async function registerMainAgents(ctx: GuardContext, log: Logger, wanted: () => boolean = () => true): Promise<MainAgents> {
   /** Session → its root session (unknown: `undefined`) and its agent at its last prompt; for a root, whether it is primary. */
-  const sessions = new Map<string, { readonly root?: string; readonly agent?: string; readonly primary: boolean }>()
+  const sessions = new Map<string, { readonly root?: string; readonly agent?: string; readonly primary: boolean; readonly model?: ModelRef }>()
 
   await ctx.session.hook("prompt", async (event) => {
     try {
@@ -31,11 +35,13 @@ export async function registerMainAgents(ctx: GuardContext, log: Logger, wanted:
       if (!wanted()) return
       const session = await ctx.session.get({ sessionID: event.sessionID })
       const agent = session?.agent
-      let record: { root?: string; agent?: string; primary: boolean }
+      let record: { root?: string; agent?: string; primary: boolean; model?: ModelRef }
       if (session?.parentID) record = { root: sessions.get(session.parentID)?.root, agent, primary: false }
       else {
-        const mode = agent === undefined ? undefined : (await ctx.agent.get({ agentID: agent, location: { directory: ctx.location.directory } }))?.data?.mode
-        record = { root: event.sessionID, agent, primary: mode === "primary" }
+        const data = agent === undefined ? undefined : (await ctx.agent.get({ agentID: agent, location: { directory: ctx.location.directory } }))?.data
+        // A session has its own model only once one was chosen for it: otherwise its agent's.
+        const model = session?.model ?? data?.model
+        record = { root: event.sessionID, agent, primary: data?.mode === "primary", ...(model ? { model } : {}) }
       }
       if (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value!)
       sessions.set(event.sessionID, record)
@@ -50,7 +56,8 @@ export async function registerMainAgents(ctx: GuardContext, log: Logger, wanted:
       const record = sessions.get(sessionID)
       const root = record?.root === sessionID ? record : record?.root === undefined ? undefined : sessions.get(record.root)
       if (!record || !root?.primary || root.agent === undefined) return undefined
-      return root === record ? { main: root.agent } : { main: root.agent, ...(record.agent === undefined ? {} : { sub: record.agent }) }
+      const model = root.model ? { model: root.model } : {}
+      return root === record ? { main: root.agent, ...model } : { main: root.agent, child: true, ...(record.agent === undefined ? {} : { sub: record.agent }), ...model }
     },
   }
 }

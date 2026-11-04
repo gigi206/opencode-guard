@@ -6,7 +6,7 @@ import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import { MINUTES, SETTINGS, SWITCHES } from "./write.ts"
 
-export const COMMANDS = ["rules", "redaction", "show", "last", "status", "test", "set", "unset", "trust", "untrust", "help", "completion"] as const
+export const COMMANDS = ["rules", "redaction", "show", "last", "status", "test", "set", "unset", "agent", "trust", "untrust", "help", "completion"] as const
 export const SHELLS = ["bash", "zsh"] as const
 
 /** Words of a shell list: only the characters of identifiers, so that nothing in them is read by the shell. */

@@ -3,7 +3,7 @@
 // warnings of the plugin's resolution). Only from the files read faithfully here; no other option of the configuration is
 // ever printed.
 import { resolve } from "node:path"
-import { parseConfig } from "../config.ts"
+import { parseConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
@@ -31,7 +31,7 @@ export function show(io: CliIo, agent: string | undefined): void {
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
   const patterns = redactionSettings(io, sources)
   const formatsOff = (version.redactionOff ?? []).map((type) => ({ key: `redactionOff.${type}`, value: "off", origin: "global guard.json" }))
-  const rows = version.settings?.(agent) ?? []
+  const rows = [...(version.settings?.(agent) ?? []), ...relaxationRows(version, agent)]
   // Exceptions apart: a path would widen every column of the settings.
   const settings = [...rows.filter((row) => !row.key.startsWith(EXCEPTIONS)), ...patterns.rows, ...formatsOff]
   const exceptions = rows.filter((row) => row.key.startsWith(EXCEPTIONS)).map((row) => ({ rule: row.key.slice(EXCEPTIONS.length), path: String(row.value), origin: row.origin }))
@@ -162,11 +162,25 @@ const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "d
 const RELAXES = "relaxes"
 const EXCEPTIONS = "exceptions."
 
+/** What the global sources relax by agent (all of them, or the main agent given), and for which models. */
+function relaxationRows(version: Version, agent: string | undefined) {
+  return [...(version.relaxations ?? [])].flatMap(([name, relaxed]) => {
+    if (agent !== undefined && agent !== name) return []
+    const row = (key: string, value: string) => ({ key: `agents.${name}.${key}`, value, origin: relaxed.origins.get(key) ?? "default" })
+    return [
+      ...(relaxed.guardOff ? [row("guard", "off")] : []),
+      ...[...relaxed.off].map((key) => row(key, "false")),
+      row("models", relaxed.models ? relaxed.models.join(", ") || "none" : "any model"),
+    ]
+  })
+}
+
 /**
  * Does the setting relax a protection: a protective switch off, self-protection or local confirmations left to the
  * decision model, a rule turned off or left to the model, a redaction format turned off, confirmations remembered?
  */
 function relaxes(key: string, value: string): boolean {
+  if (key.startsWith("agents.")) return value === "off" || value === "false"
   if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
   if (key.startsWith("redactionOff.")) return value === "off"
   if (PROTECTIVE.has(key)) return value === "false"

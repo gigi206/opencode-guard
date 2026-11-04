@@ -15,7 +15,7 @@ import { registerClaudeAgentWarning } from "./hooks/claude-agent.ts"
 import { createUserShellCheck, registerOutputCheck, type UserShellCheck } from "./hooks/output-check.ts"
 import { createPromptGate, type PromptGate } from "./hooks/prompt-check.ts"
 import { registerRedaction } from "./hooks/redaction.ts"
-import { PROTECTED, registerUnprotected, type UnprotectedGate } from "./hooks/unprotected.ts"
+import { PROTECTED, registerUnprotected, withAgentSections, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
 import { isRegularFile } from "./real-path.ts"
 import { declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, type OutputCheckState } from "./output-check.ts"
@@ -265,6 +265,8 @@ export async function setupGuard(
   })
   sectioned = () => scopes.sectioned()
   refreshFormats = () => scopes.refresh()
+  const relaxation = scopes.relaxation
+  unprotected = withAgentSections(unprotected, relaxation)
   try {
     await registerGate(ctx, {
       decider,
@@ -330,6 +332,7 @@ export async function setupGuard(
       redactWire: config.features.redactWire,
       log,
       unprotected,
+      relaxation,
       ...(promptGate ? { promptCheck: promptGate } : {}),
     })
   } catch (error) {
@@ -364,6 +367,7 @@ export async function setupGuard(
           askAs: config.askAs,
           log,
           unprotected,
+          relaxation,
         })
         userShell.check = createUserShellCheck({
           model: createModelClient({ ...config.decision, timeoutMs: config.outputCheck.timeoutMs }),

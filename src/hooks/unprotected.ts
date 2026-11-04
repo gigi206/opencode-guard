@@ -1,3 +1,4 @@
+import type { RelaxationOf, RelaxRequest } from "../scopes.ts"
 import type { GuardContext, Logger } from "../types.ts"
 
 // Unprotected agent (`unprotectedAgent` option): no rules, no decision model, no redaction, except the
@@ -13,7 +14,7 @@ export interface UnprotectedDeps {
 
 export interface UnprotectedGate {
   /** True only for the unprotected agent, if it was the session agent at the last prompt. */
-  isUnprotected(sessionID: string | undefined, agent: string | undefined): Promise<boolean>
+  isUnprotected(sessionID: string | undefined, agent: string | undefined, request?: RelaxRequest): Promise<boolean>
   /** Session agent at the time of this prompt (recorded); shared between `prompt` hooks. */
   notePrompt(sessionID: string, messageID: string | undefined): Promise<boolean>
 }
@@ -108,4 +109,16 @@ export async function registerUnprotected(ctx: GuardContext, deps: UnprotectedDe
   })
   deps.log.info(`unprotected agent: "${id}" — no checks and no secret redaction once selected by the user (ignored in unattended mode)`)
   return gate
+}
+
+/** `unprotectedAgent`, or an `agents` section with `"guard": "off"` for this very request. */
+export function withAgentSections(gate: UnprotectedGate, relaxation: RelaxationOf): UnprotectedGate {
+  return {
+    async isUnprotected(sessionID, agent, request) {
+      return (await gate.isUnprotected(sessionID, agent)) || relaxation(sessionID, agent, request)?.guardOff === true
+    },
+    async notePrompt(sessionID, messageID) {
+      return (await gate.notePrompt(sessionID, messageID)) || relaxation(sessionID, undefined)?.guardOff === true
+    },
+  }
 }

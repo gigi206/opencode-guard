@@ -6,6 +6,7 @@ import { CODEMODE_TOOL } from "../rules/tools.ts"
 import { timedMap } from "./gate.ts"
 import { USER_SHELL_BLOCKED_MESSAGE, USER_SHELL_OPENINGS, UserShellUncheckedError, type UserShellCheck } from "./output-check.ts"
 import type { PromptGate } from "./prompt-check.ts"
+import type { RelaxationOf } from "../scopes.ts"
 import type { UnprotectedGate } from "./unprotected.ts"
 import type { GuardContext, Logger } from "../types.ts"
 
@@ -18,6 +19,8 @@ export interface RedactionDeps {
   readonly log: Logger
   /** Unprotected agent: no redaction for it; absent = everything is redacted. */
   readonly unprotected?: UnprotectedGate
+  /** What an `agents` section relaxes for a call; absent: nothing. */
+  readonly relaxation?: RelaxationOf
   /** Check of the typed prompt by the decision model (`promptCheck` option, active); absent = technical redaction only. */
   readonly promptCheck?: PromptGate
   /** Check of the `!` command outputs on the wire (set once the output check is active); absent or empty = none. */
@@ -180,6 +183,7 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
         const script = event.tool === CODEMODE_TOOL
         const innerRedacted = script && codeMode.take(key) === true
         if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) return
+        if (deps.relaxation?.(event.sessionID, event.agent)?.off.has("redactOutputs")) return
         if (event.status === "completed") {
           const result = redactor.redactDeep(event.result)
           if (result.count && !script && codeMode.has(key)) codeMode.add(key, true)
@@ -216,15 +220,20 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
       let block: Error | undefined
       try {
         if (await deps.unprotected?.notePrompt(event.sessionID, event.messageID)) return
-        const result = deps.redactPrompt ? redactor.redactString(event.prompt.text) : { value: event.prompt.text, count: 0 }
+        const relaxed = deps.relaxation?.(event.sessionID, undefined)?.off
+        const result = deps.redactPrompt && !relaxed?.has("redactPrompt") ? redactor.redactString(event.prompt.text) : { value: event.prompt.text, count: 0 }
         let text = result.value
         let count = result.count
         if (count) event.prompt.text = text
-        if (deps.promptCheck) {
-          // Words in plain language (`mon mot de passe est soleil42`), any language: the decision model.
-          const checked = await deps.promptCheck.check(event, text)
-          text = checked.text
-          count += checked.count
+        if (deps.promptCheck && !relaxed?.has("promptCheck")) {
+          // Words in plain language (`mon mot de passe est soleil42`), any language: the decision model. It never sees
+          // a known secret, even when the agent's own model may: then it only decides whether the prompt leaves.
+          const clear = relaxed?.has("redactPrompt")
+          const checked = await deps.promptCheck.check(event, clear ? redactor.redactString(text).value : text)
+          if (!clear) {
+            text = checked.text
+            count += checked.count
+          }
           block = checked.block
         }
         if (!count) return
@@ -258,9 +267,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
    * `!` command texts of a technically redacted body checked by the decision model; `undefined` when nothing changes. A
    * model failure blocks the request (`UserShellUncheckedError`), the user's choice: nothing unchecked leaves.
    */
-  const userShell = async (value: unknown, hook: string): Promise<{ value: unknown; count: number } | undefined> => {
+  const userShell = async (value: unknown, hook: string, relaxed?: ReadonlySet<string>): Promise<{ value: unknown; count: number } | undefined> => {
     const check = deps.userShell?.check
-    if (!check) return undefined
+    if (!check || relaxed?.has("outputCheck")) return undefined
     const texts = userShellTexts(value)
     if (!texts.length) return undefined
     let result: Awaited<ReturnType<UserShellCheck>>
@@ -291,7 +300,10 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
   // Final safety net: everything that leaves toward the provider over HTTP.
   await ctx.session.hook("http.request", async (event) => {
     try {
-      if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) return
+      const call = { model: event.model, kind: event.kind }
+      if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent, call)) return
+      const relaxed = deps.relaxation?.(event.sessionID, event.agent, call)?.off
+      if (relaxed?.has("redactWire")) return
       const request = event.request
       if (!request.body) return
       const type = request.headers.get("content-type") ?? ""
@@ -312,7 +324,7 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
         return
       }
       const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
-      const checked = await userShell(redacted.value, "http.request")
+      const checked = await userShell(redacted.value, "http.request", relaxed)
       const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
       if (!result.count) return
       const headers = new Headers(request.headers)
@@ -329,7 +341,10 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
   try {
     await ctx.session.hook("experimental.ws.send", async (event) => {
       try {
-        if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent)) return
+        const call = { model: event.model, kind: event.kind }
+        if (await deps.unprotected?.isUnprotected(event.sessionID, event.agent, call)) return
+        const relaxed = deps.relaxation?.(event.sessionID, event.agent, call)?.off
+        if (relaxed?.has("redactWire")) return
         let json: unknown
         try {
           json = JSON.parse(event.frame)
@@ -338,7 +353,7 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
           return
         }
         const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
-        const checked = await userShell(redacted.value, "experimental.ws.send")
+        const checked = await userShell(redacted.value, "experimental.ws.send", relaxed)
         const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
         if (!result.count) return
         event.frame = JSON.stringify(result.value)

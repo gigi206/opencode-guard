@@ -8,7 +8,7 @@
 import { randomBytes } from "node:crypto"
 import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
-import { GUARD_RULES, parseConfig, REDACTION_OFF, ruleIdOf, rulesOption, type GuardFile, type Version } from "../config.ts"
+import { GUARD_RULES, parseConfig, RELAX_SWITCHES, REDACTION_OFF, ruleIdOf, rulesOption, type GuardFile, type Version } from "../config.ts"
 import { GUARD_FILE, guardIdentity, guardPaths, MAX_GUARD_FILE_BYTES, readGuardFiles } from "../guard-file.ts"
 import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { hasParentComponent } from "../rules/sensitive-paths.ts"
@@ -452,6 +452,37 @@ export function unsetSwitch(io: CliIo, key: string, target: Target): void {
   }
   const now = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).settings?.(target.agent).find((item) => item.key === key)
   if (now) io.out(`${key} is now ${JSON.stringify(now.value)} there, set by ${now.origin}`)
+}
+
+/** Keys of an agent's relaxation that `guard agent` writes in `agents.<id>` of the global guard.json. */
+export const AGENT_KEYS = [...RELAX_SWITCHES]
+const AGENT_ALL = ["guard", ...RELAX_SWITCHES, "models"]
+
+/** `guard agent …`: the keys given set, or removed when `undefined`, refused when the plugin would set them aside. */
+export function writeAgent(io: CliIo, agent: string, changes: Readonly<Record<string, unknown>>): void {
+  const sources = readSources(io)
+  const guard = globalGuard(sources)
+  const data = structuredClone(guard.data)
+  const target: Target = { agent }
+  const section = sectionOf(data, target, true)!
+  for (const [key, value] of Object.entries(changes))
+    if (value === undefined) delete section[key]
+    else section[key] = value
+  const refused = Object.keys(changes).flatMap((key) => refusedFor(io, sources, guard, data, target, key))
+  if (refused.length) throw new CliError(`refused, nothing written: ${[...new Set(refused)].join("; ")}`)
+  prune(data, target, "")
+  write(guard, data)
+  const relaxed = resolution(io, sources, undefined, [{ label: "global guard.json", global: true, data }]).relaxations?.get(agent)
+  io.out(`agent ${agent}: ${relaxed ? (relaxed.guardOff ? "guard off" : [...relaxed.off].map((key) => `${key} off`).join(", ")) : "fully protected"}${relaxed ? ` on ${relaxed.models?.join(", ") || "any model"}` : ""}, in ${guard.path}`)
+}
+
+/** `guard agent on`: every relaxation of the agent removed; its policy settings stay. */
+export const agentOn = (io: CliIo, agent: string) => writeAgent(io, agent, Object.fromEntries(AGENT_ALL.map((key) => [key, undefined])))
+
+export function agentSwitch(io: CliIo, agent: string, key: string, raw: string): void {
+  const word = raw.trim().toLowerCase()
+  if (word !== "true" && word !== "false" && word !== "on" && word !== "off") throw new CliError(`invalid value for ${key}: true or false expected (or on, off)`)
+  writeAgent(io, agent, { [key]: word === "true" || word === "on" })
 }
 
 /** A rule `guard rules add` writes: the fields of an entry of `rules`, as given. */

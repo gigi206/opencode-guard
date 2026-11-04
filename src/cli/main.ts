@@ -16,7 +16,7 @@ import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
-import { addRule, directoryOf, exceptPath, MINUTES, removeRule, resetPath, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
+import { addRule, AGENT_KEYS, agentOn, agentSwitch, directoryOf, exceptPath, MINUTES, removeRule, resetPath, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, writeAgent, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
 
 export { USAGE } from "./help.ts"
 
@@ -153,6 +153,46 @@ function testRequest(args: readonly string[]): TestRequest {
   return { tool: "shell", input: { command: rest.join(" ") }, model, ...(agent ? { agent } : {}) }
 }
 
+/** `guard agent off|on|set|unset|models`: what `agents.<id>` of the global guard.json relaxes. */
+function agentCommand(args: readonly string[], io: CliIo): void {
+  const [word, agent, ...rest] = args
+  if (!word || !["off", "on", "set", "unset", "models"].includes(word)) throw new UsageError("agent needs off, on, set, unset or models")
+  if (!agent || agent.startsWith("-")) throw new UsageError("an agent name is required")
+  const switchKey = (key: string | undefined) => {
+    if (!key || !AGENT_KEYS.includes(key as (typeof AGENT_KEYS)[number])) throw new UsageError(`a key is required: one of ${AGENT_KEYS.join(", ")}`)
+    return key
+  }
+  switch (word) {
+    case "on":
+      if (rest.length) throw new UsageError(`unexpected argument ${rest[0]}`)
+      return agentOn(io, agent)
+    case "off": {
+      const models: string[] = []
+      for (let index = 0; index < rest.length; index++) {
+        const [name, inline] = rest[index]!.startsWith("--model=") ? ["--model", rest[index]!.slice(8)] : [rest[index]!, undefined]
+        if (name !== "--model") throw new UsageError(`unexpected argument ${name}`)
+        const model = inline ?? rest[++index]
+        if (!model || model.startsWith("-")) throw new UsageError("--model needs a provider/model")
+        models.push(model)
+      }
+      return writeAgent(io, agent, { guard: "off", ...(models.length ? { models } : {}) })
+    }
+    case "set": {
+      const key = switchKey(rest[0])
+      if (rest.length !== 2) throw new UsageError("set needs a key and true or false")
+      return agentSwitch(io, agent, key, rest[1]!)
+    }
+    case "unset": {
+      if (rest[0] === "models") return writeAgent(io, agent, { models: undefined })
+      if (rest[0] === "guard") return writeAgent(io, agent, { guard: undefined })
+      return writeAgent(io, agent, { [switchKey(rest[0])]: undefined })
+    }
+    default:
+      if (!rest.length) throw new UsageError("models needs at least one provider/model")
+      return writeAgent(io, agent, { models: rest })
+  }
+}
+
 function run(command: string, args: readonly string[], io: CliIo): void | Promise<void> {
   if ((SETTINGS as readonly string[]).includes(command) || command === "reset" || command === "allow")
     throw new UsageError(`unknown command ${command} (a rule's setting: guard rules ${command === "allow" ? "off" : command} <rule>)`)
@@ -227,6 +267,8 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       }
       return command === "set" ? setSwitch(io, key, parsed.positionals[1]!, target) : unsetSwitch(io, key, target)
     }
+    case "agent":
+      return agentCommand(args, io)
     case "completion": {
       const [shell, extra] = args
       if (!shell || !(SHELLS as readonly string[]).includes(shell)) throw new UsageError(`completion needs a shell: ${SHELLS.join(" or ")}`)
