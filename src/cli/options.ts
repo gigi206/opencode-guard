@@ -8,7 +8,7 @@ import { resolve } from "node:path"
 import { DEFAULT_DECISION, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_TUNING, parseConfig, resolveVersion, type GuardConfig } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { isRegularFile } from "../real-path.ts"
-import { CliError, readSources, realOrUndefined, type CliIo, type Pretty } from "./context.ts"
+import { CliError, readSources, realOrUndefined, serverEnv, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import { configurationFile } from "./show.ts"
 import type { Style } from "./style.ts"
@@ -37,7 +37,7 @@ const count = (noun: string) => (value: unknown) => {
   const size = Array.isArray(value) ? value.length : value instanceof Map ? value.size : value !== null && typeof value === "object" ? Object.keys(value).length : 0
   return size ? `${size} ${noun}${size === 1 ? "" : "s"}` : "none"
 }
-const isSet = (value: unknown) => (value === undefined ? "not set" : "set")
+const isSet = (value: unknown) => (value === undefined || value === "" ? "not set" : "set")
 const customized = (value: unknown) => (value ? "custom" : "default")
 const feature = (name: keyof GuardConfig["features"], what: string, policy: boolean): OptionEntry => ({
   name,
@@ -87,7 +87,6 @@ export const OPTIONS: readonly OptionEntry[] = [
   { name: "decision.apiKey", type: "string", what: "Key sent as a Bearer header, normally a reference such as {env:NAME}. Never printed.", where: PLUGIN, read: (config) => config.decision?.apiKey, shown: isSet },
   { name: "decision.timeoutMs", type: "integer", range: [100, 60_000], what: "Timeout per call, in ms. A call that times out is retried once.", where: PLUGIN, read: (config) => config.decision?.timeoutMs },
   { name: "decision.headers", type: "object", what: "Extra HTTP headers. Values are never printed.", where: PLUGIN, read: (config) => config.decision?.headers, shown: count("header") },
-  { name: "jev", type: "object", what: "Former name of decision, same settings. If both are set, decision is used.", where: PLUGIN, read: () => undefined, shown: isSet },
   threshold("denyNoul", 1, "Deny when a probability reaches this."),
   threshold("askNoul", 1, "Ask when a probability reaches this."),
   threshold("askExfiltration", 1, "Ask when the exfiltration probability reaches this; never below askNoul."),
@@ -162,7 +161,9 @@ const at = (options: Readonly<Record<string, unknown>>, name: string): unknown =
 const fileOf = (origin: string) => origin.replace(/^(global|system) configuration/, "$1 opencode.json")
 
 /** Every row, from the same reading as the plugin; `{env:…}` references are looked up in the raw configuration file. */
-export function optionRows(io: CliIo, agent: string | undefined) {
+export function optionRows(terminal: CliIo, agent: string | undefined) {
+  // The server's environment, like `guard test`: a key known only to the service must not turn the decision model off here.
+  const io = { ...terminal, env: serverEnv(terminal.env, readSources(terminal).globalDir) }
   const sources = readSources(io)
   const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
   const files = readGuardFiles(guardPaths(directory, sources.globalDir, io.systemDir))
@@ -192,8 +193,8 @@ export function optionRows(io: CliIo, agent: string | undefined) {
     const leaf = entry.name.split(".").pop()!
     // Without a decision model, its defaults are not in the configuration read.
     const standard = row ? defaultPolicy.get(entry.name)?.value : (entry.read(defaults) ?? (entry.name.startsWith("decision.") ? (DEFAULT_DECISION as Record<string, unknown>)[leaf] : undefined))
-    const origin = row ? fileOf(row.origin) : written === undefined ? "default" : (sources.origin ? "system opencode.json" : "global opencode.json")
-    const rejected = !row && !entry.shown && written !== undefined && typeof written !== "object" && printed(written) !== printed(held)
+    const origin = row ? fileOf(row.origin) : written === undefined ? "default" : `${sources.origin ? "system" : "global"} opencode.json`
+    const rejected = !row && !entry.shown && written !== undefined && typeof written !== "object" && written !== "" && printed(written) !== printed(held)
     const same = printed(held) === printed(standard)
     const reference = new RegExp(`"${leaf}"\\s*:\\s*"(\\{env:[^}"]+\\})"`).exec(raw)?.[1]
     rows.push({

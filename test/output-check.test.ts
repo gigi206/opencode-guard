@@ -68,10 +68,10 @@ describe("batch 32: declaration in the global file (option effective only if pre
     writeFileSync(join(dir, name), text)
     return dir
   }
-  it("declared with the same address → active (trailing slash, JSONC, old jev name)", () => {
+  it("declared with the same address → active (trailing slash, JSONC)", () => {
     assert.deepEqual(check(withGlobal(entry({ outputCheck: true, decision: { baseURL: URL_A } }))), { active: true })
     assert.deepEqual(check(withGlobal(entry({ outputCheck: { threshold: 0.9 }, decision: { baseURL: `${URL_A}/` } }))), { active: true })
-    const jsonc = `// commentaire\n{ "plugins": [ { "package": "${PLUGIN}", /* c */ "options": { "outputCheck": "true", "jev": { "baseURL": "${URL_A}" }, }, }, ], }`
+    const jsonc = `// commentaire\n{ "plugins": [ { "package": "${PLUGIN}", /* c */ "options": { "outputCheck": "true", "decision": { "baseURL": "${URL_A}" }, }, }, ], }`
     assert.deepEqual(check(withGlobal(jsonc, "opencode.jsonc")), { active: true })
   })
   it("{env:…} resolved with the server environment; missing address variable → inactive; missing switch → on", () => {

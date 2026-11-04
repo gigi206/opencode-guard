@@ -378,15 +378,6 @@ describe("decision model key from settings", () => {
     assert.ok(!JSON.stringify(event.result).includes(KEY))
     assert.match(JSON.stringify(event.result), /GUARD_REDACTED:config:decision\.apiKey/)
   })
-  it("lot 17: key and header given under the former name `jev` redacted the same way", async () => {
-    const HEADER = "hdr-0123456789abcdefXYZ"
-    const { trigger } = await setup({ jev: { baseURL: "http://127.0.0.1:9/v1", model: "nox-4b", apiKey: KEY, headers: { "x-api-key": HEADER } } })
-    const event = await trigger("tool.execute.after", { ...before("shell", {}), status: "completed", result: { content: `config: ${KEY} ${HEADER}` } })
-    const result = JSON.stringify(event.result)
-    assert.ok(!result.includes(KEY) && !result.includes(HEADER))
-    assert.match(result, /GUARD_REDACTED:config:decision\.apiKey/)
-    assert.match(result, /GUARD_REDACTED:config:decision\.headers\.x-api-key/)
-  })
   it("lot 18: settings placed under `decisionModel` → neither key nor address in the log", async () => {
     const { mkdtempSync, readFileSync } = await import("node:fs")
     const { tmpdir } = await import("node:os")

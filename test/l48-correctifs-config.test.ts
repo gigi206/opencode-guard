@@ -142,9 +142,8 @@ describe("lot 48 step F2: the decision model allows an ask only with the global 
     assert.equal((await decide({ decision: DECISION }, { decision: DECISION }, "execute", FETCH)).verdict, "allow")
     const relaxed = { localAsks: "model", decision: DECISION }
     assert.equal((await shell(relaxed, relaxed, "git reset --hard")).verdict, "allow")
-    // Same address written differently, former name `jev` in the global file.
+    // Same address written differently in the global file.
     assert.equal((await shell({ decision: DECISION }, { decision: { ...DECISION, baseURL: "https://DECISION.local/v1/" } }, HEREDOC)).verdict, "allow")
-    assert.equal((await shell({ decision: DECISION }, { jev: DECISION }, HEREDOC)).verdict, "allow")
     // A model replaced by the project still denies, and judges the calls no rule matches.
     assert.equal((await shell({ decision: ELSEWHERE }, { decision: DECISION }, HEREDOC, DENY)).verdict, "deny")
     assert.equal((await shell({ decision: ELSEWHERE }, { decision: DECISION }, "ls -la", ALLOW)).verdict, "allow")

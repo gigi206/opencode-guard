@@ -339,34 +339,10 @@ describe("configuration (everything comes from settings, {env:…} substituted b
     assert.equal(config.maxStateChars, 4000)
     assert.deepEqual(warnings, [])
   })
-  it("lot 17: `jev` (former name) alone → same configuration as `decision`, without warning", () => {
-    const settings = { baseURL: "https://ai-gateway.example.com/v1", protocol: "chat", model: "nox-4b", apiKey: "k-123456789", timeoutMs: "3000", headers: { "x-team": "a" } }
-    const current = parseConfig({ decision: settings })
-    const former = parseConfig({ jev: settings })
-    assert.equal(current.config.decision?.model, "nox-4b")
-    assert.deepEqual(former.config, current.config)
-    assert.deepEqual([former.warnings, current.warnings], [[], []])
-  })
-  it("lot 17: `decision` and `jev` → `decision` kept, `jev` ignored with a warning", () => {
-    const settings = { baseURL: "https://ai-gateway.example.com/v1", model: "nox-4b" }
-    const { config, warnings } = parseConfig({ decision: settings, jev: { ...settings, model: "jev-latest" } })
-    assert.equal(config.decision?.model, "nox-4b")
-    assert.deepEqual(warnings, ["jev (former name of decision) ignored: decision is set"])
-  })
-  it("lot 17: invalid `decision` and valid `jev` → model disabled, never fall back to `jev`", () => {
-    const settings = { baseURL: "https://ai-gateway.example.com/v1", model: "nox-4b" }
-    const { config, warnings } = parseConfig({ decision: { ...settings, baseURL: "" }, jev: settings })
+  it("`jev` is an unknown option: no decision model comes from it", () => {
+    const { config, warnings } = parseConfig({ jev: { baseURL: "https://ai-gateway.example.com/v1", model: "nox-4b" } })
     assert.equal(config.decision, undefined)
-    assert.match(warnings.join("\n"), /decision\.baseURL is empty or missing/)
-    assert.match(warnings.join("\n"), /jev \(former name of decision\) ignored/)
-  })
-  it("lot 17: warnings phrased with the name used (`jev.…`)", () => {
-    const { config, warnings } = parseConfig({ jev: { baseURL: "https://x.local/v1", model: "m", apiKey: "", modle: 1 } })
-    assert.equal(config.decision, undefined)
-    assert.match(warnings.join("\n"), /unknown option jev\.modle/)
-    assert.match(warnings.join("\n"), /jev\.apiKey is empty/)
-    assert.ok(!warnings.join("\n").includes("decision."))
-    assert.match(parseConfig({ jev: "x" }).warnings.join(), /invalid value for jev \(object expected\)/)
+    assert.deepEqual(warnings, ["unknown option jev, ignored"])
   })
   it("lot 18: model settings under `decisionModel` → dedicated message, model not configured, content never quoted", () => {
     const KEY = "sk-gw-must-not-leak-0123456789"
@@ -401,7 +377,6 @@ describe("configuration (everything comes from settings, {env:…} substituted b
     const { config, warnings } = parseConfig({ decision: false })
     assert.equal(config.decision, undefined)
     assert.deepEqual(warnings, ['invalid value for decision (object expected): decision model disabled; to turn the model off, use "decisionModel": false'])
-    assert.doesNotMatch(parseConfig({ jev: "x" }).warnings.join(), /decisionModel/)
   })
   it("invalid or out-of-range text value → default with warning", () => {
     const { config, warnings } = parseConfig({ thresholds: { denyNoul: "beaucoup", askNoul: "1.5" } })
@@ -924,7 +899,6 @@ describe("lot 27: model client with a real local server, configuration", () => {
     }
     // Warning only: the model stays active.
     assert.ok(parseConfig({ decision: { baseURL: "http://10.0.0.5/v1", model: "m" } }).config.decision)
-    assert.match(parseConfig({ jev: { baseURL: "http://10.0.0.5/v1", model: "m" } }).warnings.join(), /^jev\.baseURL uses plain HTTP/)
   })
 
   it("askAs: any case accepted, without warning", () => {

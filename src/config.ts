@@ -40,7 +40,7 @@ export interface PluginDeclaration {
 }
 
 export interface GuardConfig {
-  /** Decision model (`decision` option, or `jev`, its former name); `undefined` = disabled (local rules only). */
+  /** Decision model (`decision` option); `undefined` = disabled (local rules only). */
   readonly decision?: ModelConfig
   readonly thresholds: Thresholds
   readonly features: Features
@@ -278,9 +278,9 @@ export function normalizedURL(raw: unknown): string | undefined {
   }
 }
 
-/** `decision` of a plugin entry re-read from a global source; `jev` (former name) only without `decision`, as in the effective configuration. */
+/** `decision` of a plugin entry re-read from a global source. */
 export function declaredDecision(options: Readonly<Record<string, unknown>>): Record<string, unknown> | undefined {
-  return isRecord(options.decision) ? options.decision : isRecord(options.jev) && options.decision === undefined ? options.jev : undefined
+  return isRecord(options.decision) ? options.decision : undefined
 }
 
 /** What the decision model's verdict depends on: who answers and when (`decision`), what it sees, how its answers are read. */
@@ -390,15 +390,7 @@ export const DEFAULT_DECISION = {
   timeoutMs: 5000,
 } as const
 
-/** `jev`: former name of `decision`, still accepted; `decision` wins, even when invalid (never a silent fallback). */
-function decisionOption(options: Options, warnings: string[]): ModelConfig | undefined {
-  if (options.decision === undefined) return parseDecision(options.jev, "jev", warnings)
-  if (options.jev !== undefined) warnings.push("jev (former name of decision) ignored: decision is set")
-  return parseDecision(options.decision, "decision", warnings)
-}
-
-/** `name`: option name in opencode.json, repeated in warnings so the setting can be found. */
-function parseDecision(value: unknown, name: "decision" | "jev", warnings: string[]): ModelConfig | undefined {
+function parseDecision(value: unknown, name: "decision", warnings: string[]): ModelConfig | undefined {
   if (value === undefined) return undefined
   if (!isRecord(value)) {
     // Boolean: probably the `decisionModel` switch confused with the settings.
@@ -540,7 +532,6 @@ function allowlistOption(value: unknown, warnings: string[]): string[] {
 export const OPTION_KEYS = [
   "askAs",
   "decision",
-  "jev",
   "thresholds",
   "redactPrompt",
   "dangerousCommands",
@@ -1058,7 +1049,7 @@ export function parseConfig(
   // `agents`, `projects` or `trustedProjects` exists, the layered resolution replaces the checks below, whose warnings
   // are then dropped.
   // The decision model allows an ask only with the global sources' address and model (user's decision): read here.
-  const decision = decisionOption(options, warnings)
+  const decision = parseDecision(options.decision, "decision", warnings)
   const maxStateChars = maxStateCharsOption(options.maxStateChars, warnings)
   // Built-in formats turned off: a relaxation (rules, wire, the model's view), counted only when the global or system
   // configuration turns them off too.

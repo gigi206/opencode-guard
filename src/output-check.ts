@@ -156,7 +156,7 @@ export function declaredOutputCheck(input: {
     }
     const options = file.options
     // Values read from another file: never followed (the plugin reads no referenced file).
-    if (JSON.stringify([options[option], options.decision, options.jev]).includes("{file:")) {
+    if (JSON.stringify([options[option], options.decision]).includes("{file:")) {
       reasons.push(`${label} configuration: it uses a {file:…} reference`)
       continue
     }

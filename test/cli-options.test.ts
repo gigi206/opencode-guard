@@ -15,12 +15,13 @@ const PLUGIN_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)))
 const KEY = "KEY-MARKER-opencode-guard"
 const BASE = { baseURL: "https://decision.example.invalid/v1", model: "m" }
 
-function world(options: Record<string, unknown>, raw?: string, env: Record<string, string> = {}, guard?: Record<string, unknown>) {
+function world(options: Record<string, unknown>, raw?: string, env: Record<string, string> = {}, guard?: Record<string, unknown>, service?: Record<string, unknown>) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-options-")))
   const [globalDir, systemDir, home, project] = [join(root, "global"), join(root, "system"), join(root, "home"), join(root, "project")]
   for (const dir of [globalDir, systemDir, home, project]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(globalDir, "opencode.json"), raw ?? JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options }] }))
   if (guard) writeFileSync(join(globalDir, "guard.json"), JSON.stringify(guard))
+  if (service) writeFileSync(join(globalDir, "service.json"), JSON.stringify(service))
   return (args: string[], terminal?: { width: number; color: boolean }) => {
     const [out, err]: string[][] = [[], []]
     const code = main(args, { env: { HOME: home, OPENCODE_CONFIG_DIR: globalDir, ...env }, cwd: project, systemDir, out: (line) => out.push(line), err: (line) => err.push(line), ...(terminal ? { terminal } : {}) })
@@ -138,6 +139,18 @@ describe("guard options: explanation", () => {
     const text = world({}, raw, { FAKE_ASK: "deny" })(["options", "--explain", "askAs"]).out.join("\n")
     assert.match(text, /In force: deny/)
     assert.match(text, /Reference: \{env:FAKE_ASK\}.*the server's may differ/)
+  })
+  it("a key known only to the service keeps the decision model on, as for the plugin; an empty reference is not refused", () => {
+    const raw = JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { askAs: "{env:FAKE_EMPTY}", decision: { ...BASE, apiKey: "{env:FAKE_SERVICE_KEY}" } } }] })
+    const run = world({}, raw, {}, undefined, { env: { FAKE_SERVICE_KEY: KEY } })
+    const { out } = run(["options"])
+    assert.equal(row(out, "decision.model")![2], "m")
+    assert.equal(row(out, "decision.apiKey")![2], "set")
+    assert.equal(row(out, "decision.protocol")![5], "default")
+    assert.notEqual(row(out, "askAs")![5], "ignored")
+    assert.ok(!out.join("\n").includes(KEY))
+    const unset = world({}, raw)(["options"]).out
+    assert.equal(row(unset, "decision.apiKey")![2], "not set")
   })
   it("all explains every option; an unknown one is an error", () => {
     const run = world({})
