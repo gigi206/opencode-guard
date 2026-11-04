@@ -15,13 +15,18 @@ const NOT_READ =
   "Not read: the plugin options OpenCode merges from a project's opencode.json (.opencode included) or from OPENCODE_CONFIG_CONTENT; where they are set, the plugin may run with other settings (its log shows them at startup)."
 
 /** The configuration file of a directory: the one that exists, in the order the plugin reads them, else the usual name. */
-function configurationFile(directory: string | undefined): string {
+export function configurationFile(directory: string | undefined): string {
   if (directory === undefined) return "opencode.json"
   const [file, ...others] = ["opencode.json", "opencode.jsonc"].map((name) => join(directory, name))
   return [file!, ...others].find((path) => existsSync(path)) ?? file!
 }
 
 export function show(io: CliIo, agent: string | undefined, offline = false): void {
+  showSettings(io, agent, offline)
+  io.out("All the options, with their defaults: guard options")
+}
+
+function showSettings(io: CliIo, agent: string | undefined, offline: boolean): void {
   const sources = readSources(io)
   const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
   const paths = guardPaths(directory, sources.globalDir, io.systemDir)

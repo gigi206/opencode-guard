@@ -12,6 +12,7 @@ import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
 import { completionScript, SHELLS } from "./completion.ts"
+import { explainOption, options } from "./options.ts"
 import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
@@ -279,6 +280,11 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
     case "status": {
       if (args.some((arg) => arg !== "--offline")) throw new UsageError(`unexpected argument ${args.find((arg) => arg !== "--offline")}`)
       return status(io, { offline: args.includes("--offline") })
+    }
+    case "options": {
+      const parsed = parse(args, ["agent", "explain"])
+      expect(parsed, 0, 0, "")
+      return parsed.explain === undefined ? options(io, parsed.agent) : explainOption(io, parsed.explain, parsed.agent)
     }
     case "show": {
       const parsed = parse(args.filter((arg) => arg !== "--offline"), ["agent"])

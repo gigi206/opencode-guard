@@ -537,7 +537,7 @@ function allowlistOption(value: unknown, warnings: string[]): string[] {
   return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)
 }
 
-const OPTION_KEYS = [
+export const OPTION_KEYS = [
   "askAs",
   "decision",
   "jev",
@@ -571,8 +571,8 @@ const OPTION_KEYS = [
   "exceptions",
   "rememberConfirmations",
 ]
-const DECISION_KEYS = ["baseURL", "protocol", "model", "apiKey", "timeoutMs", "headers"]
-const THRESHOLD_KEYS = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk", "minConfidence"]
+export const DECISION_KEYS = ["baseURL", "protocol", "model", "apiKey", "timeoutMs", "headers"]
+export const THRESHOLD_KEYS = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk", "minConfidence"]
 
 /** A misspelled option would otherwise be silently ignored. */
 function warnUnknown(value: Record<string, unknown>, known: readonly string[], prefix: string, warnings: string[]) {
@@ -685,7 +685,7 @@ const customized = (settings: object, defaults: object) => {
   return JSON.stringify(strip(settings as Record<string, unknown>)) !== JSON.stringify(strip(defaults as Record<string, unknown>))
 }
 
-const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs", "skip", "questions", ...Object.keys(DEFAULT_OUTPUT_CHECK.tuning)]
+export const OUTPUT_CHECK_KEYS = ["enabled", "threshold", "timeoutMs", "skip", "questions", ...Object.keys(DEFAULT_OUTPUT_CHECK.tuning)]
 
 /** `outputCheck`: on by default; an invalid value keeps it on, with a warning. */
 function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfig | undefined {
@@ -709,7 +709,7 @@ function outputCheckOption(value: unknown, warnings: string[]): OutputCheckConfi
   return DEFAULT_OUTPUT_CHECK
 }
 
-const PROMPT_CHECK_KEYS = ["enabled", "threshold", "questions", ...Object.keys(DEFAULT_PROMPT_TUNING)]
+export const PROMPT_CHECK_KEYS = ["enabled", "threshold", "questions", ...Object.keys(DEFAULT_PROMPT_TUNING)]
 
 /** `promptCheck`: on by default; an invalid value keeps it on, with a warning. */
 function promptCheckOption(value: unknown, warnings: string[]): PromptCheckConfig | undefined {
