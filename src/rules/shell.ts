@@ -300,8 +300,11 @@ interface RegexRule {
   readonly test: (command: string, ctx: ShellRuleContext) => boolean
   /** Ask born from a check stopped by a limit or a form the plugin does not read: never left to the decision model by a setting. */
   readonly unfinished?: true
-  /** Ask about a change of the plugin's settings: never left to the decision model (user's decision), `selfProtectionByModel` included. */
-  readonly userOnly?: true
+  /**
+   * Ask about a change of the plugin's settings: never left to the decision model (user's decision), `selfProtectionByModel`
+   * included. A function decides by the finding, for an ask that covers both a settings location and another one.
+   */
+  readonly userOnly?: true | ((command: string, ctx: ShellRuleContext) => boolean)
   /** Reason and targets of the finding read with the test (`secret-file-read`: the files named). */
   readonly detail?: (command: string, ctx: ShellRuleContext) => Pick<Finding, "reason" | "targets">
 }
@@ -322,7 +325,7 @@ const unquote = (token: string) => token.replace(/^["']+|["']+$/g, "")
 const PREFIX_OPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   sudo: new Set(["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-T", "-U"]),
   doas: new Set(["-u", "-C"]),
-  env: new Set(["-u", "-C", "-S"]),
+  env: new Set(["-u", "-C", "-a", "--unset", "--chdir", "--argv0"]),
   timeout: new Set(["-s", "-k"]),
   nice: new Set(["-n"]),
   ionice: new Set(["-c", "-n", "-p"]),
@@ -334,9 +337,22 @@ const PREFIX_OPTIONS: Readonly<Record<string, ReadonlySet<string>>> = {
   setsid: new Set(),
   torsocks: new Set(),
   unbuffer: new Set(),
+  busybox: new Set(),
+  toybox: new Set(),
+  watch: new Set(["-n", "--interval"]),
 }
 /** Structural words before a command (`{ cmd; }`, `if cmd`, `! cmd`). */
 const GROUPING_WORDS = new Set(["{", "(", "!", "if", "then", "elif", "else", "do", "while", "until"])
+
+/**
+ * String of `env -S<text>` or `--split-string=<text>` attached to its option: put back as a word of its own, read like the
+ * rest of the command (a detached string needs nothing: the option takes no value here, its words follow it).
+ */
+function attachedSplitString(tokens: string[], i: number, wrapper: string | undefined): void {
+  if (wrapper !== "env") return
+  const attached = /^(?:-[iv0]*S|--split-string=)(.+)$/.exec(tokens[i]!)?.[1]
+  if (attached !== undefined) tokens[i] = unquote(attached)
+}
 
 /** Command as launched (path included), without attached `{`/`(`/`$(`/quotes, `=` (zsh), `\` or closing characters. */
 const commandToken = (token: string) => token.replace(/^(?:\$?\(|[{=\\"'`])+/, "").replace(/[)}"'`]+$/, "")
@@ -354,6 +370,7 @@ function commandOf(segment: string): { name: string; args: string[]; path: strin
   let i = 0
   let wrapper: string | undefined
   while (i < tokens.length) {
+    attachedSplitString(tokens, i, wrapper)
     const token = tokens[i]!
     const name = commandName(token)
     if (GROUPING_WORDS.has(token) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) i++
@@ -369,9 +386,172 @@ function commandOf(segment: string): { name: string; args: string[]; path: strin
   return { name: commandName(tokens[i] ?? ""), args: tokens.slice(i + 1), path: commandToken(tokens[i] ?? "") }
 }
 
+/** A word that opens a redirection (`<`, `2>x`, `&>x`). */
+const REDIRECTION_WORD = /^(?:\d*|&)[<>]/
+
+/** One short option of a word, with its value when it takes one (attached to the letter, otherwise the next word). */
+interface ShortOption {
+  readonly letter: string
+  readonly value?: string
+}
+
+/**
+ * Words of a command after its options: the options that take a value are given by their short letters (`values`, a
+ * value ends the group as in `tar -xzfa.tar`) and by their long names (`long`, also abbreviated, `--name value`); the
+ * short options read go to `seen`, a long one and its value (`--name=value`, or `value` when the next word is taken) to
+ * `seenLong`. Stops at the first redirection (`patch a < b`) and treats everything after `--` as an operand.
+ */
+function operands(
+  tokens: readonly string[],
+  values: string,
+  long: readonly string[],
+  seen: (option: ShortOption) => void,
+  seenLong: (name: string, value: string | undefined) => void = () => {},
+): string[] {
+  const words: string[] = []
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!
+    if (REDIRECTION_WORD.test(token)) {
+      if (/^(?:\d*|&)[<>]+$/.test(token)) i++
+    } else if (token === "--") return [...words, ...tokens.slice(i + 1).filter((word) => !REDIRECTION_WORD.test(word))]
+    else if (token.startsWith("--")) {
+      const takes = !token.includes("=") && long.some((name) => isLongOption(token, name))
+      const value = takes ? tokens[++i] : token.includes("=") ? token.slice(token.indexOf("=") + 1) : undefined
+      seenLong(token, value)
+    } else if (token.startsWith("-") && token !== "-")
+      for (let j = 1; j < token.length; j++) {
+        const letter = token[j]!
+        if (!values.includes(letter)) {
+          seen({ letter })
+          continue
+        }
+        seen({ letter, value: j + 1 < token.length ? token.slice(j + 1) : tokens[++i] })
+        break
+      }
+    else words.push(token)
+  }
+  return words
+}
+
+/** Files `patch` changes: the original file (first operand; the second is the patch, read), `-o`, the directory of `-d`. */
+function patchTargets(tokens: readonly string[]): string[] {
+  const targets: string[] = []
+  const files = operands(
+    tokens,
+    "BDFVYgdiopryz",
+    ["prefix", "ifdef", "fuzz", "version-control", "basename-prefix", "get", "directory", "input", "output", "strip", "reject-file", "suffix", "quoting-style", "reject-format", "merge"],
+    ({ letter, value }) => {
+      if ((letter === "o" || letter === "d") && value !== undefined) targets.push(value)
+    },
+    (name, value) => {
+      if (value !== undefined && (isLongOption(name, "output") || isLongOption(name, "directory"))) targets.push(value)
+    },
+  )
+  return files[0] === undefined ? targets : [files[0], ...targets]
+}
+
+/** Short options of `tar` that take a value. */
+const TAR_VALUES = "CFHIKLNTVXbfg"
+
+/** Extraction directories of `tar` (`-C`, `--directory`), new syntax and old syntax without a dash; none without extraction. */
+function tarTargets(tokens: readonly string[]): string[] {
+  const directories: string[] = []
+  let extract = false
+  let rest = tokens
+  const first = tokens[0] ?? ""
+  if (/^[A-Za-z]+$/.test(first)) {
+    // Old syntax: the values of the group's letters follow it, in order.
+    let next = 1
+    for (const letter of first) {
+      if (letter === "x") extract = true
+      if (!TAR_VALUES.includes(letter)) continue
+      const value = tokens[next++]
+      if (letter === "C" && value !== undefined) directories.push(value)
+    }
+    rest = tokens.slice(next)
+  }
+  operands(
+    rest,
+    TAR_VALUES,
+    ["directory", "file", "files-from", "exclude-from", "blocking-factor", "format", "group", "owner", "mode", "mtime", "suffix", "use-compress-program", "volno-file", "info-script", "new-volume-script"],
+    ({ letter, value }) => {
+      if (letter === "x") extract = true
+      if (letter === "C" && value !== undefined) directories.push(value)
+    },
+    (name, value) => {
+      if (isLongOption(name, "extract") || isLongOption(name, "get")) extract = true
+      if (value !== undefined && isLongOption(name, "directory")) directories.push(value)
+    },
+  )
+  return extract ? directories : []
+}
+
+/** Extraction directory of `unzip` (`-d`, attached or not, last of a group: `-od dir`). */
+function unzipTargets(tokens: readonly string[]): string[] {
+  const directories: string[] = []
+  operands(tokens, "dIOP", [], ({ letter, value }) => {
+    if (letter === "d" && value !== undefined) directories.push(value)
+  })
+  return directories
+}
+
+/** Directory of `cpio` (`-D`, `--directory`) outside its create mode, which only reads there. */
+function cpioTargets(tokens: readonly string[]): string[] {
+  const directories: string[] = []
+  let create = false
+  operands(
+    tokens,
+    "CDEFHIMOR",
+    ["directory", "block-size", "pattern-file", "file", "format", "message", "owner", "rsh-command"],
+    ({ letter, value }) => {
+      if (letter === "o") create = true
+      if (letter === "D" && value !== undefined) directories.push(value)
+    },
+    (name, value) => {
+      if (isLongOption(name, "create")) create = true
+      if (value !== undefined && isLongOption(name, "directory")) directories.push(value)
+    },
+  )
+  return create ? [] : directories
+}
+
+/** Directory of `git apply --directory` (git's own options before the subcommand skipped). */
+function gitApplyTargets(tokens: readonly string[]): string[] {
+  let i = 0
+  while (i < tokens.length && tokens[i]!.startsWith("-")) i += /^(?:-C|-c|--git-dir|--work-tree|--namespace)$/.test(tokens[i]!) ? 2 : 1
+  if (tokens[i] !== "apply") return []
+  const directories: string[] = []
+  operands(tokens.slice(i + 1), "p", ["directory"], () => {}, (name, value) => {
+    if (value !== undefined && isLongOption(name, "directory")) directories.push(value)
+  })
+  return directories
+}
+
+/** Output files and directories that a program writes by its own operand or option. */
+function ownOutputs(name: string, tokens: readonly string[]): string[] {
+  switch (name) {
+    case "dd":
+      return tokens.filter((token) => token.startsWith("of=")).map((token) => unquote(token.slice(3)))
+    case "sponge":
+      return operands(tokens, "", [], () => {})
+    case "patch":
+      return patchTargets(tokens)
+    case "tar":
+      return tarTargets(tokens)
+    case "unzip":
+      return unzipTargets(tokens)
+    case "cpio":
+      return cpioTargets(tokens)
+    case "git":
+      return gitApplyTargets(tokens)
+    default:
+      return []
+  }
+}
+
 /**
  * Actually written targets: redirections to a file (not `2>&1` or `/dev/null`), arguments of
- * write commands, and files modified in place (`sed -i`, `perl -i`).
+ * write commands, files modified in place (`sed -i`, `perl -i`) and the outputs of `ownOutputs`.
  */
 export function writeTargets(command: string): string[] {
   const targets: string[] = []
@@ -381,6 +561,7 @@ export function writeTargets(command: string): string[] {
     const args = tokens.filter((token) => !token.startsWith("-") && !/^\d*>/.test(token))
     const inPlace = (name === "sed" || name === "perl") && tokens.some((t) => /^-[a-zA-Z]*i/.test(t) || t.startsWith("--in-place"))
     if (WRITE_COMMANDS.has(name) || inPlace) targets.push(...args)
+    targets.push(...ownOutputs(name, tokens))
   }
   return targets.filter((target) => target && !target.startsWith("/dev/"))
 }
@@ -1883,6 +2064,7 @@ function envAssignments(segment: string): { assigns: Map<string, string>; name: 
   let i = 0
   let wrapper: string | undefined
   while (i < tokens.length) {
+    attachedSplitString(tokens, i, wrapper)
     const token = tokens[i]!
     const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(token)
     if (assignment) {
@@ -2490,6 +2672,11 @@ const FIRST_ARGUMENTS = /^\s*(?:[^()\n;]*,\s*)?$/
 /** An open call just before a literal path, then its write mode after it (`open(p, 'w')`, `fopen(p, "a+")`, `{ flag: 'w' }`). */
 const OPEN_BEFORE = /\b(?:open\w*|fopen)\s*\(\s*$/
 const WRITE_MODE_AFTER = /^\s*,\s*(?:\{\s*)?(?:(?:mode|flags?)\s*[=:]\s*)?['"`][rbt]*[wax+][rwxabt+]*['"`]/
+/** Perl: an `open` with a write mode as a separate literal, just before a literal path (`open(my $f, ">", "x")`, `open F, "+<", "x"`). */
+const PERL_OPEN_BEFORE = /\bopen\s*\(?\s*[^,;()]*,\s*["'](?:\+<|\+?>>?)(?::[^"']*)?["']\s*,\s*$/
+/** Perl: `sysopen` just before a literal path, then flags that are not a plain read-only open. */
+const SYSOPEN_BEFORE = /\bsysopen\s*\(?\s*[^,;()]*,\s*$/
+const SYSOPEN_WRITE_AFTER = /^\s*,(?!\s*(?:0|O_RDONLY)\s*[,);])/
 /** A path object of the literal, then a method that writes it (`Path(p).write_text(…)`). */
 const PATH_BEFORE = /\bPath\s*\(\s*$/
 const PATH_WRITE_AFTER = /^\s*\)\s*\.\s*(?:write_\w+|touch|unlink|rename|replace|symlink_to|hardlink_to|mkdir|rmdir|chmod|open\s*\(\s*(?:mode\s*=\s*)?['"][rbt]*[wax+])/
@@ -2500,8 +2687,8 @@ const SETTINGS_CANDIDATE = /^[^\s;&|<>()'"`]*(?:\/[^\s;&|<>()'"`]*|\.jsonc?)$/
  * Equivalent shell form of what inline interpreter code launches or writes, for the rules that protect the plugin's
  * settings (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`, `opencode-server-api`): with an execution sink, each literal
  * (or list of literals separated by commas, one command) that names `guard` or `opencode`, as a command; a redirection
- * to each literal path that holds the plugin's settings and that a call writes (argument of a write, copy, move or
- * removal call, opened for writing, Perl's `>` target), never one only read. Literal paths only (a path built by the
+ * to each literal path of OpenCode's configuration or the plugin's settings that a call writes (argument of a write, copy,
+ * move or removal call, opened for writing, Perl's `>` target, its `open` with a separate mode, `sysopen`), never one only read. Literal paths only (a path built by the
  * code or known once the shell runs is not followed); `undefined` without either. Judged in addition to the command, for those rules only
  * (`CODE_VIEW_RULES`).
  */
@@ -2525,8 +2712,11 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
         perl !== undefined ||
         (call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))) ||
         (OPEN_BEFORE.test(before) && WRITE_MODE_AFTER.test(after)) ||
+        PERL_OPEN_BEFORE.test(before) ||
+        (SYSOPEN_BEFORE.test(before) && SYSOPEN_WRITE_AFTER.test(after)) ||
         (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
-      if (written && protectedWriteClass(path, ctx.home, ctx) === "settings") lines.push(`: >${path}`)
+      const kind = written ? protectedWriteClass(path, ctx.home, ctx) : undefined
+      if (kind === "settings" || kind === "opencode") lines.push(`: >${path}`)
     }
     if (hasExecutionSink(code)) lines.push(...literalGroups(code).map((group) => group.text).filter((group) => NAMES_LAUNCH.test(group)))
   }
@@ -3120,6 +3310,9 @@ const OPENCODE_ASK_RULES: readonly RegexRule[] = (
   ...(kind === "config" || kind === "plugin-update" || kind === "service-config" ? { userOnly: true } : {}),
 }))
 
+const NAMED_LOCATION_REASON = "command that names OpenCode's configuration or the guard plugin and does more than read: it may write there in a form the plugin does not recognize (self-protection)"
+const NAMED_WORDS_LIMIT_REASON = "command with too many paths to compare with OpenCode's configuration and the guard plugin: the plugin's limit on named paths was reached, so it could not be checked: confirmation required (self-protection)"
+
 const ASK_RULES: readonly RegexRule[] = [
   // First: on equal terms, a command of the plugin's command line shows this rule.
   {
@@ -3452,12 +3645,22 @@ const ASK_RULES: readonly RegexRule[] = [
     unfinished: true,
   },
   ...OPENCODE_ASK_RULES,
-  // Last: a protected location in another form of a target that self-protection holds, when this rule is stronger.
+  // A protected location in another form of a target that self-protection holds, when this rule is stronger.
   {
     id: "protected-write",
     verdict: "ask",
     reason: "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
     test: (command, ctx) => outranksSelfProtection(ctx.active) && writtenTargets(command).some((target) => systemWrite(target, ctx.home, ctx)),
+  },
+  // Net: a protected location named by a command that does more than read, in a form of write no rule above reads. Last:
+  // an ask above keeps its place. Limit reached or settings named: never left to the decision model, as the entries above.
+  {
+    id: "self-protection",
+    verdict: "ask",
+    reason: NAMED_LOCATION_REASON,
+    test: (command, ctx) => NAMED_LOCATION.note(command, ctx) !== undefined,
+    detail: (command, ctx) => ({ reason: NAMED_LOCATION.peek(command, ctx) === "limit" ? NAMED_WORDS_LIMIT_REASON : NAMED_LOCATION_REASON }),
+    userOnly: (command, ctx) => NAMED_LOCATION.peek(command, ctx) !== "opencode",
   },
 ]
 
@@ -3532,6 +3735,10 @@ const GIT_RUNS = new Set(["-c", "-p", "--paginate", "--exec-path", "--config-env
 /** Options of `file` that only change its report. */
 const FILE_READS = new Set(["-b", "--brief", "-i", "--mime", "--mime-type", "--mime-encoding", "-L", "--dereference", "-h", "--no-dereference", "-k", "--keep-going", "-E", "--extension", "-N", "--no-pad", "-0", "--print0"])
 
+/** Script of `sed` that only prints: addresses with `p`, with `-n`, or one substitution without the `e` and `w` flags. */
+const SED_ADDRESS = /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/
+const SED_SUBSTITUTION = /^s([^\w\s\\])(?:\\.|(?!\1)[^\\\n])*\1(?:\\.|(?!\1)[^\\\n])*\1[gpiI\d]*$/
+
 /** One simple command that only reads files: a reader of a closed list, without an option that runs something. */
 function readsOnly(words: readonly string[]): boolean {
   const [name, ...args] = words
@@ -3561,21 +3768,22 @@ function readsOnly(words: readonly string[]): boolean {
       return ["show", "log", "diff", "blame", "status"].includes(args[i] ?? "")
     }
     case "sed": {
-      // `sed -n '1,80p' file`: addresses and `p` only (GNU sed's `e` and `w` run or write).
+      // `sed -n '1,80p' file`, `sed 's/a/b/g' file` (GNU sed's `e` and `w` run or write).
+      const prints = (word: string) => SED_SUBSTITUTION.test(word) || (args.includes("-n") && SED_ADDRESS.test(word))
       let script = false
       for (let i = 0; i < args.length; i++) {
         const arg = args[i]!
         if (arg === "-n" || arg === "--quiet" || arg === "--silent" || arg === "-E" || arg === "-r") continue
         if (arg === "-e") {
-          if (!/^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(args[++i] ?? "")) return false
+          if (!prints(args[++i] ?? "")) return false
           script = true
         } else if (arg.startsWith("-")) return false
         else if (!script) {
-          if (!/^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(arg)) return false
+          if (!prints(arg)) return false
           script = true
         }
       }
-      return script && args.includes("-n")
+      return script
     }
     default:
       return false
@@ -3629,6 +3837,198 @@ function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteCl
   return kinds
 }
 
+/** Distinct path-like words of a command compared by the net (`namedLocation`): beyond them, its ask of the limit. */
+const MAX_NAMED_WORDS = 1024
+const NAMED_WORD_SEPARATORS = /[\s;&|()<>`'"]+/
+/**
+ * Value of a `name=value` word and attached directory option, each also read as a word (`of=x`, `--output=x`, `DESTDIR=x`,
+ * `D+=x`, `D[0]=x`, `-Cx`, `-dx`, `-Dx`), and what follows the last `=` of that value (`a=b=x`). The assigned value is not
+ * followed to the `$D` that uses it.
+ */
+const OPTION_VALUE = /^-{0,2}[A-Za-z_][\w-]*(?:\[[^\]]*\])?\+?=(.+)$/
+const ATTACHED_DIRECTORY = /^-[CdD](.+)$/
+const HOME_PREFIX = /^(?:\$HOME|\$\{HOME\}|~)(?:\/|$)/
+const PROTECTED_NAMES = new Set(["opencode.json", "opencode.jsonc", "guard.json", ".opencode"])
+/** Programs that write nothing by their arguments, unless a redirection does. `find` too, without these actions. */
+const NAMING_COMMANDS = new Set(["echo", "printf", "jq", "test", "[", "[["])
+const FIND_ACTIONS = /\s\$?-(?:exec|execdir|ok|okdir|delete|fprint\w*|fls)\b/
+/** Redirections without effect on a file: to `/dev/null`, or to another descriptor (`2>&1`, `2>&-`). */
+const HARMLESS_REDIRECTION = /&?>>?\s*\/dev\/null(?![^\s)])|>&(?:\d+|-)(?![^\s)])/g
+
+/** Launchers in front of a naming command, each with its options, durations and assignments. */
+const NAMING_LAUNCHERS = new Set(["sudo", "doas", "nice", "ionice", "time", "timeout", "stdbuf", "nohup", "setsid", "env", "command", "exec", "unbuffer"])
+
+/** The word after this launcher option is its value: the option itself, or a group of letters ending with it (`-Eu bob`). */
+function valueFollows(word: string, values: ReadonlySet<string>): boolean {
+  if (word.startsWith("--")) return values.has(word)
+  for (let i = 1; i < word.length; i++) if (values.has(`-${word[i]}`)) return i === word.length - 1
+  return false
+}
+
+/**
+ * Words of a segment cut at its program: the launchers and structural words with what they take, then the program and its
+ * arguments. Word by word: a linear walk. A long option not known here may take a value: the walk stops on it, so the
+ * segment names no benign program.
+ */
+function behindLaunchers(segment: string): [string[], string[]] {
+  const words = segment.trim().replace(/^\(+\s*/, "").split(/\s+/)
+  let start = 0
+  for (let head = words[0]!; GROUPING_WORDS.has(head) || NAMING_LAUNCHERS.has(head); head = words[start]!) {
+    start++
+    const values = PREFIX_OPTIONS[head]
+    if (!values) continue
+    for (let word = words[start]; word !== undefined; word = words[start]) {
+      if (/^--[^=]+$/.test(word) && !values.has(word)) return [words.slice(0, start), words.slice(start)]
+      if (word.startsWith("-") && word.length > 1) start += valueFollows(word, values) || /^\d+$/.test(words[start + 1] ?? "") ? 2 : 1
+      else if (/^(?:\d+[smhd]?|[A-Za-z_]\w*=\S*)$/.test(word)) start++
+      else break
+    }
+  }
+  return [words.slice(0, start), words.slice(start)]
+}
+
+/** Text outside quotes and escapes, in place (`quoteStates`), or the whole text where that reading does not hold. */
+function outsideQuotes(text: string): string {
+  const states = quoteStates(text)
+  return states ? text.replace(/[\s\S]/g, (char, i: number) => (states[i] ? " " : char)) : text
+}
+
+function namingOnly(words: readonly string[]): boolean {
+  const rest = words.join(" ")
+  if (/[<>]/.test(outsideQuotes(rest).replace(HARMLESS_REDIRECTION, " "))) return false
+  const name = words[0]?.split("/").pop() ?? ""
+  return NAMING_COMMANDS.has(name) || (name === "find" && !FIND_ACTIONS.test(rest.replace(/["'\\]/g, "")))
+}
+
+/** A program under these directories, in command position: the system's, not one relaunched by its path (`| /usr/bin/sort`). */
+const SYSTEM_PROGRAM = /((?:^|[;&|(`\n{])[^\S\n]*(?:sudo\s+)?)(?:\/usr(?:\/local)?)?\/bin\/(?=[\w+-][^\s;&|()/]*(?:[\s;&|()]|$))/g
+const APPLIES_ITS_INPUT = /\b(?:xargs|parallel)\b/
+/** A pipe, or `>(…)`, into an interpreter that reads its standard input, behind the launchers. */
+const PIPED_INTERPRETER = new RegExp(
+  `(?:\\|&?|>\\()\\s*(?:${COMMAND_PATH}(?:${WRAPPERS})(?:\\s+[^\\s;&|]+){0,8}?\\s+)?${COMMAND_PATH}(?:perl|python|ruby|node|bun|deno|php|awk|gawk)[\\d.]*(?=\\s|$|[;&|)])`,
+)
+/** Escapes of `printf` and `echo -e`, each a blank for the net: a word ends there (`opencode.json\\0`, `rm\\040x`). */
+const TEXT_ESCAPE = /\\(?:[0-7]{1,3}|x[\da-fA-F]{1,2}|[abcefnrtv])/g
+
+/** A stage behind a pipe, without `||` and `>|`, its quoted text blanked by the search; a `(` stays in it, `)` and a backtick end it. */
+const PIPE_STAGE = /(?<![|>])\|(?!\|)&?(\s*[^;&|)`\n]*)/g
+
+/** Options of `sort` and `uniq` that only change what they print; `-o`, `-T`, a long option… are not among them. */
+const SORT_PRINTS = /^-[bcCdfghiMnrRsuVz]*(?:[kSt]\S*)?$/
+const UNIQ_PRINTS = /^-[cdDiuz]*(?:[fsw]\d*)?$/
+
+/** `sort` or `uniq` that prints what it receives: not readers of `onlyReads`, an option or a second operand writes a file. */
+function sortsItsInput(words: readonly string[]): boolean {
+  const [name, ...rest] = words.map((word) => word.replace(/["'\\]/g, ""))
+  const prints = name === "sort" ? SORT_PRINTS : name === "uniq" ? UNIQ_PRINTS : undefined
+  if (!prints || !rest.every((arg) => !arg.startsWith("-") || prints.test(arg))) return false
+  return name === "sort" || rest.filter((arg) => arg === "-" || !arg.startsWith("-")).length < 2
+}
+
+/**
+ * This stage only reads what it receives, by its bare name or under the system's directories, without a group, a local
+ * path or a redirection to a file: a reader of `onlyReads` or `READ_ONLY_COMMANDS`, a left-out command, `sort`, `uniq`.
+ */
+function knownReceiver(stage: string): boolean {
+  const plain = stage.replace(HARMLESS_REDIRECTION, " ").trim().replace(SYSTEM_PROGRAM, "$1")
+  const [launchers, program] = behindLaunchers(plain)
+  if (plain.startsWith("(") || launchers.some((word) => GROUPING_WORDS.has(word)) || /[<>]/.test(outsideQuotes(plain))) return false
+  const name = program[0] ?? ""
+  return onlyReads(program.join(" ")) || READ_ONLY_COMMANDS.has(name) || sortsItsInput(program) || (!name.includes("/") && namingOnly(program))
+}
+
+/** A `.` behind a word is an argument (`timeout 5 jq . x`): a program cannot run this builtin, `command` can. */
+const DOT_ARGUMENT = /(?<=[^\s;&|(`{]\s+)(?<!\bcommand\s+)\.(?=\s|$)/g
+/** Output of a group to a file: its segments do not show it (`{ jq . x; } >/tmp/y`, `done > y`). */
+const GROUP_OUTPUT = /(?:\)|(?:^|[\s;&|])(?:\}|fi|done|esac))\s*\d*&?>/
+
+/**
+ * What a command prints may be run or applied: it relaunches a shell (a program of the system by its path does not
+ * count, nor a path inside quotes), holds `xargs` or `parallel`, pipes into an interpreter or into anything else than a
+ * known reader (`knownReceiver`), or sends a group to a file. Linear, on the whole text: no stage is followed.
+ */
+function readsEveryWord(data: string): boolean {
+  const plain = data.replace(/["'\\]/g, "")
+  const outside = outsideQuotes(data)
+  const effective = outside.replace(HARMLESS_REDIRECTION, (found) => " ".repeat(found.length))
+  return (
+    reentersShell(data.replace(DOT_ARGUMENT, " "), outside.replace(SYSTEM_PROGRAM, "$1")) ||
+    APPLIES_ITS_INPUT.test(plain) ||
+    PIPED_INTERPRETER.test(plain) ||
+    GROUP_OUTPUT.test(effective) ||
+    Array.from(effective.matchAll(PIPE_STAGE)).some((match) => {
+      const end = match.index + match[0].length
+      return !knownReceiver(data.slice(end - match[1]!.length, end))
+    })
+  )
+}
+
+/** An assignment alone (`D=x`, `export D=x`, `readonly D=x`), its name captured; a use of a variable, written as such. */
+const LONE_ASSIGNMENT = /^\s*(?:(?:export|readonly)\s+)?([A-Za-z_]\w*)(?:\[[^\]\s]*\])?\+?=\S*\s*$/
+const VARIABLE_USE = /\$\{?[#!]?([A-Za-z_]\w*)/g
+
+/**
+ * Parts of the data the net reads when no word has to be: each segment, except one that only reads or only names, of which
+ * only the words of its launchers stay (`time -o x`), and an assignment no `$D` of the command uses. `dd if=` only reads.
+ */
+function segmentsToRead(data: string, command: string): string[] {
+  const reads = onlyReads(command)
+  const used = new Set(Array.from(command.matchAll(VARIABLE_USE), (match) => match[1]))
+  return segments(data, SHELL_SEPARATORS).flatMap((segment) => {
+    const [launchers, program] = behindLaunchers(segment)
+    if (reads || onlyReads(segment) || namingOnly(program)) return [launchers.join(" ")]
+    const assigned = LONE_ASSIGNMENT.exec(segment)?.[1]
+    if (assigned !== undefined && !used.has(assigned)) return []
+    return [commandOf(segment).name === "dd" ? segment.replace(/(?<![^\s])if=\S*/g, " ") : segment]
+  })
+}
+
+const namedWords = (segment: string) =>
+  segment
+    .split(NAMED_WORD_SEPARATORS)
+    .filter(Boolean)
+    .flatMap((word) => {
+      const value = OPTION_VALUE.exec(word)?.[1]
+      return [word, value, value?.slice(value.lastIndexOf("=") + 1), ATTACHED_DIRECTORY.exec(word)?.[1]].filter((part) => part !== undefined)
+    })
+
+/**
+ * Word that can name a protected location as written: no glob or expansion (`$HOME`, `${HOME}` and `~` in front
+ * excepted), no URL, and a path or a protected name (in a protected directory, a bare word such as `npm`
+ * would resolve into it).
+ */
+function pathWord(word: string): boolean {
+  if (/^(?:[^/]*=)?https?:/.test(word) || !(word.includes("/") || PROTECTED_NAMES.has(word))) return false
+  return HOME_PREFIX.test(word) ? !/[*?[\]{}\\]/.test(word.replace(/^\$\{HOME\}/, "")) : !/[$*?[\]{}\\]/.test(word)
+}
+
+/**
+ * Net of `self-protection`: class of the protected locations named by a command that does not only read, whatever the form
+ * of its write, or `limit` past `MAX_NAMED_WORDS`. Words of the whole command, its data too, when what it prints may be run
+ * or applied (`readsEveryWord`), otherwise `segmentsToRead`. Lexical only: it takes nothing from the budget of real paths
+ * shared with the write targets, so a word reached through a link stays with the decision model.
+ */
+function namedLocation(command: string, ctx: ShellRuleContext): "settings" | "opencode" | "limit" | undefined {
+  const { realPaths: _shared, ...lexical } = ctx
+  const seen = new Set<string>()
+  let named: "opencode" | undefined
+  const data = withoutData(command)
+  for (const part of readsEveryWord(data) ? [command.replace(TEXT_ESCAPE, " ")] : segmentsToRead(data, command)) {
+    for (const word of namedWords(part)) {
+      if (seen.has(word) || !pathWord(word)) continue
+      seen.add(word)
+      if (seen.size > MAX_NAMED_WORDS) return "limit"
+      const kind = protectedWriteClass(word, ctx.home, lexical)
+      if (kind === "settings") return kind
+      if (kind === "opencode") named = kind
+    }
+  }
+  return named
+}
+
+/** Class named by the command: noted by the net's test, peeked by its reason and its `userOnly`. */
+const NAMED_LOCATION = sharedReading(namedLocation)
+
 /** End of a command substitution (and a quote closed just before it) followed by the rest of a path. */
 const SUBSTITUTION_END = /["']?[)`](?=\/)/g
 /**
@@ -3649,15 +4049,16 @@ function writtenTargets(command: string): string[] {
  * `eval`, `ssh host "…"`, `watch "…"`, script launched by its path or made executable). The analysis then remains complete.
  * Blanks after the path opener read as in `commandRegex` (without newline: linear cost).
  */
-const SHELL_REENTRY = commandRegex("sh|bash|zsh|dash|ksh|fish|eval|source|\\.|ssh|su|watch|parallel|script|flock|tmux|screen|expect")
+const SHELL_REENTRY = commandRegex("sh|bash|zsh|dash|ksh|fish|eval|source|\\.|ssh|su|watch|parallel|script|flock|tmux|screen|expect|(?:busybox|toybox)[^\\S\\n]+\\w*sh")
 const PATH_EXECUTION = /(?:^|[;&|(`\n{])[^\S\n]*(?:sudo\s+)?(?:\.{1,2}\/|~\/|\/)[^\s;&|()]/
 const MAKE_EXECUTABLE = /\bchmod\s[^;&|\n]*\+[rw]*x/
 
-function reentersShell(command: string): boolean {
+/** `launched`: the text read for a program launched by its path, the command itself except for the net (`readsEveryWord`). */
+function reentersShell(command: string, launched = command): boolean {
   // A launcher name in quotes (`"bash" <<EOF`) is read without them: only a quoted piece without a blank or a separator,
   // so that no separator comes out of quoted text.
   const unquoted = /["']/.test(command) && SHELL_REENTRY.test(command.replace(/'([^'\s;&|()<>`]*)'|"([^"\s;&|()<>`$\\]*)"/g, "$1$2"))
-  return SHELL_REENTRY.test(command) || unquoted || PATH_EXECUTION.test(command) || MAKE_EXECUTABLE.test(command)
+  return SHELL_REENTRY.test(command) || unquoted || PATH_EXECUTION.test(launched) || MAKE_EXECUTABLE.test(command)
 }
 
 /** Code passed to a non-shell interpreter (`node -e "…"`, `python3 -c '…'`, `perl -E`, `php -r`, `deno eval`). */
@@ -4348,7 +4749,8 @@ function evaluate(command: string, ctx: ShellRuleContext, inData = false): Findi
   for (const rule of ASK_RULES) {
     if (ruleEnabled(rule.id, ctx.active) && rule.test(command, ctx)) {
       const finding = hardened({ verdict: rule.verdict, rule: rule.id, reason: rule.reason, ...rule.detail?.(command, ctx) }, ctx.active)
-      findings.push(rule.unfinished || rule.userOnly ? finding : entrusted(finding, ctx.active))
+      const userOnly = typeof rule.userOnly === "function" ? rule.userOnly(command, ctx) : rule.userOnly
+      findings.push(rule.unfinished || userOnly ? finding : entrusted(finding, ctx.active))
     }
   }
   // Asks found only inside heredoc data (`inHeredocData`): each marked, except those of a rule set to `ask`.
@@ -4527,7 +4929,12 @@ const RUNTIME_WORD_REASON = "the launched program is known only at run time (a c
 const UNDETERMINED_WORD_REASON = "the launched program could not be determined (command word too long or too complex for the plugin, with quotes, a substitution or an escape): it cannot be checked"
 /** Prudent ask of an extra layer that throws (internal error): original finding kept, ask always active. */
 const ANALYSIS_FAILED: Finding = { verdict: "ask", rule: "nested-opencode", reason: "the analysis of the command failed (internal error): it cannot be checked" }
-/** Ask of a joined view that a new joining would still change (`shellFinding`), always active. */
+/** Ask of a string of `env -S` not read to its end (`splitStrings`), always active. */
+const UNSTABLE_SPLIT: Finding = {
+  verdict: "ask",
+  rule: "nested-opencode",
+  reason: "a string of `env -S` is nested too deep or written in a form the plugin cannot read: the launched program cannot be checked",
+}
 const UNSTABLE_JOIN: Finding = {
   verdict: "ask",
   rule: "nested-opencode",
@@ -4658,15 +5065,101 @@ function commandWordView(command: string): { view: string; flag?: string } {
   return { view: changed ? out + text.slice(cursor) : command, flag }
 }
 
+const ENV_WORD = /(?<![\w.$-])env["']?(?=\s)/g
+/** `-S`, in a group of letters that take no value, or `--split-string` possibly abbreviated; a string attached to it follows. */
+const SPLIT_OPTION = /^(?:-[iv0]*S|--s[a-z-]*(?:=|$))/
+const SPLIT_HINT = /-[iv0]*S|--s/
+const BLANKS = /\s*/y
+/** Redirection between `env` and its options: the shell takes it away (`env 2>/dev/null -S…`). */
+const REDIRECTION_OPERATOR = /\d*(?:&>>?|[<>]{1,3}[&|]?)/y
+const OPTION_START = /["'\\]*-/y
+/** Strings of `env -S` inside each other read at most this many times; deeper, `UNSTABLE_SPLIT`. */
+const MAX_SPLIT_PASSES = 3
+
+/** The command with the strings read as words; `unread`: a string may remain that could not be read. */
+interface SplitView {
+  readonly view: string
+  readonly unread: boolean
+}
+
+/**
+ * The command with the option of each `env -S <string>` replaced by the string, as words: every form the shell gives to
+ * that word (`-Srm -rf /`, `"-Srm -rf /"`, `-S"a b"`, `--split-string=…`, abbreviated too) reads as the program it runs,
+ * for the rules that read the text as well. `\_`, a line break or a carriage return is a blank in such a string. One scan:
+ * each word is read once, and a word that cannot be read, in a `-c` string or past the budget, stays marked `unread`.
+ */
+function splitStringPass(command: string): SplitView {
+  const budget = { left: 8 * command.length + 1024 }
+  const wordEnd = (start: number) => shellEnd(command, start, command.length, budget, false)
+  let [out, cursor, read, unread] = ["", 0, 0, false]
+  scan: for (const { index, 0: name } of command.matchAll(ENV_WORD)) {
+    if (index < read) continue
+    read = index + name.length
+    for (;;) {
+      const start = stickyEnd(BLANKS, command, read)
+      const operator = stickyEnd(REDIRECTION_OPERATOR, command, start)
+      if (operator > start) {
+        read = Math.max(wordEnd(stickyEnd(BLANKS, command, operator)), operator)
+        continue
+      }
+      const end = wordEnd(start)
+      if (budget.left <= 0) {
+        unread ||= SPLIT_HINT.test(command.slice(start))
+        break scan
+      }
+      if (end < 0) unread ||= stickyEnd(OPTION_START, command, start) > 0
+      if (end <= start) break
+      const word = dequoteWord(command, start, end)
+      const option = SPLIT_OPTION.exec(word)?.[0]
+      if (option !== undefined && (!option.startsWith("--") || "--split-string".startsWith(option.replace("=", "")))) {
+        const attached = word.slice(option.length)
+        const from = stickyEnd(BLANKS, command, end)
+        const closed = attached ? end : wordEnd(from)
+        const to = Math.max(closed, end)
+        const string = attached || (to > from ? dequoteWord(command, from, to) : "")
+        unread ||= closed < 0 || /\\["']/.test(command.slice(start, to))
+        ;[out, cursor, read] = [out + command.slice(cursor, start) + string.replace(/\\_|[\n\r]/g, " "), to, to]
+        break
+      }
+      if (!word.startsWith("-")) break
+      read = end
+      if (valueFollows(word, PREFIX_OPTIONS.env!)) {
+        const value = stickyEnd(BLANKS, command, end)
+        read = Math.max(wordEnd(value), end)
+      }
+    }
+  }
+  return { view: cursor === 0 ? command : out + command.slice(cursor), unread }
+}
+
+/** The command with the strings of `env -S` read as words (`splitStringPass`), the command itself without any. */
+function splitStrings(command: string): SplitView {
+  if (!SPLIT_HINT.test(command)) return { view: command, unread: false }
+  let { view, unread } = splitStringPass(command)
+  const next = (text: string) => {
+    const pass = splitStringPass(text)
+    unread ||= pass.unread
+    return pass.view
+  }
+  if (view === command) {
+    // A program word in pieces (`e"n"v`): only then the reduced view, which takes one level of quotes off the string too.
+    const reduced = commandWordView(command).view
+    view = next(reduced)
+    if (view === reduced) return { view: command, unread }
+  }
+  for (let pass = 1; pass < MAX_SPLIT_PASSES; pass++) view = next(view)
+  return { view, unread }
+}
+
 /**
  * Shell finding: finding of the rules (`priorShellFinding`, kept word for word), then, without a deny and if the cost guard
  * allows it (`layerGuard`), layer of indirectly designated devices (`deviceLayer`). The strongest wins
  * (`strength`); at equal strength, the existing finding is returned as is. Then the same examination of the view without leading
  * assignments (`assignedFinding`), and of the view of the word in command position reduced to its literal value (`commandWordView`,
  * judged additionally; at equal verdict, the original finding is kept with its mark), then the same examination, once
- * and without a new joining, of the command with the lines the shell continues joined (`joinedLines`), judged
- * additionally (linear cost). A joined view that a new joining would still change (reading not stable): ask
- * (`UNSTABLE_JOIN`). Internal error of these layers: findings already obtained kept, prudent ask added
+ * and without a new joining, of the command with the lines the shell continues joined (`joinedLines`) and the strings of
+ * `env -S` read as words (`splitStrings`), judged additionally (linear cost). A view that a new reading would still change
+ * (reading not stable), or a string of `env -S` not read to its end: ask (`UNSTABLE_JOIN`, `UNSTABLE_SPLIT`). Internal error of these layers: findings already obtained kept, prudent ask added
  * (`ANALYSIS_FAILED`), in its own place for the joined view. The findings of the joined view, of its unstable reading
  * and of its error come after those of the original view, by `strength` (deny, ask without a mark, ask that the model
  * can decide): at equal strength, the finding of the original view is kept.
@@ -4676,11 +5169,16 @@ function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefin
   if (base?.verdict === "deny") return base
   let [continued, unstable, failed]: Array<Finding | undefined> = []
   try {
-    const joined = joinedLines(command)
+    const { view: joined, unread } = splitStrings(joinedLines(command))
     if (joined !== command) {
       continued = mostSevere(viewFindings(joined, ctx))
-      if (joinedLines(joined) !== joined) unstable = hardened(UNSTABLE_JOIN, ctx.active)
-    }
+      const again = joinedLines(joined)
+      if (again !== joined) unstable = hardened(UNSTABLE_JOIN, ctx.active)
+      else {
+        const reread = splitStrings(again)
+        if (unread || reread.unread || reread.view !== joined) unstable = hardened(UNSTABLE_SPLIT, ctx.active)
+      }
+    } else if (unread) unstable = hardened(UNSTABLE_SPLIT, ctx.active)
   } catch {
     failed = hardened(ANALYSIS_FAILED, ctx.active)
   }

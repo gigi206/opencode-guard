@@ -2448,10 +2448,10 @@ describe("batch 41: indirectly designated device", () => {
       assert.equal(found(command, off), "none", command)
   })
 
-  // Budget: one instance shared by a sequence of subcommands, as in permission checking. `dd` and `shred`
-  // targets that consumers never ask for; padding such that the last subcommand (protected write
-  // through a link) depends on the remaining budget. Expected counts: those of the old function (finding without the
-  // layer) on the same sequence.
+  // Budget: one instance shared by a sequence of subcommands, as in permission checking. `shred` targets that consumers
+  // never ask for, and a `dd of=` target resolved like a `cp` target (`protected-write` follows its links); padding such
+  // that the last subcommand (protected write through a link) depends on the remaining budget. Expected counts: those of
+  // the old function (finding without the layer) on the same sequence, plus the `dd of=` lookups, taken from the padding.
   const budgetRun = () => {
     const io = countingIo()
     const content = { calls: 0 }
@@ -2464,7 +2464,7 @@ describe("batch 41: indirectly designated device", () => {
       },
     }
     const sequence = [
-      `cp a ${"d/".repeat(476)}f`,
+      `cp a ${"d/".repeat(471)}f`,
       "echo x > to-disk",
       "dd if=a of=sub/raw.img",
       "shred sub/erase.bin",
@@ -2472,15 +2472,18 @@ describe("batch 41: indirectly designated device", () => {
       `cat > n.md <<'EOF'\necho x > /${DISK}\nEOF`,
       "echo x > to-config",
     ]
-    return sequence.map((command) => ({ found: found(command, context), lstat: io.calls.lstat, content: content.calls }))
+    return sequence.map((command) => {
+      const finding = shellFinding(command, context)
+      return { found: finding ? `${finding.verdict}/${finding.rule}` : "none", reason: finding?.reason, lstat: io.calls.lstat, content: content.calls }
+    })
   }
   it("budget: resolver lookups and content predicate calls equal to those of the old function, existing findings unchanged", () => {
     const steps = budgetRun()
     assert.deepEqual(
       steps.map(({ lstat, content }) => [lstat, content]),
       [
-        [484, 3],
-        [490, 6],
+        [479, 3],
+        [485, 6],
         [490, 11],
         [490, 13],
         [496, 15],
@@ -2492,6 +2495,8 @@ describe("batch 41: indirectly designated device", () => {
     assert.equal(steps[2]!.found, "none")
     assert.equal(steps[3]!.found, "ask/file-delete")
     assert.equal(steps[6]!.found, "ask/self-protection")
+    // The last step comes from the link, never from the limit on link checks.
+    assert.equal(steps[6]!.reason, "write to OpenCode's configuration or to the guard plugin (self-protection)")
   })
   it("budget: the layer re-reads the shared instance's responses (ask then denial through a link, reshaped in the data)", () => {
     assert.deepEqual(

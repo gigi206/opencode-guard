@@ -16,7 +16,7 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
   (
     [
       ["placeholder", "deny", "the redaction placeholder in a command or in content to write (writing it would destroy the real secret)"],
-      ["self-protection", "ask", "writing to OpenCode's configuration or to the plugin directory; adding or removing a plugin or an MCP server, or updating package plugins, through opencode"],
+      ["self-protection", "ask", "writing to OpenCode's configuration or to the plugin directory; a command that names them and does more than read; adding or removing a plugin or an MCP server, or updating package plugins, through opencode"],
       ["nested-opencode", "ask", "starting another OpenCode agent or server or changing its configuration; a command whose program the plugin cannot determine"],
       ["opencode-service", "ask", "changing the OpenCode service, or printing its password, environment or settings"],
       ["opencode-server-api", "ask", "a call to the OpenCode server API that can bypass the guard, also from an artifact's page code; exporting the OpenCode credentials; a copy of the server's memory"],

@@ -33,7 +33,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "self-protection",
     detail(
-      "Protects the files that decide how the plugin and OpenCode run: OpenCode's configuration (global, system and project, including .opencode/ and opencode.json(c)), the plugin directory and OpenCode's service file. It asks before a write or delete that reaches them, including through a symbolic link or the path arguments of an MCP or plugin tool, and before adding or removing a plugin or an MCP server through opencode.",
+      "Protects the files that decide how the plugin and OpenCode run: OpenCode's configuration (global, system and project, including .opencode/ and opencode.json(c)), the plugin directory and OpenCode's service file. It asks before a write or delete that reaches them, including through a symbolic link or the path arguments of an MCP or plugin tool, and before adding or removing a plugin or an MCP server through opencode. A shell command that has one of these locations as a literal word and does more than read asks too, even in a form of write the plugin does not recognize: the cost is a confirmation for a command that names the location without writing there (git add opencode.json).",
       "write to OpenCode's configuration or to the guard plugin (self-protection)",
       "writes OpenCode's configuration or the plugin",
     ),
