@@ -2,6 +2,7 @@
 // environment, which may differ from the server's), the system one, the plugin's entry in their opencode.json, the
 // guard.json files and their layered resolution (config.ts). A project's opencode.json is never read: OpenCode merges it
 // into the options the plugin receives, and its discovery is not reimplemented here.
+import type { Git } from "./version.ts"
 import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -22,6 +23,8 @@ export interface CliIo {
   readonly err: (line: string) => void
   /** The terminal, when the standard output is one (`terminalOf`, decided by the launcher): grouped, colored layout. */
   readonly terminal?: Terminal
+  /** `git` for the plugin's version (`runGit` by default). */
+  readonly git?: Git
   /** Set by `main` around the redaction, for a terminal only. */
   readonly pretty?: Pretty
 }

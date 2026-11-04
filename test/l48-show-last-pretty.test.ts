@@ -43,6 +43,18 @@ const LOG = [
 ]
 
 describe("guard show and guard last in a terminal", () => {
+  it("guard show keeps the state of a long name beside it when both fit, and below it otherwise", () => {
+    const run = world()
+    const row = /^ {4}global guard\.json \(.+\)$/
+    const wide = plain(run({ width: 400, color: false }, "show").out)
+    assert.ok(wide.some((line) => /^ {4}global guard\.json \(.+\) {2}absent$/.test(line)))
+    const name = wide.find((line) => line.includes("global guard.json"))!.replace(/ {2}absent$/, "")
+    const narrow = plain(run({ width: name.length + 4, color: false }, "show").out)
+    const index = narrow.findIndex((line) => row.test(line))
+    assert.ok(index >= 0)
+    assert.equal(narrow[index + 1]!.trim(), "absent")
+  })
+
   it("PS-1: show: a banner, then the sources read, the project's trust, the settings in force and those set aside", () => {
     const run = world({ global: { localAsks: "model" }, guard: { ruleOverrides: { eval: "deny" }, frobnicate: true } })
     const flat = run(undefined, "show").out

@@ -5,14 +5,15 @@
 import { resolve } from "node:path"
 import { parseConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
-import { readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
+import { PLUGIN_DIR, readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment, Style } from "./style.ts"
+import { pluginVersion, runGit } from "./version.ts"
 
 const NOT_READ =
   "Not read: the plugin options OpenCode merges from a project's opencode.json (.opencode included) or from OPENCODE_CONFIG_CONTENT; where they are set, the plugin may run with other settings (its log shows them at startup)."
 
-export function show(io: CliIo, agent: string | undefined): void {
+export function show(io: CliIo, agent: string | undefined, offline = false): void {
   const sources = readSources(io)
   const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
   const paths = guardPaths(directory, sources.globalDir, io.systemDir)
@@ -28,6 +29,8 @@ export function show(io: CliIo, agent: string | undefined): void {
   if (paths.global)
     read.push({ name: `global guard.json (${paths.global})`, state: !global ? "absent" : global.data ? "read" : `ignored, ${global.reason}`, style: !global ? "dim" : global.data ? "good" : "warn" })
   for (const file of files.filter((item) => !item.global)) read.push({ name: file.label, state: file.data ? "read" : `ignored, ${file.reason}`, style: file.data ? "good" : "warn" })
+  const plugin = pluginVersion(PLUGIN_DIR, io.git ?? runGit, offline)
+  read.push({ name: plugin.source, state: plugin.state, style: plugin.style })
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
   const patterns = redactionSettings(io, sources)
   const formatsOff = (version.redactionOff ?? []).map((type) => ({ key: `redactionOff.${type}`, value: "off", origin: "global guard.json" }))
@@ -98,14 +101,18 @@ function prettyShow(
   pretty.line([])
   heading(pretty, "Read from")
   const read = data.read.map((source) => ({ name: pretty.clean(source.name), state: pretty.clean(source.state), style: source.style }))
-  // A long name (a path) is printed alone, wrapped at its spaces, its state on the next line under the column.
+  // A long name (a path) keeps its state beside it when both fit; otherwise it is printed alone, wrapped at its spaces,
+  // its state on the next line under the column.
   const name = Math.min(Math.max(0, ...read.map((source) => source.name.length)), 40)
   const column = 4 + name + 2
   for (const source of read) {
-    if (source.name.length > name) {
+    if (4 + source.name.length + 2 + source.state.length > pretty.width && source.name.length > name) {
       for (const line of rowLines(pretty, [["    "]], 4, source.name)) pretty.line(line)
       for (const line of rowLines(pretty, [[" ".repeat(column)]], column, source.state, source.style)) pretty.line(line)
-    } else for (const line of rowLines(pretty, [["    "], [source.name.padEnd(name)], ["  "]], column, source.state, source.style)) pretty.line(line)
+    } else {
+      const cell = source.name.padEnd(name)
+      for (const line of rowLines(pretty, [["    "], [cell], ["  "]], 4 + cell.length + 2, source.state, source.style)) pretty.line(line)
+    }
   }
   for (const line of rowLines(pretty, [["    "]], 4, NOT_READ, "dim")) pretty.line(line)
   pretty.line([])

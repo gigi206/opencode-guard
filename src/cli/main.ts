@@ -281,9 +281,9 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       return status(io, { offline: args.includes("--offline") })
     }
     case "show": {
-      const parsed = parse(args, ["agent"])
+      const parsed = parse(args.filter((arg) => arg !== "--offline"), ["agent"])
       expect(parsed, 0, 0, "")
-      return show(io, parsed.agent)
+      return show(io, parsed.agent, args.includes("--offline"))
     }
     case "last": {
       const parsed = parse(args, [])

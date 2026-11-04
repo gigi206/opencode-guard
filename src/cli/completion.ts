@@ -53,7 +53,7 @@ ${values}
         else words="--agent --project"; fi ;;
       unset)
         if [[ $COMP_CWORD -eq 2 ]]; then words=$settings; else words="--agent --project"; fi ;;
-      show) words="--agent" ;;
+      show) words="--agent --offline" ;;
       status) words="--offline" ;;
       test) [[ " \${COMP_WORDS[*]:2:COMP_CWORD-2} " == *" -- "* ]] || words="--agent --model --tool --" ;;
       trust|untrust) words="--all"; COMPREPLY=($(compgen -d -- "$cur")) ;;
