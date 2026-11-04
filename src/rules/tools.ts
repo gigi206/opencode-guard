@@ -284,7 +284,7 @@ export function argumentPaths(input: unknown): string[] {
 }
 
 /**
- * Local or private addresses written as is (IPv4, IPv6 in brackets, `localhost` and its subdomains, URL
+ * Local or private addresses, written as is or as the host of a URL (IPv4, IPv6 in brackets, `localhost` and its subdomains, URL
  * host name in `.local` or `.internal`). Linear cost: bounded repetitions, except the host part of a URL, whose
  * class excludes the slash (each scan stops at the next URL start).
  */
@@ -294,8 +294,27 @@ const LOCAL_IPV6 = /\[(?:::1?|::ffff:[0-9a-f:.]{1,40}|fe[89ab][0-9a-f]:[0-9a-f:.
 const LOCALHOST = /(?<![\w-])localhost(?![\w-])/i
 const LOCAL_URL_HOST = /\/\/[^\s/"'`?#\\]*\.(?:local|internal)(?![\w.-])/i
 
-function localAddress(text: string): boolean {
+/** Host of a URL written in the code, up to what the shell-like template parts of it start (`http://127.1:${port}/`). */
+const URL_AUTHORITY = /\bhttps?:\/\/([^\s"'`<>\\/?#$]{1,255})/gi
+
+function writtenLocal(text: string): boolean {
   return LOCAL_IPV4.test(text) || LOCAL_IPV6.test(text) || LOCALHOST.test(text) || LOCAL_URL_HOST.test(text)
+}
+
+/** The host as the URL parser reads it: `127.1`, `0x7f000001`, `2130706433` and `0177.0.0.1` are all `127.0.0.1`. */
+function parsedLocal(text: string): boolean {
+  for (const match of text.matchAll(URL_AUTHORITY)) {
+    try {
+      if (writtenLocal(`//${new URL(`http://${match[1]}`).hostname}`)) return true
+    } catch {
+      // Not a host the parser accepts: `fetch` refuses it too.
+    }
+  }
+  return false
+}
+
+function localAddress(text: string): boolean {
+  return writtenLocal(text) || parsedLocal(text)
 }
 
 const placeholder = (text: string): Finding | undefined =>
@@ -453,7 +472,7 @@ function executeFinding(raw: string, ctx: ToolRuleContext, custom: readonly Find
       : undefined,
     ...custom,
   ])
-  // With no tool or written local address: the decision model decides, as for `webfetch`, if it judged all the code;
+  // With no tool or local address: the decision model decides, as for `webfetch`, if it judged all the code;
   // otherwise (truncated, unreachable, disabled), the ask remains. Last: never masks another finding.
   return (
     found ??
