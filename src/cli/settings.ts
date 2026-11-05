@@ -1,7 +1,7 @@
-// `guard options`: every option of the plugin with its type, the value in force, its default and where it comes from;
+// `guard settings`: every option of the plugin with its type, the value in force, its default and where it comes from;
 // `--explain` adds what it does and what it accepts. Defaults are never written here: they come from `parseConfig` given no
 // option, and the value in force from the same reading as the plugin, so that neither can drift from the code. The text of an
-// entry (type, range, values) is checked against `parseConfig` by `test/cli-options.test.ts`. A secret is never printed:
+// entry (type, range, values) is checked against `parseConfig` by `test/cli-settings.test.ts`. A secret is never printed:
 // such an entry has a `shown` that gives only its state. Options merged from a project's opencode.json are not seen.
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
@@ -13,7 +13,7 @@ import { heading, rowLines, title } from "./pretty.ts"
 import { configurationFile } from "./show.ts"
 import type { Style } from "./style.ts"
 
-export interface OptionEntry {
+export interface SettingEntry {
   readonly name: string
   readonly type: string
   /** Bounds a number must keep; beyond them the default stays. */
@@ -42,7 +42,7 @@ const count = (noun: string) => (value: unknown) => {
 }
 const isSet = (value: unknown) => (value === undefined || value === "" ? "not set" : "set")
 const customized = (value: unknown) => (value ? "custom" : "default")
-const feature = (name: keyof GuardConfig["features"], what: string, policy: boolean): OptionEntry => ({
+const feature = (name: keyof GuardConfig["features"], what: string, policy: boolean): SettingEntry => ({
   name,
   type: "boolean",
   what,
@@ -50,7 +50,7 @@ const feature = (name: keyof GuardConfig["features"], what: string, policy: bool
   relaxing: policy ? POLICY_SWITCH_RELAX : SWITCH_RELAX,
   read: (config) => config.features[name],
 })
-const threshold = (name: keyof GuardConfig["thresholds"], max: number, what: string): OptionEntry => ({
+const threshold = (name: keyof GuardConfig["thresholds"], max: number, what: string): SettingEntry => ({
   name: `thresholds.${name}`,
   type: "number",
   range: [0, max],
@@ -73,7 +73,7 @@ const TUNING: Readonly<Record<string, { readonly type: string; readonly range: r
   maxChars: { type: "integer", range: [1000, 1_000_000], what: "Longer prompts are not checked: confirmation." },
   deadlineCalls: { type: "integer", range: [1, 20], what: "The whole prompt check takes at most this many times decision.timeoutMs." },
 }
-const tuning = (check: "outputCheck" | "promptCheck", keys: readonly string[]): OptionEntry[] =>
+const tuning = (check: "outputCheck" | "promptCheck", keys: readonly string[]): SettingEntry[] =>
   keys.map((key) => ({
     name: `${check}.${key}`,
     ...TUNING[key]!,
@@ -82,7 +82,7 @@ const tuning = (check: "outputCheck" | "promptCheck", keys: readonly string[]): 
     read: (config) => (config[check]?.tuning as unknown as Record<string, number> | undefined)?.[key],
   }))
 
-export const OPTIONS: readonly OptionEntry[] = [
+export const SETTING_ENTRIES: readonly SettingEntry[] = [
   { name: "askAs", type: "string", values: [["ask", "confirmations are asked"], ["deny", "every confirmation becomes a refusal (unattended mode)"]], what: "What a confirmation request becomes. Case does not matter; empty means ask.", where: PLUGIN, read: (config) => config.askAs },
   { name: "decision.baseURL", type: "string (URL)", what: "Versioned address of the decision model, without the final path. Missing or invalid: the model is disabled, only the local rules apply.", where: PLUGIN, read: (config) => config.decision?.baseURL },
   { name: "decision.protocol", type: "string", values: [["chat", "OpenAI-compatible gateway"], ["systemone", "direct System One API"]], what: "Protocol of the decision model.", where: PLUGIN, read: (config) => config.decision?.protocol },
@@ -139,8 +139,8 @@ export const OPTIONS: readonly OptionEntry[] = [
 const NOT_READ = "Not read: the plugin options OpenCode merges from a project's opencode.json (.opencode included) or from OPENCODE_CONFIG_CONTENT."
 
 type State = "default" | "same as default" | "overridden" | "ignored"
-export interface OptionRow {
-  readonly entry?: OptionEntry
+export interface SettingRow {
+  readonly entry?: SettingEntry
   readonly name: string
   readonly value: string
   readonly fallback: string
@@ -164,7 +164,7 @@ const at = (options: Readonly<Record<string, unknown>>, name: string): unknown =
 const fileOf = (origin: string) => origin.replace(/^(global|system) configuration/, "$1 opencode.json")
 
 /** Every row, from the same reading as the plugin; `{env:…}` references are looked up in the raw configuration file. */
-export function optionRows(terminal: CliIo, agent: string | undefined) {
+export function settingRows(terminal: CliIo, agent: string | undefined) {
   // The server's environment, like `guard test`: a key known only to the service must not turn the decision model off here.
   const io = { ...terminal, env: serverEnv(terminal.env, readSources(terminal).globalDir) }
   const sources = readSources(io)
@@ -188,8 +188,8 @@ export function optionRows(terminal: CliIo, agent: string | undefined) {
     // No raw file: no reference shown.
   }
   const section = (name: string) => files.find((file) => file.global)?.data?.[name]
-  const rows: OptionRow[] = []
-  for (const entry of OPTIONS) {
+  const rows: SettingRow[] = []
+  for (const entry of SETTING_ENTRIES) {
     const written = at(sources.options, entry.name) ?? section(entry.name)
     const row = policy.get(entry.name)
     const held = row ? row.value : entry.read(parsed.config)
@@ -221,13 +221,13 @@ export function optionRows(terminal: CliIo, agent: string | undefined) {
 const STYLES: Readonly<Record<State, Style>> = { default: "dim", "same as default": "dim", overridden: "good", ignored: "warn" }
 const MAX_CELL = 26
 const cut = (text: string) => (text.length > MAX_CELL ? `${text.slice(0, MAX_CELL - 1)}…` : text)
-const typeOf = (entry: OptionEntry | undefined) => (entry ? entry.type.split(/[ ,:(]/)[0]! : "-")
+const typeOf = (entry: SettingEntry | undefined) => (entry ? entry.type.split(/[ ,:(]/)[0]! : "-")
 
-function prettyList(pretty: Pretty, rows: readonly OptionRow[]) {
+function prettyList(pretty: Pretty, rows: readonly SettingRow[]) {
   const cells = rows.map((row) => ({ row, name: pretty.clean(row.name), type: typeOf(row.entry), value: cut(pretty.clean(row.value)), fallback: cut(pretty.clean(row.fallback)), origin: pretty.clean(row.origin) }))
   const width = (pick: (cell: (typeof cells)[number]) => string, label: string) => Math.max(label.length, ...cells.map((cell) => pick(cell).length))
-  const columns = [width((c) => c.name, "Option"), width((c) => c.type, "Type"), width((c) => c.value, "In force"), width((c) => c.fallback, "Default")]
-  pretty.line([["    "], [["Option".padEnd(columns[0]!), "Type".padEnd(columns[1]!), "In force".padEnd(columns[2]!), "Default".padEnd(columns[3]!), "From"].join("  "), "group"]])
+  const columns = [width((c) => c.name, "Setting"), width((c) => c.type, "Type"), width((c) => c.value, "In force"), width((c) => c.fallback, "Default")]
+  pretty.line([["    "], [["Setting".padEnd(columns[0]!), "Type".padEnd(columns[1]!), "In force".padEnd(columns[2]!), "Default".padEnd(columns[3]!), "From"].join("  "), "group"]])
   const column = 4 + columns.reduce((sum, size) => sum + size + 2, 0)
   for (const { row, name, type, value, fallback, origin } of cells) {
     const text = `${origin}${row.state === "default" ? "" : `, ${row.state}`}`
@@ -235,16 +235,16 @@ function prettyList(pretty: Pretty, rows: readonly OptionRow[]) {
   }
 }
 
-/** The table of every option. */
-export function options(io: CliIo, agent: string | undefined): void {
-  const { rows, warnings } = optionRows(io, agent)
+/** The table of every setting. */
+export function settings(io: CliIo, agent: string | undefined): void {
+  const { rows, warnings } = settingRows(io, agent)
   if (io.pretty) {
-    title(io.pretty, "Options", agent === undefined ? "" : `main agent ${io.pretty.clean(agent)}`, "settings")
+    title(io.pretty, "Settings", agent === undefined ? "" : `main agent ${io.pretty.clean(agent)}`, "settings")
     io.pretty.line([])
     prettyList(io.pretty, rows)
     io.pretty.line([])
     for (const line of rowLines(io.pretty, [["    "]], 4, NOT_READ, "dim")) io.pretty.line(line)
-    for (const line of rowLines(io.pretty, [["    "]], 4, "guard options --explain <option>: what it does and what it accepts.", "dim")) io.pretty.line(line)
+    for (const line of rowLines(io.pretty, [["    "]], 4, "guard settings --explain <setting>: what it does and what it accepts.", "dim")) io.pretty.line(line)
   } else {
     const cells = rows.map((row) => [row.name, typeOf(row.entry), row.value, row.fallback, row.origin, row.state])
     const widths = [0, 1, 2, 3, 4].map((index) => Math.max(...cells.map((cell) => cell[index]!.length)))
@@ -254,11 +254,11 @@ export function options(io: CliIo, agent: string | undefined): void {
   if (warnings.length) io.err(`${warnings.length} warning(s): guard show lists them.`)
 }
 
-/** What one option does, what it accepts, and its state here; `all` for every option. */
-export function explainOption(io: CliIo, name: string, agent: string | undefined): void {
-  const { rows } = optionRows(io, agent)
+/** What one setting does, what it accepts, and its state here; `all` for every setting. */
+export function explainSetting(io: CliIo, name: string, agent: string | undefined): void {
+  const { rows } = settingRows(io, agent)
   const chosen = name === "all" ? rows.filter((row) => row.entry) : rows.filter((row) => row.name === name)
-  if (!chosen.length) throw new CliError(`no option named ${name}`)
+  if (!chosen.length) throw new CliError(`no setting named ${name}`)
   for (const row of chosen) {
     const entry = row.entry
     const fields: Array<readonly [string, string]> = [

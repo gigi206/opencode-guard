@@ -9,7 +9,7 @@ import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import { main } from "../src/cli/main.ts"
 import { testCall } from "../src/cli/test.ts"
-import { OPTIONS } from "../src/cli/options.ts"
+import { SETTING_ENTRIES } from "../src/cli/settings.ts"
 import { parseConfig, type PluginDeclaration } from "../src/config.ts"
 import { setupGuard } from "../src/index.ts"
 import { fakeContext } from "./fake-ctx.ts"
@@ -85,9 +85,9 @@ describe("a project cannot unprotect an agent", () => {
 })
 
 describe("the command line, with the global declaration", () => {
-  it("PU-15: guard options says where the option counts", () =>
-    assert.equal(OPTIONS.find((entry) => entry.name === "unprotectedAgent")?.where, "plugin options of the global or system configuration"))
-  it("witness: PU-11: guard options, guard show and guard status keep what the global configuration declares", async () => {
+  it("PU-15: guard settings says where the option counts", () =>
+    assert.equal(SETTING_ENTRIES.find((entry) => entry.name === "unprotectedAgent")?.where, "plugin options of the global or system configuration"))
+  it("witness: PU-11: guard settings, guard show and guard status keep what the global configuration declares", async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-pu-")))
     const [globalDir, systemDir, project] = [join(root, "g"), join(root, "s"), join(root, "w")]
     for (const dir of [globalDir, systemDir, project]) mkdirSync(dir)
@@ -99,7 +99,7 @@ describe("the command line, with the global declaration", () => {
       assert.equal(await main(args, io), 0, args.join(" "))
       return lines.join("\n")
     }
-    assert.match(await run(["options"]), new RegExp(`unprotectedAgent\\s.*${AGENT}`))
+    assert.match(await run(["settings"]), new RegExp(`unprotectedAgent\\s.*${AGENT}`))
     const show = await run(["show"])
     assert.match(show, /agents\.sandbox\.guard\s+off/)
     assert.doesNotMatch(show, /ignored/)

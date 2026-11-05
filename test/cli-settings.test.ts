@@ -1,4 +1,4 @@
-// `guard options`: every option has an entry, what an entry says about a value is what the plugin's reading does with it,
+// `guard settings`: every option has an entry, what an entry says about a value is what the plugin's reading does with it,
 // a secret is never printed. Fake settings in throwaway directories, nothing is run.
 import "./tmp.ts"
 import assert from "node:assert/strict"
@@ -8,7 +8,7 @@ import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, it } from "node:test"
 import { main } from "../src/cli/main.ts"
-import { OPTIONS } from "../src/cli/options.ts"
+import { SETTING_ENTRIES } from "../src/cli/settings.ts"
 import { DECISION_KEYS, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_TUNING, OPTION_KEYS, OUTPUT_CHECK_KEYS, parseConfig, PROMPT_CHECK_KEYS, THRESHOLD_KEYS } from "../src/config.ts"
 
 const PLUGIN_DIR = resolve(fileURLToPath(new URL("..", import.meta.url)))
@@ -16,7 +16,7 @@ const KEY = "KEY-MARKER-opencode-guard"
 const BASE = { baseURL: "https://decision.example.invalid/v1", model: "m" }
 
 function world(options: Record<string, unknown>, raw?: string, env: Record<string, string> = {}, guard?: Record<string, unknown>, service?: Record<string, unknown>) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-options-")))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-settings-")))
   const [globalDir, systemDir, home, project] = [join(root, "global"), join(root, "system"), join(root, "home"), join(root, "project")]
   for (const dir of [globalDir, systemDir, home, project]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(globalDir, "opencode.json"), raw ?? JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options }] }))
@@ -29,16 +29,16 @@ function world(options: Record<string, unknown>, raw?: string, env: Record<strin
   }
 }
 const row = (lines: readonly string[], name: string) => lines.find((line) => line.startsWith(`${name} `))?.trim().split(/ {2,}/)
-const names = new Set(OPTIONS.map((entry) => entry.name))
+const names = new Set(SETTING_ENTRIES.map((entry) => entry.name))
 const set = (name: string, value: unknown): Record<string, unknown> => {
   const [head, leaf] = name.split(".")
   if (!leaf) return { [head!]: value }
   return { [head!]: { ...(head === "decision" ? BASE : {}), [leaf]: value } }
 }
 
-describe("guard options: entries", () => {
+describe("guard settings: entries", () => {
   it("every option and sub-option has exactly one entry", () => {
-    assert.equal(names.size, OPTIONS.length)
+    assert.equal(names.size, SETTING_ENTRIES.length)
     const nested = ["decision", "thresholds", "outputCheck", "promptCheck"]
     for (const key of OPTION_KEYS) assert.ok(names.has(key) || nested.includes(key), key)
     for (const key of DECISION_KEYS) assert.ok(names.has(`decision.${key}`), key)
@@ -53,7 +53,7 @@ describe("guard options: entries", () => {
     for (const name of names) assert.ok(docs.includes(name.split(".").pop()!), name)
   })
   it("the bounds of a number are those of the plugin", () => {
-    for (const entry of OPTIONS.filter((item) => item.range && !["rememberConfirmations"].includes(item.name))) {
+    for (const entry of SETTING_ENTRIES.filter((item) => item.range && !["rememberConfirmations"].includes(item.name))) {
       const [min, max] = entry.range!
       const accepted = (value: number) => {
         const options = set(entry.name, value)
@@ -67,7 +67,7 @@ describe("guard options: entries", () => {
     }
   })
   it("the values of a closed list are those of the plugin", () => {
-    for (const entry of OPTIONS.filter((item) => item.values && !["outputCheck", "promptCheck", "localAsks"].includes(item.name))) {
+    for (const entry of SETTING_ENTRIES.filter((item) => item.values && !["outputCheck", "promptCheck", "localAsks"].includes(item.name))) {
       for (const [value] of entry.values!) {
         const options = set(entry.name, value)
         const { config } = parseConfig(options, {}, () => [{ label: "global", options }])
@@ -79,9 +79,9 @@ describe("guard options: entries", () => {
   })
 })
 
-describe("guard options: table", () => {
+describe("guard settings: table", () => {
   it("the default comes from the plugin; a value set is marked with its origin", () => {
-    const { code, out } = world({ debug: true, cacheMax: 500 })(["options"])
+    const { code, out } = world({ debug: true, cacheMax: 500 })(["settings"])
     assert.equal(code, 0)
     assert.deepEqual(row(out, "debug"), ["debug", "boolean", "true", "false", "global opencode.json", "overridden"])
     assert.deepEqual(row(out, "cacheMax"), ["cacheMax", "integer", "500", "500", "global opencode.json", "same as default"])
@@ -89,18 +89,18 @@ describe("guard options: table", () => {
   })
   it("a value refused is shown beside the one retained", () => {
     const run = world({ cacheTtlMs: 9_999_999 })
-    assert.equal(row(run(["options"]).out, "cacheTtlMs")![5], "ignored")
-    const lines = run(["options", "--explain", "cacheTtlMs"]).out.join("\n")
+    assert.equal(row(run(["settings"]).out, "cacheTtlMs")![5], "ignored")
+    const lines = run(["settings", "--explain", "cacheTtlMs"]).out.join("\n")
     assert.match(lines, /In force: \d+ \(written: 9999999, ignored/)
   })
   it("a rule set has its own row", () => {
-    const lines = world({ ruleOverrides: { eval: "deny" } })(["options"]).out
+    const lines = world({ ruleOverrides: { eval: "deny" } })(["settings"]).out
     assert.deepEqual(row(lines, "ruleOverrides.eval")?.slice(2), ["deny", "none", "global opencode.json", "overridden"])
     assert.equal(row(lines, "ruleOverrides")![2], "1 rule")
   })
   it("the scope of a setting: opencode.json, then guard.json over it, and the defaults of the decision model", () => {
     const run = world({ decision: BASE, localAsks: "ask" }, undefined, {}, { localAsks: "model", ruleOverrides: { eval: "deny" } })
-    const lines = run(["options"]).out
+    const lines = run(["settings"]).out
     assert.match(row(lines, "localAsks")!.join(" "), /global guard\.json/)
     assert.deepEqual(row(lines, "ruleOverrides.eval")?.slice(2, 4), ["deny", "none"])
     assert.match(row(lines, "ruleOverrides.eval")![4]!, /global guard\.json/)
@@ -108,7 +108,7 @@ describe("guard options: table", () => {
     assert.deepEqual(row(lines, "decision.protocol")?.slice(2, 4), ["chat", "chat"])
   })
   it("options are listed in alphabetical order, a rule set right under ruleOverrides", () => {
-    const lines = world({ ruleOverrides: { eval: "deny" } })(["options"]).out.filter((line) => !line.startsWith("Not read"))
+    const lines = world({ ruleOverrides: { eval: "deny" } })(["settings"]).out.filter((line) => !line.startsWith("Not read"))
     const listed = lines.map((line) => line.split(" ")[0]!)
     assert.deepEqual(listed, [...listed].sort((a, b) => a.localeCompare(b, "en")))
     assert.equal(listed[listed.indexOf("ruleOverrides") + 1], "ruleOverrides.eval")
@@ -116,53 +116,58 @@ describe("guard options: table", () => {
   })
   it("a secret is never printed, in the table or the explanation", () => {
     const run = world({ decision: { ...BASE, apiKey: KEY, headers: { "X-Test": KEY } }, allowlist: [KEY] })
-    for (const args of [["options"], ["options", "--explain", "all"], ["options", "--explain", "decision.apiKey"]]) {
+    for (const args of [["settings"], ["settings", "--explain", "all"], ["settings", "--explain", "decision.apiKey"]]) {
       const text = run(args).out.join("\n")
       assert.ok(!text.includes(KEY), args.join(" "))
     }
-    const lines = run(["options"]).out
+    const lines = run(["settings"]).out
     assert.equal(row(lines, "decision.apiKey")![2], "set")
     assert.equal(row(lines, "decision.headers")![2], "1 header")
     assert.equal(row(lines, "allowlist")![2], "1 entry")
   })
   it("a terminal gets the aligned layout, and redirected output none of it", () => {
     const run = world({ debug: true })
-    const pretty = run(["options"], { width: 170, color: false }).out
-    assert.ok(pretty.some((line) => line.includes("Option") && line.includes("In force") && line.includes("Default")))
+    const pretty = run(["settings"], { width: 170, color: false }).out
+    assert.ok(pretty.some((line) => line.includes("Setting") && line.includes("In force") && line.includes("Default")))
     assert.ok(pretty.some((line) => /^ {4}debug\s+boolean\s+true\s+false\s+global opencode.json, overridden/.test(line)))
   })
 })
 
-describe("guard options: explanation", () => {
+describe("guard settings: explanation", () => {
   it("type, bounds, values and meaning", () => {
     const run = world({})
-    const askAs = run(["options", "--explain", "askAs"]).out.join("\n")
+    const askAs = run(["settings", "--explain", "askAs"]).out.join("\n")
     assert.match(askAs, /Type: string/)
     assert.match(askAs, /Value deny: every confirmation becomes a refusal/)
-    assert.match(run(["options", "--explain", "cacheMax"]).out.join("\n"), /Range: 0 to 10000/)
+    assert.match(run(["settings", "--explain", "cacheMax"]).out.join("\n"), /Range: 0 to 10000/)
   })
   it("an {env:…} reference is shown with what it resolves to here", () => {
     const raw = JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { askAs: "{env:FAKE_ASK}" } }] })
-    const text = world({}, raw, { FAKE_ASK: "deny" })(["options", "--explain", "askAs"]).out.join("\n")
+    const text = world({}, raw, { FAKE_ASK: "deny" })(["settings", "--explain", "askAs"]).out.join("\n")
     assert.match(text, /In force: deny/)
     assert.match(text, /Reference: \{env:FAKE_ASK\}.*the server's may differ/)
   })
   it("a key known only to the service keeps the decision model on, as for the plugin; an empty reference is not refused", () => {
     const raw = JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { askAs: "{env:FAKE_EMPTY}", decision: { ...BASE, apiKey: "{env:FAKE_SERVICE_KEY}" } } }] })
     const run = world({}, raw, {}, undefined, { env: { FAKE_SERVICE_KEY: KEY } })
-    const { out } = run(["options"])
+    const { out } = run(["settings"])
     assert.equal(row(out, "decision.model")![2], "m")
     assert.equal(row(out, "decision.apiKey")![2], "set")
     assert.equal(row(out, "decision.protocol")![5], "default")
     assert.notEqual(row(out, "askAs")![5], "ignored")
     assert.ok(!out.join("\n").includes(KEY))
-    const unset = world({}, raw)(["options"]).out
+    const unset = world({}, raw)(["settings"]).out
     assert.equal(row(unset, "decision.apiKey")![2], "not set")
   })
   it("all explains every option; an unknown one is an error", () => {
     const run = world({})
-    const lines = run(["options", "--explain", "all"]).out
+    const lines = run(["settings", "--explain", "all"]).out
     for (const name of names) assert.ok(lines.includes(name), name)
-    assert.equal(run(["options", "--explain", "nosuch"]).code, 1)
+    assert.equal(run(["settings", "--explain", "nosuch"]).code, 1)
+  })
+  it("guard options is no longer a command: the usual unknown command error", () => {
+    const { code, err } = world({})(["options"])
+    assert.equal(code, 2)
+    assert.equal(err[0], "guard: unknown command options")
   })
 })

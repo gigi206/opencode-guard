@@ -24,7 +24,7 @@ export function configurationFile(directory: string | undefined): string {
 
 export function show(io: CliIo, agent: string | undefined, offline = false): void {
   showSettings(io, agent, offline)
-  io.out("All the options, with their defaults: guard options")
+  io.out("All the settings, with their defaults: guard settings")
 }
 
 function showSettings(io: CliIo, agent: string | undefined, offline: boolean): void {

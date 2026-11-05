@@ -314,13 +314,13 @@ describe("the command line tells the truth", () => {
     const run = (...args: string[]) => runIn(project, ...args)
     return { run, runIn, guardFile: join(globalDir, "guard.json"), project, home, systemDir, globalDir }
   }
-  it("PS-30: guard set writes a redaction switch in the project's section; guard show and guard options read it; unset takes it back", () => {
+  it("PS-30: guard set writes a redaction switch in the project's section; guard show and guard settings read it; unset takes it back", () => {
     const w = world()
     assert.equal(w.run("set", "redactOutputs", "off", "--project").code, 0)
     assert.deepEqual(JSON.parse(readFileSync(w.guardFile, "utf8")).projects[w.project], { redactOutputs: false })
     const show = w.run("show").out
     assert.match(show, /redactOutputs\s+false\s+global guard\.json, projects\[/)
-    assert.match(w.run("options").out, /redactOutputs\s+boolean\s+false\s+true\s+global guard\.json, projects\[.*overridden/)
+    assert.match(w.run("settings").out, /redactOutputs\s+boolean\s+false\s+true\s+global guard\.json, projects\[.*overridden/)
     assert.equal(w.run("unset", "redactOutputs", "--project").code, 0)
     assert.match(w.run("show").out, /redactOutputs\s+true\s+default/)
   })
@@ -331,11 +331,11 @@ describe("the command line tells the truth", () => {
   it("PS-31: the refusal names the right command", () => {
     for (const args of misplaced) assert.match(world().run(...args).err, /goes with --project and without --agent/)
   })
-  it("PS-32: a check turned off for this project, in guard show and guard options", () => {
+  it("PS-32: a check turned off for this project, in guard show and guard settings", () => {
     const w = world()
     assert.equal(w.run("set", "promptCheck", "false", "--project").code, 0)
     assert.match(w.run("show").out, /promptCheck\s+false\s+global guard\.json, projects\[/)
-    assert.match(w.run("options").out, /promptCheck\s+boolean[^\n]*false\s+true/)
+    assert.match(w.run("settings").out, /promptCheck\s+boolean[^\n]*false\s+true/)
   })
   it("PS-33: the value of the global opencode.json keeps its origin", () => {
     assert.match(world({ redactWire: false }).run("show").out, /redactWire\s+false\s+global configuration/)
@@ -395,10 +395,10 @@ describe("the command line tells the truth", () => {
   it("PS-49: guard set foo lists the five switches too", () => {
     assert.match(world().run("set", "foo", "true").err, /one of .*redactOutputs, redactPrompt, redactWire, outputCheck, promptCheck/)
   })
-  it("PS-50: guard options: a check's enabled key and its true say what they do", () => {
+  it("PS-50: guard settings: a check's enabled key and its true say what they do", () => {
     const w = world()
-    for (const name of ["outputCheck", "promptCheck", "outputCheck.enabled", "promptCheck.enabled"]) assert.match(w.run("options", "--explain", name).out, /a project's true turns it back on only where a global source leaves it on/, name)
-    for (const name of ["outputCheck.enabled", "promptCheck.enabled"]) assert.match(w.run("options", "--explain", name).out, /a project section of a global source/, name)
+    for (const name of ["outputCheck", "promptCheck", "outputCheck.enabled", "promptCheck.enabled"]) assert.match(w.run("settings", "--explain", name).out, /a project's true turns it back on only where a global source leaves it on/, name)
+    for (const name of ["outputCheck.enabled", "promptCheck.enabled"]) assert.match(w.run("settings", "--explain", name).out, /a project section of a global source/, name)
   })
   it("PS-51: guard status shows the refusals of the latest start", () => {
     const line = (time: string, level: string, text: string) => `2026-11-05T10:00:${time}.000Z ${level} ${text}`
