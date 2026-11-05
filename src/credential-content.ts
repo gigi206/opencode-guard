@@ -14,6 +14,10 @@ export const MAX_OPENED = 128
 
 /** PEM private key header (RSA, EC, DSA, OpenSSH, encrypted or unencrypted PKCS#8, SSH2), private PGP block, or PuTTY. */
 const PRIVATE_KEY_LINE = /^\s*(?:-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----|PuTTY-User-Key-File-\d)/
+/** Start of a file that is a JSON object. */
+const JSON_OBJECT = /^\s*\{/
+/** A key in such a file (a Google service account file): its `private_key` value, wherever it stands in the head. */
+const JSON_PRIVATE_KEY = /"private_key"\s*:\s*"-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/
 const PEM_BEGIN = /^-----BEGIN [A-Z0-9 ]{1,60}-----\s*$/
 const PEM_END = /^-----END [A-Z0-9 ]{1,60}-----\s*$/
 /** Lines OpenSSL writes before an exported key: attributes, their indented continuations, subject and issuer. */
@@ -62,10 +66,11 @@ function readHead(path: string, io: ContentIo): string | undefined {
 
 /**
  * Key file: the header opens the file, preceded only by blank lines, OpenSSL-exported attributes, or
- * complete PEM blocks (certificate before the key). A header quoted in code or a document (test data) does
- * not count. A single pass over the lines of the read header.
+ * complete PEM blocks (certificate before the key), or the file is a JSON object with a `private_key`. A header
+ * quoted in code or a document (test data) does not count. A single pass over the lines of the read header.
  */
 export function hasPrivateKeyHeader(head: string): boolean {
+  if (JSON_OBJECT.test(head) && JSON_PRIVATE_KEY.test(head)) return true
   let block = false
   for (const raw of head.split("\n")) {
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw

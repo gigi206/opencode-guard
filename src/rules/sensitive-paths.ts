@@ -35,6 +35,16 @@ const SECRET_SEGMENTS = [
   "/.kube/config",
   "/.docker/config.json",
   "/.config/gh/hosts.yml",
+  // Cloud command lines: tokens that give access to a whole account.
+  "/.config/gcloud/application_default_credentials.json",
+  "/.config/gcloud/credentials.db",
+  "/.config/gcloud/access_tokens.db",
+  "/.config/gcloud/legacy_credentials/",
+  "/.azure/accessTokens.json",
+  "/.azure/msal_token_cache.json",
+  "/.azure/msal_token_cache.bin",
+  "/.azure/service_principal_entries.json",
+  "/.terraform.d/credentials.tfrc.json",
   // OpenCode: `auth.json` (imported into `opencode.db` by V2), `mcp-auth.json` (cc-safety-net list; absent from
   // the 2.0.29 code), `account.json` (API keys; no longer read by 2.0.29, may remain on disk).
   "/.local/share/opencode/auth.json",

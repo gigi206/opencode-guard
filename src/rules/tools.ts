@@ -227,7 +227,17 @@ const PATH_KEY_WORDS = new Set([
   "cwd",
   "dest",
   "destination",
+  "source",
+  "sources",
+  "src",
+  "from",
+  "to",
+  "target",
+  "input",
+  "output",
 ])
+/** Key words that also name plain text: only a value without a blank is taken as a path under them. */
+const TEXT_KEY_WORDS = new Set(["from", "to", "target", "input", "output"])
 const PATH_MAX = 4096
 /** Shape of a path whatever the key: absolute, explicit relative, or in the home directory. */
 const PATH_SHAPE = /^(?:\/|\.{1,2}\/|(?:~|\$HOME|\$\{HOME\})(?:\/|$))/
@@ -235,13 +245,14 @@ const FILE_URI = /^file:/i
 /** Addresses (other than `file:`) that do not designate a local file: never candidates. */
 const OTHER_URL = /^(?:[a-z][a-z0-9+.-]*:\/\/|data:)/i
 
-function isPathKey(key: string): boolean {
+/** Last word of a key, in lower case: the one that says what the key holds. */
+function keyWord(key: string): string {
   const words = key
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
     .split(/[\s_.-]+/)
     .filter(Boolean)
-  return PATH_KEY_WORDS.has(words[words.length - 1]?.toLowerCase() ?? "")
+  return words[words.length - 1]?.toLowerCase() ?? ""
 }
 
 /** `file:` URI → path (`%2E` decoded); invalid (host, shape): kept as is. */
@@ -255,7 +266,7 @@ function fromFileURI(value: string): string {
 
 /**
  * Paths designated by the arguments of an MCP or plugin tool (argument names specific to each server): single-line
- * strings under a path key, then strings shaped like a path under another key (free text is not
+ * strings under a path key (a text key: without a blank), then strings shaped like a path elsewhere (free text is not
  * taken). This order first gives the most likely paths the call's disk lookup budget.
  * Iterative traversal (no recursion), without modifying the input.
  */
@@ -263,22 +274,22 @@ export function argumentPaths(input: unknown): string[] {
   const byKey = new Set<string>()
   const byShape = new Set<string>()
   const seen = new Set<object>()
-  const stack: Array<readonly [unknown, boolean]> = [[input, false]]
+  const stack: Array<readonly [unknown, string]> = [[input, ""]]
   while (stack.length > 0) {
-    const [value, underPathKey] = stack.pop()!
+    const [value, word] = stack.pop()!
     if (typeof value === "string") {
       const text = value.trim().replace(/^["'`]+/, "")
       const uri = FILE_URI.test(text)
       if (text === "" || value.length > PATH_MAX || /[\r\n]/.test(value) || (!uri && OTHER_URL.test(text))) continue
-      if (underPathKey) byKey.add(uri ? fromFileURI(text) : value)
+      if (PATH_KEY_WORDS.has(word) && !(TEXT_KEY_WORDS.has(word) && /\s/.test(text))) byKey.add(uri ? fromFileURI(text) : value)
       else if (uri || PATH_SHAPE.test(text)) byShape.add(uri ? fromFileURI(text) : value)
       continue
     }
     if (value === null || typeof value !== "object" || seen.has(value)) continue
     seen.add(value)
     // Array value: key of the array (`filePaths: [...]`).
-    if (Array.isArray(value)) for (const item of value) stack.push([item, underPathKey])
-    else for (const [key, item] of Object.entries(value)) stack.push([item, isPathKey(key)])
+    if (Array.isArray(value)) for (const item of value) stack.push([item, word])
+    else for (const [key, item] of Object.entries(value)) stack.push([item, keyWord(key)])
   }
   return [...byKey, ...[...byShape].filter((path) => !byKey.has(path))]
 }

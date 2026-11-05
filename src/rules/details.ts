@@ -265,7 +265,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   ],
   [
     "shell-startup-file",
-    detail("A shell startup file chosen by an environment variable or a command-line option; the file runs when the shell starts, so the rule asks.", "shell startup file designated by environment or command-line option", "a startup file chosen at run time"),
+    detail("A shell startup file chosen by an environment variable or a command-line option; the file runs when the shell starts, so the rule asks. It also asks for a variable set for the launched program, in front of it, behind env and the other launchers, or with export, declare or typeset: those of the dynamic loader (LD_PRELOAD, LD_AUDIT, LD_LIBRARY_PATH, DYLD_INSERT_LIBRARIES), those of a runtime (NODE_OPTIONS, NODE_PATH, PERL5OPT, PERL5LIB, RUBYOPT, RUBYLIB, PYTHONSTARTUP, PYTHONPATH, PYTHONHOME), and EDITOR, VISUAL, PAGER and BROWSER, unless the value, given whole with =, is one of cat, true, :, less, more, vi, vim or nano. An empty value given with = loads nothing and does not ask. The reason then says that the variable makes the program load or run other code.", "shell startup file designated by environment or command-line option", "a startup file chosen at run time"),
   ],
   ["awk-dynamic-exec", detail("An awk program that runs non-literal text as a command; the command is only known at run time, so the rule asks.", "awk program executing non-literal text as a command")],
   ["git-exec-config", detail("A git setting that names a program to run (for example, a pager, an SSH command or a hook); the program is not checked, so the rule asks.", "git configuration designates a program to run")],

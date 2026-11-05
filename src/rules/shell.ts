@@ -2054,9 +2054,14 @@ function variableSource(
   return redirected !== undefined && literalPath(redirected) === undefined && startsWithVariable(redirected)
 }
 
+/** Marks of a value read only in part, which leave it neither empty nor a plain program: added to by `+=`, or cut in a quote. */
+const APPENDED_VALUE = "\0"
+const CUT_VALUE = "\x01"
+
 /**
- * Environment assignments at the start of a segment (wrappers `env`, `sudo`… included, like `commandOf`),
- * then the launched command and its arguments. One pass.
+ * Environment assignments at the start of a segment (wrappers `env`, `sudo`… included, like `commandOf`, a subshell's
+ * parenthesis set aside on each word), then the launched command and its arguments. `+=` adds to a value it cannot know
+ * (`APPENDED_VALUE`) and keeps what was read before it. One pass.
  */
 function envAssignments(segment: string): { assigns: Map<string, string>; name: string; args: string[] } {
   const tokens = segment.split(/\s+/).filter(Boolean).map(unquote)
@@ -2065,10 +2070,15 @@ function envAssignments(segment: string): { assigns: Map<string, string>; name: 
   let wrapper: string | undefined
   while (i < tokens.length) {
     attachedSplitString(tokens, i, wrapper)
-    const token = tokens[i]!
-    const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/.exec(token)
+    const token = tokens[i]!.replace(/^\(+/, "")
+    if (token === "") {
+      i++
+      continue
+    }
+    const assignment = /^([A-Za-z_][A-Za-z0-9_]*)(\+?)=([\s\S]*)$/.exec(token)
     if (assignment) {
-      assigns.set(assignment[1]!, assignment[2]!)
+      const [, variable, adds, value] = assignment as unknown as [string, string, string, string]
+      assigns.set(variable, adds ? `${APPENDED_VALUE}${assigns.get(variable) ?? ""}${value}` : value)
       i++
       continue
     }
@@ -2171,13 +2181,113 @@ function shellStartupFile(command: string): boolean {
     const shell = readsLaunched(segment, previous, startup) ? envAssignments(tailWords(segment).join(" ")) : previous
     if (startup || (shell !== previous && STARTUP_SHELLS.has(baseHead(bareHead(shell.name))))) {
       const modes = shellModes(shell.args)
-      const posix = modes.posix || shell.assigns.has("POSIXLY_CORRECT") || /(?:^|:)posix(?::|$)/.test(shell.assigns.get("SHELLOPTS") ?? "")
-      if (startupFileAsk(previous, previousInteractive(previous), false) || startupFileAsk(shell, modes.interactive, posix)) return true
+      const stated = modes.posix || shell.assigns.has("POSIXLY_CORRECT")
+      const options = shell.assigns.get("SHELLOPTS") ?? ""
+      const named = /(?:^|:)posix(?::|$)/.test(options.replace(/^\0+/, ""))
+      // An append to a value it cannot know leaves the mode open: either reading that asks counts.
+      if (named && options.startsWith(APPENDED_VALUE) && startupFileAsk(shell, modes.interactive, stated)) return true
+      if (startupFileAsk(previous, previousInteractive(previous), false) || startupFileAsk(shell, modes.interactive, stated || named)) return true
     }
     // Isolated export/declare/typeset: designates the startup of subsequent shells.
     if (rawHead === "export" || rawHead === "declare" || rawHead === "typeset") {
-      if (/\bBASH_ENV=/.test(segment) || /(?:^|\s)ENV=/.test(segment) || /\bZDOTDIR=/.test(segment)) return true
+      if (/\bBASH_ENV\+?=/.test(segment) || /(?:^|\s)ENV\+?=/.test(segment) || /\bZDOTDIR\+?=/.test(segment)) return true
     }
+  }
+  return false
+}
+
+/** Variables that have the dynamic loader or a runtime load code, whatever their value. */
+const CODE_LOADING_ENV = new Set([
+  "LD_PRELOAD",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "PERL5OPT",
+  "PERL5LIB",
+  "RUBYOPT",
+  "RUBYLIB",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+])
+/** Variables that name a program another one launches; the values of `PLAIN_PROGRAMS` choose nothing to check. */
+const PROGRAM_ENV = new Set(["EDITOR", "VISUAL", "PAGER", "BROWSER"])
+const PLAIN_PROGRAMS = new Set(["", "cat", "true", ":", "less", "more", "vi", "vim", "nano"])
+const EXPORTING_WORDS = new Set(["export", "declare", "typeset"])
+
+const CODE_LOADING_REASON = "environment variable makes the program load or run other code"
+
+/** An empty value loads nothing; a marked value (`APPENDED_VALUE`, `CUT_VALUE`) is not whole, so neither empty nor plain. */
+function loadsCode(variable: string, value: string): boolean {
+  const plain = unquote(value)
+  return CODE_LOADING_ENV.has(variable) ? plain !== "" : PROGRAM_ENV.has(variable) && !PLAIN_PROGRAMS.has(plain)
+}
+
+/** The command with its quoted blanks and separators replaced, so that quoted text starts no word or segment; unchanged where `quoteStates` does not hold. */
+function quotedAsOneWord(command: string): string {
+  const states = quoteStates(command)
+  return states ? command.replace(/[\s;&|]/g, (char, i: number) => (states[i] ? "_" : char)) : command
+}
+
+/** Quote still open at the end of this word, from the one open at its start. */
+function quoteAfter(word: string, open = ""): string {
+  let quote = open
+  for (let i = 0; i < word.length; i++) {
+    const char = word[i]!
+    if (char === "\\" && quote !== "'") i++
+    else if (quote) quote = char === quote ? "" : quote
+    else if (char === "'" || char === '"') quote = char
+  }
+  return quote
+}
+
+/** Marks a word that assigns and ends inside a quote: what follows it is not read. */
+function markedCut(word: string): string {
+  return word.includes("=") && quoteAfter(word) !== "" ? word + CUT_VALUE : word
+}
+
+/** A word that assigns a `loadsCode` variable. */
+function assignsCodeLoading(word: string): boolean {
+  const variable = /^\(*([A-Za-z_][A-Za-z0-9_]*)\+?=/.exec(word)?.[1] ?? ""
+  return CODE_LOADING_ENV.has(variable) || PROGRAM_ENV.has(variable)
+}
+
+/**
+ * The segment with each value that blanks cut in a quote put back as one word, as `quotedAsOneWord` would, so that the
+ * assignments behind it stay read. A quote not closed in the segment, or one that would swallow such an assignment (this
+ * reading of the quotes may be wrong there: `$'it\'s'`): the words from there on are only marked. Each word is read at
+ * most twice, so one pass.
+ */
+function valuesKeptWhole(segment: string): string {
+  const words = segment.split(/\s+/)
+  const kept: string[] = []
+  for (let i = 0; i < words.length; ) {
+    let end = i + 1
+    let quote = words[i]!.includes("=") ? quoteAfter(words[i]!) : ""
+    while (quote !== "" && end < words.length) quote = quoteAfter(words[end++]!, quote)
+    if (quote !== "" || words.slice(i + 1, end).some(assignsCodeLoading)) return [...kept, ...words.slice(i).map(markedCut)].join(" ")
+    kept.push(words.slice(i, end).join("_"))
+    i = end
+  }
+  return kept.join(" ")
+}
+
+/**
+ * Assignment of a `loadsCode` variable for the launched program: in front of it (launchers and redirections included, as
+ * read by `envAssignments`), or in an `export`, `declare` or `typeset` for the programs to come. Where `quotedAsOneWord`
+ * could not keep a value whole, `valuesKeptWhole` does, or marks the piece read. A segment that launches nothing assigns a
+ * shell variable only, unless its value was cut there: the rest may reach a program. One pass per segment.
+ */
+function codeLoadingEnv(command: string): boolean {
+  for (const text of segments(quotedAsOneWord(command))) {
+    const segment = valuesKeptWhole(text)
+    const previous = envAssignments(segment)
+    const { assigns, name, args } = readsLaunched(segment, previous, false) ? envAssignments(tailWords(segment).join(" ")) : previous
+    const exporting = EXPORTING_WORDS.has(bareHead(name))
+    const chosen = exporting ? args.flatMap((arg) => [...envAssignments(arg).assigns]) : name === "" ? [...assigns].filter(([, value]) => value.endsWith(CUT_VALUE)) : assigns
+    for (const [variable, value] of chosen) if (loadsCode(variable, value)) return true
   }
   return false
 }
@@ -3652,8 +3762,8 @@ const ASK_RULES: readonly RegexRule[] = [
     reason: "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
     test: (command, ctx) => outranksSelfProtection(ctx.active) && writtenTargets(command).some((target) => systemWrite(target, ctx.home, ctx)),
   },
-  // Net: a protected location named by a command that does more than read, in a form of write no rule above reads. Last:
-  // an ask above keeps its place. Limit reached or settings named: never left to the decision model, as the entries above.
+  // Net: a protected location named by a command that does more than read, in a form of write no rule above reads. After
+  // them: an ask above keeps its place. Limit reached or settings named: never left to the decision model, as the entries above.
   {
     id: "self-protection",
     verdict: "ask",
@@ -3661,6 +3771,13 @@ const ASK_RULES: readonly RegexRule[] = [
     test: (command, ctx) => NAMED_LOCATION.note(command, ctx) !== undefined,
     detail: (command, ctx) => ({ reason: NAMED_LOCATION.peek(command, ctx) === "limit" ? NAMED_WORDS_LIMIT_REASON : NAMED_LOCATION_REASON }),
     userOnly: (command, ctx) => NAMED_LOCATION.peek(command, ctx) !== "opencode",
+  },
+  // Last: any other ask names the cause better than the variable does.
+  {
+    id: "shell-startup-file",
+    verdict: "ask",
+    reason: CODE_LOADING_REASON,
+    test: codeLoadingEnv,
   },
 ]
 
@@ -4908,13 +5025,15 @@ function withoutAssignments(command: string): { view: string; flag?: string } {
 
 /**
  * Most severe finding (verdict alone) between `found`, that of the view without leading assignments and the ask of its
- * exhausted budget; at equal verdict, `found` (mark included).
+ * exhausted budget; at equal verdict, `found` (mark included), unless it only names a variable that loads code (`ssh` is
+ * seen behind the assignment only here).
  */
 function assignedFinding(command: string, ctx: ShellRuleContext, found: Finding | undefined): Finding | undefined {
   try {
     const { view: bare, flag } = found?.verdict === "deny" ? { view: command } : withoutAssignments(command)
     const undetermined = flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined
-    return mostSevere([found, bare === command ? undefined : layeredShellFinding(bare, ctx).finding, undetermined])
+    const without = bare === command ? undefined : layeredShellFinding(bare, ctx).finding
+    return mostSevere(found?.reason === CODE_LOADING_REASON ? [without, found, undetermined] : [found, without, undetermined])
   } catch {
     return mostSevere([found, hardened(ANALYSIS_FAILED, ctx.active)])
   }

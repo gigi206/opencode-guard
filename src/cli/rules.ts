@@ -66,7 +66,7 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
       ["xargs-dynamic-exec", "ask", "dynamic execution through xargs"],
       ["parallel-dynamic-exec", "ask", "dynamic execution through GNU parallel"],
       ["dynamic-shell-source", "ask", "a shell or interpreter running a file or text named by a variable"],
-      ["shell-startup-file", "ask", "a shell startup file chosen by an environment variable or an option"],
+      ["shell-startup-file", "ask", "a shell startup file chosen by an environment variable or an option, or a variable that has the launched program load code or run another program (LD_PRELOAD, NODE_OPTIONS, EDITOR…)"],
       ["awk-dynamic-exec", "ask", "an awk program running non-literal text"],
       ["git-exec-config", "ask", "a git setting that names a program to run"],
       ["interpreter-dangerous-code", "ask", "inline interpreter code that launches a dangerous command"],
