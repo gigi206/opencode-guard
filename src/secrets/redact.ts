@@ -461,7 +461,7 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
           const rebuilt = captured.replace(PLACEHOLDER_FRAGMENTS, (fragment: string) => {
             if (PLACEHOLDER_RE.test(fragment)) return fragment
             const secret = pattern.trim ? pattern.trim(fragment) : fragment
-            if (secret.length < 3 || allow.has(secret) || (pattern.accept && !pattern.accept(secret))) return fragment
+            if (secret.length < 3 || allow.has(secret) || (pattern.accept && !pattern.accept(secret, groups))) return fragment
             count++
             // Trimmed value at the start of the fragment (after a possible opener): not a repetition further on.
             const at = fragment.indexOf(secret)
@@ -473,7 +473,7 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
         }
         const secret = pattern.trim ? pattern.trim(captured) : captured
         if (!secret || allow.has(secret)) return match
-        if (pattern.accept && !pattern.accept(secret)) return match
+        if (pattern.accept && !pattern.accept(secret, groups)) return match
         count++
         if (pattern.learn && !learned.has(secret) && learned.size < MAX_LEARNED) fresh.push([secret, pattern.type])
         // Position in the capture (last occurrence in the match: the capture is at the end of the pattern, followed by

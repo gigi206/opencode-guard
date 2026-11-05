@@ -10,14 +10,14 @@
 export interface SecretPattern {
   readonly type: string
   readonly regex: RegExp
-  /** Optional filter on the captured value (reduces false positives). */
-  readonly accept?: (secret: string) => boolean
+  /** Optional filter on the captured value (reduces false positives); `groups`: the named groups of the match. */
+  readonly accept?: (secret: string, groups?: Readonly<Record<string, string | undefined>>) => boolean
   /** Optional trimming of the captured value, before `accept`; only the trimmed part is replaced. */
   readonly trim?: (secret: string) => string
   /** Value then redacted everywhere, even alone, until restart (OpenCode formats without a prefix). */
   readonly learn?: boolean
-  /** Hint without `g`: the pattern is only tried on text that contains it (avoids a useless scan). */
-  readonly hint?: RegExp
+  /** Regexp without `g`, or any test: the pattern is only tried on text that passes it (avoids a useless scan). */
+  readonly hint?: { test(text: string): boolean }
 }
 
 /**
@@ -88,14 +88,38 @@ export function isWordLike(value: string): boolean {
   return /^[A-Za-z]+$/.test(value) && !/[A-Z](?![a-z]{2})/.test(value) && /^(?:[a-z]{2}|[A-Z][a-z]{2})/.test(value)
 }
 
+/** Keywords of a secret name. */
+const SECRET_WORDS = "api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|passphrase|pwd|credential|auth[_-]?key|private[_-]?key"
+
 /**
  * Secret name from its keyword: the part of the name before it does not count (only the value is replaced).
  * At most 128 characters after the keyword: a `\b[A-Za-z0-9_.-]*` prefix and an unbounded run restarted a
  * scan at every word start of a long run without whitespace (`a-a-a-…`: 4.6 s for 50 KB under Bun; `token-token-…`:
  * 40 s for 12.5 KB).
  */
-const SECRET_NAME =
-  "(?:api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|passphrase|pwd|credential|auth[_-]?key|private[_-]?key)[A-Za-z0-9_.-]{0,128}"
+const SECRET_NAME = `(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,128}`
+
+/** The tags that HTML writes without a closing tag, or that end a value in a page written by hand. */
+const HTML_TAG = /<(?:br|hr|td|tr|th|li|p|div|span|b|i|a|ul|ol|table|code|pre)>/
+/** Before any `<`: a comparison (`a.key===b<c`), an address with a variable part (`https://x.<Domain>/`), a sentence of a non-Latin text. */
+const NOT_A_GLUED_VALUE = /^(?:=|[a-z][a-z0-9+.-]*:\/\/|[^<]*[^\x21-\x7e<])/i
+
+/**
+ * Unquoted value glued to markup (`<t>password=X</t>`), which it would otherwise run into, and fail for its `<` and `>`:
+ * it stops at a closing tag, a self-closing tag, `<!` and the end of a CDATA section, whatever precedes them. Unless it reads
+ * as something else (`NOT_A_GLUED_VALUE`), also at an HTML tag of the closed list and, only if what precedes is no identifier
+ * or path of code, at a `<` followed by a letter: `token=parseToken2<Claims>(raw)` and `x.parse::<Ident>()` are generics,
+ * `a<b` a comparison.
+ */
+export function beforeMarkup(value: string): string {
+  const closing = value.search(/<\\?[/!]|<[A-Za-z][\w:.-]*\/>|\]\]>/)
+  const head = closing < 0 ? value : value.slice(0, closing)
+  if (NOT_A_GLUED_VALUE.test(head)) return head
+  const tag = head.search(HTML_TAG)
+  if (tag > 0) return head.slice(0, tag)
+  const open = head.search(/<[A-Za-z]/)
+  return open > 0 && !/^[&*]*(?:[\w$.]|::|->)+$/.test(head.slice(0, open)) ? head.slice(0, open) : head
+}
 
 /**
  * Unquoted assigned value: a comma does not end it (`DB_PASSWORD=abc,def`), except before a
@@ -105,14 +129,17 @@ const SECRET_NAME =
 export function trimAssignedValue(value: string): string {
   return trimBrackets(
     trimEndChars(
-      value.replace(/\\[nrt][\s\S]*$/, "").replace(/,(?=[A-Za-z_][\w.-]*\s*[:=])[\s\S]*$/, ""),
+      beforeMarkup(value).replace(/\\[nrt][\s\S]*$/, "").replace(/,(?=[A-Za-z_][\w.-]*\s*[:=])[\s\S]*$/, ""),
       ",",
     ),
   )
 }
 
-/** Names ending in `key` whose value is not a secret (database, cache and storage keys, public keys, the WebSocket handshake nonce). */
-const NOT_SECRET_KEYS = ["public", "primary", "foreign", "sort", "partition", "cache", "idempotency", "storage", "i18n", "translation", "query", "row", "map", "hash", "object", "react", "websocket", "webSocket", "WebSocket"]
+/**
+ * Names ending in `key` whose value is not a secret (database, cache and storage keys, public keys, the WebSocket handshake
+ * nonce, identifiers of business objects and of the keyboard). Not `resource`: an Azure resource key is a secret.
+ */
+const NOT_SECRET_KEYS = ["public", "primary", "foreign", "sort", "partition", "cache", "idempotency", "storage", "i18n", "translation", "query", "row", "map", "hash", "object", "react", "websocket", "webSocket", "WebSocket", "issue", "job", "menu", "hot", "shortcut", "label", "message", "property"]
 
 /** Example phrasings from `.env.example` files (`"your secret here"`, `"change me"`, `"enter a password"`). */
 const EXAMPLE_PHRASE = /\b(?:your|here|change me|enter|insert|replace|put)\b/i
@@ -127,6 +154,70 @@ function looksLikePassphrase(value: string): boolean {
     !/%[sd]|[{}$`]/.test(value)
   )
 }
+
+/** Neither a path nor, for the `key` names, a key identifier or the name of an environment variable. */
+const isPassValue = (value: string) => looksLikeSecretValue(value) && !/^(?:[~/]|\.\.?\/)/.test(value)
+const isKeyValue = (value: string) => isPassValue(value) && !/^0x[0-9A-Fa-f]{8,40}$/.test(value) && !/^[A-Z]+(?:_[A-Z]+)+$/.test(value)
+
+/**
+ * A name whose last component is `key`, the case kept (`AccountKey`, `master_key`; not `monkey`, nor `publicKey`). `projectKey`
+ * and `organizationKey` only in that form, an identifier of Sonar and the like: `PROJECT_KEY` may be the key of a service.
+ */
+const KEY_NAME = `(?<!(?:${NOT_SECRET_KEYS.flatMap((name) => [name, name[0]!.toUpperCase() + name.slice(1), name.toUpperCase()]).join("|")})[_.-]?)(?:(?<=[_.-])(?:KEY|[Kk]ey)|(?<![Pp]roject|[Oo]rganization)(?<=[a-z])Key)`
+const PASS_AT_END = /(?<![A-Za-z0-9])pass$/i
+const KEY_AT_END = new RegExp(`${KEY_NAME}$`)
+
+/**
+ * The names of the assignments above and the value each accepts, for markup: `inName` for the name attribute of a tag,
+ * `atEnd` for an element, whose name must end with the word (`<tokenizer>`, `<tokens>`, `<passwordEncoder>` are not secrets).
+ */
+const MARKUP_NAMES: ReadonlyArray<{ inName: RegExp; atEnd: RegExp; accept: (value: string) => boolean }> = [
+  { inName: new RegExp(SECRET_WORDS, "i"), atEnd: new RegExp(`(?<!public[_.-]?key[_.-]?)(?:${SECRET_WORDS}|credentials)$`, "i"), accept: looksLikeSecretValue },
+  { inName: PASS_AT_END, atEnd: PASS_AT_END, accept: isPassValue },
+  { inName: KEY_AT_END, atEnd: KEY_AT_END, accept: isKeyValue },
+]
+
+/** Blanks, and the end of a CDATA section, around the value of an element or an attribute. */
+function trimMarkupValue(value: string): string {
+  const trimmed = value.trim()
+  return trimmed.endsWith("]]>") ? trimmed.slice(0, -3).trim() : trimmed
+}
+
+/** One word, not a Windows (`%DB_PW%`) or a Maven and Ant (`@db.pw@`) reference, nor an escaped `<placeholder>`. */
+const isMarkupValue = (value: string) => !/\s/.test(value) && !/^[%@][\w.-]+[%@]$/.test(value) && !/^&lt;.*&gt;$/.test(value)
+
+/**
+ * A file, not the key it leads to: `~`, absolute, Windows, `${…}/`, or under `.ssh`, for a private or ssh key only: an access
+ * key may start with `/`. Without `+` nor `=`, which only base64 has here.
+ */
+const KEY_FILE = /^(?:~|\/|\.\.?[/\\]|[A-Za-z]:[/\\]|\$\{[^}]*\}[/\\]|(?:[\w.-]+[/\\])*\.ssh[/\\])[^+=]*$/
+const isKeyFile = (name: string, value: string) => /(?:private|ssh)[_.-]?key$/i.test(name) && KEY_FILE.test(value)
+
+/**
+ * A name that holds a word of a secret name but describes something else, by how it ends: its address, its kind, its form
+ * field. `id` alone as a component: `ApiKeyAndroid` is a key.
+ */
+const NOT_A_VALUE_NAME = /(?:url|uri|endpoint|issuer|audience|name|type|path|file|location|header|algo(?:rithm)?|hash|policy|length|lifetime|expir\w*|timeout|ttl|field|toggle|submit|button|btn|label|input|form|reset|confirm\w*|question|hint|encoder|tokenizer|store|service|ref|(?<![a-z])id|public[_.-]?key[_.-]?token)$/i
+
+/** The value of a name written apart from it, in an attribute or a sibling element. */
+function isSecretOfName(name: string, value: string): boolean {
+  return !NOT_A_VALUE_NAME.test(name) && !isKeyFile(name, value) && MARKUP_NAMES.some((rule) => rule.inName.test(name) && rule.accept(value))
+}
+
+const MARKUP_NAME_ATTRIBUTE = /(?:^|\s)(?:key|name|id)\s*=\s*(\\?["'])([^"'<>]{1,256})\1/gi
+
+/** The value of a `value` attribute or the content of a tag, judged by the `key`, `name` or `id` of the tag. */
+function isAttributeSecret(value: string, groups?: Readonly<Record<string, string | undefined>>): boolean {
+  if (!isMarkupValue(value)) return false
+  for (const [, , name] of `${groups?.before ?? ""} ${groups?.after ?? ""}`.matchAll(MARKUP_NAME_ATTRIBUTE)) {
+    if (isSecretOfName(name!, value)) return true
+  }
+  return false
+}
+
+const MARKUP_WORDS = new RegExp(`${SECRET_WORDS}|pass|key`, "i")
+/** Markup patterns: on a text that has a `<` and a word of a secret name, nothing else. */
+const MARKUP_HINT = { test: (text: string) => text.includes("<") && MARKUP_WORDS.test(text) }
 
 export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   {
@@ -264,7 +355,7 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
     type: "generic_secret",
     regex: /(?<![A-Za-z0-9])pass["']?(?:\s*=|\s*:\s)\s*["']?(?<secret>[^\s"'`;]{8,})/gi,
     trim: trimAssignedValue,
-    accept: (value) => looksLikeSecretValue(value) && !/^(?:[~/]|\.\.?\/)/.test(value),
+    accept: isPassValue,
   },
   {
     // A name whose last component is `key` (`ENCRYPTION_KEY=…`, `master_key: …`, Azure's `AccountKey=…`): after a
@@ -273,16 +364,9 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
     // paths (`SSH_KEY=~/.ssh/id_ed25519`), hexadecimal key identifiers (`GPG_KEY=0x1A2B3C4D`) and the name of an environment
     // variable (`EnvVaultClientKey = "BAO_CLIENT_KEY"`). Anchored on the keyword, like the others.
     type: "generic_secret",
-    regex: new RegExp(
-      `(?<!(?:${NOT_SECRET_KEYS.flatMap((name) => [name, name[0]!.toUpperCase() + name.slice(1), name.toUpperCase()]).join("|")})[_.-]?)(?:(?<=[_.-])(?:KEY|[Kk]ey)|(?<=[a-z])Key)["']?\\s*[:=]\\s*["']?(?<secret>[^\\s"'\`;]{8,})`,
-      "g",
-    ),
+    regex: new RegExp(`${KEY_NAME}["']?\\s*[:=]\\s*["']?(?<secret>[^\\s"'\`;]{8,})`, "g"),
     trim: trimAssignedValue,
-    accept: (value) =>
-      looksLikeSecretValue(value) &&
-      !/^(?:[~/]|\.\.?\/)/.test(value) &&
-      !/^0x[0-9A-Fa-f]{8,40}$/.test(value) &&
-      !/^[A-Z]+(?:_[A-Z]+)+$/.test(value),
+    accept: isKeyValue,
   },
   {
     // `curl -u user:password` (`--user`, `-uuser:password`): only after `curl` in the same command (not `docker run -u
@@ -312,8 +396,49 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
     type: "generic_secret",
     regex:
       /(?<![\w-])--(?:password|passwd|pass|passphrase|token|api-key|apikey|auth-token|access-token|client-secret)(?<!\b(?:mysql\w*|mariadb\w*|psql|pg_\w+|createdb|dropdb|createuser|dropuser|clickhouse-client)\b[^\n]{0,200})\s+["']?(?<secret>[^\s"'`;|&]{8,})/gi,
-    trim: trimBrackets,
+    trim: (value) => trimBrackets(beforeMarkup(value)),
     accept: looksLikeSecretValue,
+  },
+  {
+    // `<password>…</password>`, with a namespace (`db:password`), attributes, blanks or a CDATA section around the value; the
+    // closing tag in a lookahead, the capture at the end of the match (see `scanText`). Every repetition stops at a `<` or
+    // is bounded: each `<` costs at most the stretch up to the next one, or a bound.
+    type: "markup_secret",
+    regex: /<(?<tag>[A-Za-z_][\w.:-]{0,128})(?:\s[^<>]{0,8192})?(?<!\/)>(?:\s{0,64}<!\[CDATA\[)?(?<secret>[^<]{1,2048})(?=<\/\k<tag>\s{0,64}>)/gi,
+    hint: MARKUP_HINT,
+    trim: trimMarkupValue,
+    accept: (value, groups) => {
+      const tag = groups?.tag ?? ""
+      return isMarkupValue(value) && !isKeyFile(tag, value) && MARKUP_NAMES.some((rule) => rule.atEnd.test(tag) && rule.accept(value))
+    },
+  },
+  {
+    // `<add key="password" value="…"/>`, `<property value="…" name="db.password"/>`: the end of the tag is looked for first,
+    // so that the last `value` of a tag is enough and no tag is walked again from each of its `value`; `after` has the same
+    // bound, or each `value` of a tag longer than it would scan it in vain. The tag may be cut by the end of the text, and its
+    // quotes escaped by a JSON text (`value=\"…\"`).
+    type: "markup_secret",
+    regex: /<[A-Za-z_][\w.:-]{0,128}(?=[^<>]{0,18432}(?:>|$))(?<before>\s[^<>]{0,8192})?\svalue\s*=\s*(?<q>\\?["'])(?<secret>(?:(?!\k<q>)[^<>]){1,2048})\k<q>(?=(?<after>[^<>]{0,18432})(?:>|$))/gi,
+    hint: MARKUP_HINT,
+    trim: trimMarkupValue,
+    accept: isAttributeSecret,
+  },
+  {
+    // `<entry key="password">…</entry>`, `<property name="hibernate.connection.password">…</property>`: the attribute of an
+    // element with content. A closed list of tags: on any tag, the `id` of a documentation title would count (`<h4 id="token">`).
+    type: "markup_secret",
+    regex: /<(?<tag>entry|prop|property|param|parameter|setting|add|env|variable|constant)\s(?<before>[^<>]{0,8192})(?<!\/)>(?:\s{0,64}<!\[CDATA\[)?(?<secret>[^<]{1,2048})(?=<\/\k<tag>\s{0,64}>)/gi,
+    hint: MARKUP_HINT,
+    trim: trimMarkupValue,
+    accept: isAttributeSecret,
+  },
+  {
+    // The name in a sibling element: a plist's `<key>password</key><string>…</string>`, Hadoop's `<name>…</name><value>…</value>`.
+    type: "markup_secret",
+    regex: /<(?:key|name)>\s{0,64}(?<sib>[^<>]{1,256})<\/(?:key|name)>\s{0,64}<(?:string|value)>(?:\s{0,64}<!\[CDATA\[)?(?<secret>[^<]{1,2048})(?=<\/(?:string|value)>)/gi,
+    hint: MARKUP_HINT,
+    trim: trimMarkupValue,
+    accept: (value, groups) => isMarkupValue(value) && isSecretOfName((groups?.sib ?? "").trim(), value),
   },
 ]
 
@@ -375,7 +500,11 @@ export const FORMAT_SUMMARIES: ReadonlyMap<string, string> = new Map([
   ["passphrase", "a quoted phrase assigned to an upper-case PASSWORD, PASSWD, PASSPHRASE, SECRET or PASS variable"],
   [
     "generic_secret",
-    "a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass, or to a name that ends in key (ENCRYPTION_KEY, AccountKey) (name = value, name: value), or given to a command-line option such as --password or --token, or the password given to curl -u, sshpass -p or mysql -p; only a value that looks like a secret (not code, a path, a variable or a placeholder)",
+    "a value assigned to a name such as api_key, secret, token, password, pwd, credential or pass, or to a name that ends in key (ENCRYPTION_KEY, AccountKey) (name = value, name: value, in a text or glued to a tag, <t>name=value</t>), or given to a command-line option such as --password or --token, or the password given to curl -u, sshpass -p or mysql -p; only a value that looks like a secret (not code, a path, a variable or a placeholder)",
+  ],
+  [
+    "markup_secret",
+    "the content of an XML or HTML element whose name ends with such a word (<password>value</password>, <db:password>), the value attribute of a tag, or the content of an element such as entry or property, whose key, name or id holds one (<add key=\"password\" value=\"…\"/>, <entry key=\"password\">value</entry>), or the element that follows a key or a name holding one (<key>password</key><string>value</string>); only one word that looks like a secret, by the same checks",
   ],
 ])
 
