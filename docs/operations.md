@@ -178,6 +178,8 @@ src/types.ts                 structural subset of the plugin context, logger
 test/                        node:test suites (runnable with Node and Bun)
 bin/guard                    launcher of the guard command (Node.js)
 tools/install-cli.sh         installer of the guard command for a plugin installed from Git
+.github/workflows/ci.yml     typecheck and test suite on each push to main and each pull request
+renovate.json                dependency updates, reviewed by hand: nothing merges by itself
 tools/serve.sh       local Decision 3.0 service (native, engine/container, llama)
 tools/model-bench/           bench harness behind the "Measured models" table
 ```

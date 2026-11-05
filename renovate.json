@@ -1,0 +1,16 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "schedule": ["before 6am on monday"],
+  "minimumReleaseAge": "14 days",
+  "rangeStrategy": "pin",
+  "automerge": false,
+  "lockFileMaintenance": { "enabled": true },
+  "packageRules": [
+    {
+      "matchPackageNames": ["@opencode/plugin"],
+      "groupName": "OpenCode plugin API",
+      "labels": ["review-guarantees"]
+    }
+  ]
+}
