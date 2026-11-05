@@ -69,7 +69,7 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
       ["shell-startup-file", "ask", "a shell startup file chosen by an environment variable or an option, or a variable that has the launched program load code or run another program (LD_PRELOAD, NODE_OPTIONS, EDITOR…)"],
       ["awk-dynamic-exec", "ask", "an awk program running non-literal text"],
       ["git-exec-config", "ask", "a git setting that names a program to run"],
-      ["interpreter-dangerous-code", "ask", "inline interpreter code that launches a dangerous command"],
+      ["interpreter-dangerous-code", "ask", "inline interpreter code, or a tracked script run by an interpreter, that launches a dangerous command"],
       ["interpreter-network", "ask", "inline interpreter code that makes network requests"],
       ["upload", "ask", "HTTP upload"],
       ["gh-upload", "ask", "GitHub CLI upload or API call"],

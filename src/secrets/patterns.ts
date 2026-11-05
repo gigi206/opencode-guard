@@ -158,6 +158,10 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   { type: "github_pat", regex: /\bgithub_pat_[A-Za-z0-9_]{50,}/g },
   // Personal (glpat-), runner (glrt-), deploy (gldt-), pipeline trigger (glptt-) and runner registration (GR1348941) tokens.
   { type: "gitlab_token", regex: /\b(?:glpat-|glrt-|gldt-|GR1348941)[A-Za-z0-9_-]{20,}|\bglptt-[0-9a-f]{40}\b/g },
+  // Slack app-level tokens and configuration tokens before `slack_token`, which would cut `xoxe.xoxb-` (gitleaks `slack-app-token`, `slack-config-*`).
+  { type: "slack_app_token", regex: /\bxapp-\d-[A-Za-z0-9]+-\d+-[A-Za-z0-9]+/gi },
+  // The `xoxe-<digit>-` prefix is Slack's alone: a minimum length is enough, no published length is guaranteed.
+  { type: "slack_config_token", regex: /\bxoxe(?:\.xox[bp]-\d-[A-Za-z0-9]{163,166}(?![A-Za-z0-9])|-\d-[A-Za-z0-9]{40,})/gi },
   { type: "slack_token", regex: /\bxox[abposr]-[A-Za-z0-9-]{10,}/g },
   { type: "slack_webhook", regex: /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/g },
   { type: "stripe_key", regex: /\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g },
@@ -166,6 +170,21 @@ export const BUILTIN_PATTERNS: readonly SecretPattern[] = [
   // Provider formats with a prefix of their own: an exact length, then no further token character (a longer run is
   // something else). Formats that gitleaks recognizes only near the provider's name (Mailgun, Cloudflare API keys,
   // Sentry access tokens, New Relic) are left to `generic_secret` and the decision model.
+  // trufflehog detectors `replicate`, `groq`, `resend`: exact shapes, `re_` also starts ordinary identifiers (`re_compile`).
+  { type: "replicate_token", regex: /\br8_[A-Za-z0-9_-]{37}(?![A-Za-z0-9_-])/g },
+  { type: "groq_key", regex: /\bgsk_[A-Za-z0-9]{52}(?![A-Za-z0-9_-])/g },
+  { type: "resend_key", regex: /\bre_[1-9A-HJ-NP-Za-km-z]{8}_[1-9A-HJ-NP-Za-km-z]{24}(?![A-Za-z0-9_-])/g },
+  // gitleaks `notion-api-token`; the older `secret_` prefix is not covered.
+  { type: "notion_token", regex: /\bntn_[0-9]{11}[A-Za-z0-9]{35}(?![A-Za-z0-9_-])/g },
+  // Nosey Parker np.google.2.
+  { type: "google_oauth_secret", regex: /\bGOCSPX-[A-Za-z0-9_-]{28}(?![A-Za-z0-9_-])/g },
+  // detect-secrets `DiscordBotTokenDetector`; same three parts as the example in Discord's API reference.
+  { type: "discord_bot_token", regex: /\b[MNO][A-Za-z0-9_-]{23,25}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27}(?![A-Za-z0-9_-])/g },
+  // gitleaks `telegram-bot-api-token` (the case of its fixed `A` kept; bare: a port is never followed by 35 characters).
+  { type: "telegram_bot_token", regex: /\b[0-9]{5,16}:A[A-Za-z0-9_-]{34}(?![A-Za-z0-9_-])/g },
+  // https://docs.mapbox.com/api/accounts/tokens : three parts, `sk`, a base64url JSON object (so `eyJ`), a signature (22
+  // characters in its example). `sk.` alone also opens Java and Kotlin names. `pk.` tokens are public: left alone.
+  { type: "mapbox_secret_token", regex: /\bsk\.eyJ[A-Za-z0-9_-]{40,}(?:\.[A-Za-z0-9_-]{20,})+/g },
   { type: "sendgrid_key", regex: /\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g },
   { type: "digitalocean_token", regex: /\bdo[opr]_v1_[a-f0-9]{64}(?![A-Za-z0-9])/g },
   { type: "pypi_token", regex: /\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,1000}/g },
@@ -317,6 +336,16 @@ export const FORMAT_SUMMARIES: ReadonlyMap<string, string> = new Map([
   ["stripe_key", "Stripe secret and restricted keys (sk_live_, rk_test_…)"],
   ["npm_token", "npm access tokens (npm_…)"],
   ["huggingface_token", "Hugging Face tokens (hf_…)"],
+  ["slack_app_token", "Slack app-level tokens (xapp-)"],
+  ["slack_config_token", "Slack configuration tokens (xoxe-, at least 40 characters after the digit; xoxe.xoxb-, xoxe.xoxp-)"],
+  ["replicate_token", "Replicate API tokens (r8_…)"],
+  ["groq_key", "Groq API keys (gsk_…)"],
+  ["resend_key", "Resend API keys (re_ followed by 8 and 24 Base58 characters)"],
+  ["notion_token", "Notion API tokens (ntn_…)"],
+  ["google_oauth_secret", "Google OAuth client secrets (GOCSPX-…)"],
+  ["discord_bot_token", "Discord bot tokens (three parts of 24 to 26, 6 and 27 characters, the first starting with M, N or O)"],
+  ["telegram_bot_token", "Telegram bot tokens (digits, colon, A and 34 characters)"],
+  ["mapbox_secret_token", "Mapbox secret tokens (sk.eyJ…, three parts as Mapbox documents; public pk. tokens are not masked)"],
   ["sendgrid_key", "SendGrid API keys (SG.…)"],
   ["digitalocean_token", "DigitalOcean tokens (dop_v1_, doo_v1_, dor_v1_)"],
   ["pypi_token", "PyPI upload tokens (pypi-AgEI…)"],

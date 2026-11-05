@@ -1058,6 +1058,16 @@ export function parseConfig(
     if (why) warnings.push(`${REDACTION_OFF}: turning off the built-in format ${type} ignored: ${why}`)
     return !why
   })
+  // The agent that switches every check off: never from a project, even a trusted one, like an agent's relaxations. In
+  // `warnings`, not `certification`: with a guard.json file or a section, nothing else reports it.
+  let unprotectedAgent = unprotectedAgentOption(options.unprotectedAgent, warnings)
+  if (unprotectedAgent !== undefined) {
+    const why = refusal((declared) => unprotectedAgentOption(declared.unprotectedAgent, []) === unprotectedAgent)
+    if (why) {
+      warnings.push(`unprotectedAgent ignored: ${why}`)
+      unprotectedAgent = undefined
+    }
+  }
   // Strings never redacted: a relaxation of every rule on secrets and of what the model and the log see, kept in a project
   // trusted at startup, otherwise each only when a global or system declaration lists it too (never quoted).
   const requestedAllowlist = allowlistOption(options.allowlist, warnings)
@@ -1163,7 +1173,7 @@ export function parseConfig(
       disabledPatterns,
       allowlist,
       rules,
-      unprotectedAgent: unprotectedAgentOption(options.unprotectedAgent, warnings),
+      ...(unprotectedAgent === undefined ? {} : { unprotectedAgent }),
       outputCheck: guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK),
       promptCheck: guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), DEFAULT_PROMPT_CHECK),
       ...(layers ? { layers } : {}),
@@ -1305,6 +1315,8 @@ interface EffectiveChanges {
   readonly globalSwitches: Partial<Record<PolicySwitch, boolean>>
   readonly ops: readonly Op[]
   readonly agents: ReadonlyMap<string, readonly Op[]>
+  /** The effective options' `agents` sections, as they were written. */
+  readonly agentSections: ReadonlyMap<string, Section>
   /** Origin of their keys (`ScopeInputs.origin`). */
   readonly label?: string
 }
@@ -1741,6 +1753,7 @@ function scopeLayers(
       globalSwitches: explicit(globalOptions),
       ops,
       agents,
+      agentSections: effectiveAgents,
       ...label,
     },
     ...(inputs.project ? { project: inputs.project } : {}),
@@ -1918,7 +1931,13 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
   for (const source of projectGuards) if (source.top.profile === "standard" || (source.top.profile && source.trusted)) shownProfile = source.top.profile
   const read = files.filter((file) => file.data).map((file) => file.label)
   // Formats turned off by the global guard.json: its top level only (a project's file or section is reported by `readSection`).
-  const relaxations = agentRelaxations([layers.globalFile, ...globalGuards, ...matched, layers.systemFile], projectGuards, warnings)
+  const relaxing = [layers.globalFile, ...globalGuards, ...matched, layers.systemFile]
+  const relaxations = agentRelaxations(relaxing, projectGuards, warnings)
+  // What relaxes an agent is read from the global sources only: the effective options' keys never count, and say so.
+  for (const [name, section] of effective.agentSections)
+    for (const [key, value] of section.relax ?? [])
+      if ((value === "off" || value === false) && !relaxing.some((source) => source.agents.get(name)?.relax?.get(key) === value))
+        warnings.push(`agents.${name}: ${key} ignored: only the global configuration relaxes an agent`)
   const redactionOff = [...new Set(files.filter((file) => file.global && file.data).flatMap((file) => redactionOffOption(file.data?.[REDACTION_OFF], file.label, warnings)))]
   return {
     base,

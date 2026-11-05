@@ -2,9 +2,9 @@ import { createHash } from "node:crypto"
 import type { GuardConfig, Scope } from "./config.ts"
 import { ModelError, type ModelClient } from "./model/client.ts"
 import { QUESTIONS, SCRIPTS_NOTE, STATE_NOTE, interpret } from "./model/questions.ts"
-import { shellFinding, type ShellRuleContext } from "./rules/shell.ts"
+import { scriptCodeFinding, shellFinding, type ShellRuleContext } from "./rules/shell.ts"
 import { CODEMODE_TOOL, toolFinding } from "./rules/tools.ts"
-import { INTERNAL_ERROR_RULE, mostSevere, type CustomRule, type Finding, type Verdict, type Waiver, type WaiverContext } from "./rules/types.ts"
+import { INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type Verdict, type Waiver, type WaiverContext } from "./rules/types.ts"
 import { createCredentialContent } from "./credential-content.ts"
 import { createRealPath } from "./real-path.ts"
 import { bySetting, hardened, ruleEnabled, withoutWaivers } from "./rules/features.ts"
@@ -143,6 +143,9 @@ const modelSkipped = (tool: string): boolean => READ_ONLY_TOOLS.has(tool) || TAS
  * executed), never "data only"; the placeholder rule (write) does not apply to an execution: discarded by the shell
  * rules before the findings are combined (`executedScript`), it never takes the place of another rule's finding.
  * Unverifiable script (created by the agent, unreadable since; or named by an unreadable patch): `script-unverifiable` ask.
+ * Script not read by a shell and not seen whole by the model: its whole content is read as inline code
+ * (`scriptCodeFinding`), with the same limit of one ask; `forModel` says the model does see it whole, and judges it.
+ * Past that reading's budget: unverifiable.
  * Rule set to `deny` (`ruleOverrides`): its finding stays a deny, in a script too.
  */
 export function scriptFinding(script: ExecutedScript, ctx: ShellRuleContext): Finding | undefined {
@@ -159,8 +162,9 @@ export function scriptFinding(script: ExecutedScript, ctx: ShellRuleContext): Fi
               : `the script ${script.path} run by this command was created by the agent in this session but can no longer be checked (${UNVERIFIABLE_TEXT[script.unverifiable]})`,
         }, ctx.active)
       : undefined
-  if (!script.shell) return undefined
-  const found = shellFinding(script.content, { ...ctx, executedScript: true })
+  const scriptContext = { ...ctx, executedScript: true }
+  const found = script.shell ? shellFinding(script.content, scriptContext) : script.forModel ? undefined : scriptCodeFinding(script.content, scriptContext)
+  if (found === LIMIT_REACHED) return scriptFinding({ ...script, unverifiable: "too-large" }, ctx)
   if (!found) return undefined
   return hardened({ verdict: "ask", rule: found.rule, reason: `${found.reason}, in the script ${script.path} run by this command` }, ctx.active)
 }
@@ -357,9 +361,13 @@ export function createDecider(deps: DeciderDeps) {
         ...(deps.resolveLinks ? { realPaths: createRealPath({ directories: cwds }) } : {}),
       }
     }
+    // What the model reads whole is left to it: a call without a model, or a script longer than what `scriptsState` shows
+    // of it, gets the local reading on top of what the model sees.
+    const modelReads = (script: ExecutedScript) =>
+      script.forModel && model !== undefined && !unredacted && redactor.redactString(script.content).value.length <= config.maxStateChars
     // Finding from an executed script: before the command's if it is only "data only" or left to the model (an
     // ask coming from a script is never decided by the model alone); a denial from the command always wins.
-    const scripts = mostSevere((call.scripts ?? []).map((script) => guarded("a script run by this command", () => scriptFinding(script, scriptContext(script)))))
+    const scripts = mostSevere((call.scripts ?? []).map((script) => guarded("a script run by this command", () => scriptFinding({ ...script, forModel: modelReads(script) }, scriptContext(script)))))
     const found = mostSevere([command?.dataOnly || command?.modelDecides ? undefined : command, scripts, command])
     // Reasons sometimes quote the input (`access to a credential file (/tmp/<key>.pem)`): redacted like it,
     // they go into the log, the ask, and the error shown to the model.

@@ -1,9 +1,10 @@
 import "./tmp.ts"
 import assert from "node:assert/strict"
 import { describe, it } from "node:test"
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as zlib from "node:zlib"
 import plugin, { setupGuard } from "../src/index.ts"
 import { GUARD_ACTION, GUARD_SEPARATOR, MAX_ACTION_DETAIL } from "../src/hooks/gate.ts"
@@ -17,6 +18,14 @@ async function setup(options: Record<string, unknown> = {}, env: Record<string, 
   const fake = fakeContext(options)
   await setupGuard(fake.ctx, env)
   return fake
+}
+
+/** Global configuration directory that declares `unprotectedAgent`: a value from the options alone is ignored. */
+function declaring(unprotectedAgent: string) {
+  const dir = mkdtempSync(join(tmpdir(), "guard-global-"))
+  const plugins = [{ package: resolve(fileURLToPath(new URL("..", import.meta.url))), options: { unprotectedAgent } }]
+  writeFileSync(join(dir, "opencode.json"), JSON.stringify({ plugins }))
+  return dir
 }
 
 describe("registration", () => {
@@ -642,7 +651,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
   const prompt = (sessionID = "ses_1", text = `DB_PASSWORD=${FAKE.password}`) => ({ sessionID, messageID: `msg_p${++messages}`, prompt: { text } })
   async function unprotected(extra: Record<string, unknown> = {}) {
     const fake = fakeContext({ ...options, ...extra })
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, declaring(AGENT))
     fake.switchAgent("ses_1", AGENT)
     return fake
   }
@@ -689,7 +698,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
   })
   it("switched via the API mid-turn (without a user prompt): remains protected", async () => {
     const fake = fakeContext(options)
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, declaring(AGENT))
     fake.switchAgent("ses_1", "build")
     await fake.trigger("session.prompt", prompt("ses_1", "bonjour"))
     fake.switchAgent("ses_1", AGENT)
@@ -748,7 +757,7 @@ describe("lot 7: unprotected agent — return to protected, child sessions, titl
   const frame = JSON.stringify({ type: "response.create", input: [{ role: "user", content: FAKE.openai }] })
   async function ready() {
     const fake = fakeContext({ unprotectedAgent: AGENT })
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, declaring(AGENT))
     fake.switchAgent("ses_1", AGENT)
     await fake.trigger("session.prompt", prompt())
     return fake
@@ -857,7 +866,7 @@ describe("lot 8: degraded startup, never without a guard", () => {
     const file = `${mkdtempSync(`${tmpdir()}/guard-start-`)}/guard.log`
     const fake = fakeContext({ ...options, logFile: file })
     break_(fake.ctx)
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, typeof options.unprotectedAgent === "string" ? declaring(options.unprotectedAgent) : undefined)
     return { fake, log: readFileSync(file, "utf8") }
   }
 
@@ -1118,7 +1127,7 @@ describe("lot 13: fallback log, unprintable errors, prompt without messageID, re
   })
   it("prompt without messageID: no shared lookup (two prompt hooks → two lookups per prompt)", async () => {
     const fake = fakeContext({ unprotectedAgent: "build-unprotected" })
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, declaring("build-unprotected"))
     fake.switchAgent("ses_1", "build")
     let before = fake.lookups.session
     await fake.trigger("session.prompt", { sessionID: "ses_1", messageID: "msg_a", prompt: { text: "a" } })
@@ -1383,7 +1392,7 @@ describe("lot 30: variable named like a secret, through the gate", () => {
   // Empty fake environment passed explicitly (never the process's own), log in a temporary directory.
   async function guard(options: Record<string, unknown> = {}) {
     const fake = fakeContext({ logFile: join(mkdtempSync(join(tmpdir(), "guard-lot30-")), "guard.log"), ...options })
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, typeof options.unprotectedAgent === "string" ? declaring(options.unprotectedAgent) : undefined)
     return fake
   }
 

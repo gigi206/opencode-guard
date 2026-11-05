@@ -272,7 +272,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "interpreter-dangerous-code",
     detail(
-      "Inline interpreter code that launches a dangerous command; the rule recognizes the code passed to a non-shell interpreter and asks when the code can run a command the local rules would otherwise check.",
+      "Inline interpreter code that launches a dangerous command, or a tracked script run by a non-shell interpreter that does; the rule recognizes the code passed to the interpreter, or the content of that script when the decision model does not see it whole, and asks when the code can run a command the local rules would otherwise check.",
       "interpreter code launching a dangerous command",
     ),
   ],

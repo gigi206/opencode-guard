@@ -2,9 +2,9 @@
 // `import type` only: @opencode/plugin is provided by OpenCode at runtime, and Node refuses
 // type-stripping of .ts sources located in node_modules (tests).
 import type { Plugin } from "@opencode/plugin"
-import { readFileSync, realpathSync } from "node:fs"
+import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
-import { isAbsolute, join, resolve } from "node:path"
+import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import { DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
 import { createDecider } from "./decide.ts"
@@ -85,9 +85,30 @@ export function knownSecrets(config: GuardConfig): Array<{ name: string; value: 
 /**
  * Configured log file: refused if it designates a credential file or a write-protected location
  * (OpenCode configuration, plugin directory, startup files, `~/.ssh`, git hooks, `/etc`) → default
- * log, with a warning (without the path). The default path is always accepted (fallback without a loop); a final
- * symbolic link is refused on every write by the logger itself.
+ * log, with a warning (without the path). So does a path with a symbolic link anywhere in it, whose real location a
+ * lexical check cannot judge, or that is not a regular file. The default path is always accepted (fallback without a
+ * loop); a final symbolic link is also refused on every write by the logger itself.
  */
+function unusableLogPath(path: string): string | undefined {
+  const absent = (error: unknown) => ["ENOENT", "ENOTDIR"].includes(String((error as { code?: unknown } | undefined)?.code))
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink()) return "it is a symbolic link"
+    if (!stat.isFile()) return "it is not a regular file"
+  } catch (error) {
+    if (!absent(error)) return "it could not be checked"
+  }
+  // Every parent, also those still to be created below an existing one: the first existing ones decide where it lands.
+  for (let dir = dirname(path); ; dir = dirname(dir)) {
+    try {
+      if (lstatSync(dir).isSymbolicLink()) return "its path goes through a symbolic link"
+    } catch (error) {
+      if (!absent(error)) return "it could not be checked"
+    }
+    if (dirname(dir) === dir) return undefined
+  }
+}
+
 export function checkedLogFile(
   file: string | undefined,
   fallback: string | undefined,
@@ -108,7 +129,7 @@ export function checkedLogFile(
     ? "it is a credential file"
     : protectedWriteKind(absolute, home, { protectedDirs })
       ? "it is a protected location"
-      : undefined
+      : unusableLogPath(absolute)
   if (!reason) return file
   warnings.push(`logFile refused (${reason}): logging to the default log file`)
   return fallback
@@ -177,7 +198,10 @@ export async function setupGuard(
   })
   warnings.push(...unread)
   // OpenCode service password and remote access route: re-read from its files (`env` directories).
-  const runtimeSecrets = serviceSecretSource(serviceDirectories(env))
+  // A service file refused means values left in clear: the first line logged, which is redacted, says it at startup.
+  // Before the logger exists (its own fallback warning), the line waits among the warnings.
+  let serviceNotice: (line: string) => void = (line) => warnings.push(line)
+  const runtimeSecrets = serviceSecretSource(serviceDirectories(env), (line) => serviceNotice(line))
   const formats = createRedactor({ extraPatterns: config.secretPatterns, disabledTypes: config.disabledPatterns, allowlist: config.allowlist, env, knownSecrets: knownSecrets(config), runtimeSecrets })
   // Formats turned off by the global guard.json (`redactionOff`): every redaction first checks the guard.json files
   // (at most every 2 seconds, like the tool calls), so that a format turned back on is redacted again without waiting
@@ -206,6 +230,7 @@ export async function setupGuard(
   }
   const log = createLogger(config.debug, logFile, (text) => redactor.redactString(text).value, undefined, { fallback })
   for (const warning of warnings) log.warn(warning)
+  serviceNotice = (line) => log.warn(line)
   if (!config.decision) log.warn("decision model disabled: local rules only")
   else if (!config.features.decisionModel) log.warn("decision model disabled (decisionModel: false): local rules only")
   for (const name of FEATURE_NAMES) if (!config.features[name] && name !== "decisionModel") log.warn(FEATURE_OFF[name])

@@ -42,14 +42,30 @@ function secretsOf(data: unknown): NamedSecret[] {
 
 /**
  * Reads a service file if it changed: non-blocking open (a named pipe put in its place does not freeze the server),
- * then check and bounded read on the same descriptor (no race between check and read). Returns
- * `undefined` for a file to ignore or unchanged; throws on a read error.
+ * then check and bounded read on the same descriptor (no race between check and read). A final symbolic link is
+ * recognized and still followed, once the plain open has failed: only values to mask are taken from the file, and not
+ * reading it would leave them in clear. Returns `undefined` for a file unchanged or still being written, `refused` for
+ * one that cannot give its values; throws on a read error.
  */
-function readChanged(file: string, previous: string | undefined): { signature: string; text: string } | undefined {
-  const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK)
+function readChanged(file: string, previous: string | undefined): { signature: string; text: string; linked: boolean } | { refused: string } | undefined {
+  const flags = constants.O_RDONLY | constants.O_NONBLOCK
+  let fd: number
+  let linked = false
+  try {
+    fd = openSync(file, flags | (constants.O_NOFOLLOW ?? 0))
+  } catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code !== "ELOOP") throw error
+    linked = true
+    try {
+      fd = openSync(file, flags)
+    } catch {
+      return { refused: "it is a symbolic link that cannot be followed" }
+    }
+  }
   try {
     const stat = fstatSync(fd)
-    if (!stat.isFile() || stat.size > MAX_SERVICE_FILE) return undefined
+    if (!stat.isFile()) return { refused: linked ? "it is a symbolic link to something other than a regular file" : "it is not a regular file" }
+    if (stat.size > MAX_SERVICE_FILE) return { refused: "it is larger than 1 MiB" }
     const signature = `${stat.ino}:${stat.mtimeMs}:${stat.size}`
     if (signature === previous) return undefined
     // Seen size plus one byte: a file that grows during the read is ignored, and re-read on the next task
@@ -59,7 +75,7 @@ function readChanged(file: string, previous: string | undefined): { signature: s
     for (let n; length < buffer.length && (n = readSync(fd, buffer, length, buffer.length - length, null)) > 0; )
       length += n
     if (length > stat.size) return undefined
-    return { signature, text: buffer.toString("utf8", 0, length) }
+    return { signature, text: buffer.toString("utf8", 0, length), linked }
   } finally {
     closeSync(fd)
   }
@@ -70,11 +86,23 @@ function readChanged(file: string, previous: string | undefined): { signature: s
  * writes it through a renamed temporary file: new inode); the check is done once per synchronous task, which
  * covers the password created during the tool call. A failed read or parse keeps the values already seen
  * (re-read on the next call), and a seen value stays redacted until restart (old password in the history).
- * Returns the same array as long as nothing new has been seen.
+ * Returns the same array as long as nothing new has been seen. `notice` reports a symbolic link and a file that gives
+ * nothing (what it holds stays in clear), never a value: once per file and per cause, again when the cause changes or
+ * comes back after a plain read. A refused file loses its signature: read again, whatever its content then.
  */
-export function serviceSecretSource(dirs: readonly string[]): () => readonly NamedSecret[] {
+export function serviceSecretSource(dirs: readonly string[], notice?: (line: string) => void): () => readonly NamedSecret[] {
   const seen = new Map<string, string>()
   const signatures = new Map<string, string>()
+  const reported = new Map<string, string>()
+  const report = (file: string, line: string) => {
+    if (reported.get(file) === line) return
+    reported.set(file, line)
+    notice?.(line)
+  }
+  const refuse = (file: string, why: string) => {
+    signatures.delete(file)
+    report(file, `service file ${file} not read (${why}): its password and remote route are NOT redacted; values seen before stay redacted`)
+  }
   let list: readonly NamedSecret[] = []
   let checked = false
   return () => {
@@ -96,15 +124,29 @@ export function serviceSecretSource(dirs: readonly string[]): () => readonly Nam
       if (names.includes("service.json")) files.unshift("service.json")
       for (const name of files.slice(0, MAX_SERVICE_FILES)) {
         const file = join(dir, name)
-        let read: { signature: string; text: string } | undefined
-        let data: unknown
+        let read: ReturnType<typeof readChanged>
         try {
           read = readChanged(file, signatures.get(file))
-          if (!read) continue
-          data = JSON.parse(read.text)
-        } catch {
+        } catch (error) {
+          const code = (error as { code?: unknown } | undefined)?.code
+          // Gone since the directory was listed: nothing to read, and nothing lost.
+          if (code !== "ENOENT") refuse(file, `it could not be read: ${typeof code === "string" ? code : "error"}`)
           continue
         }
+        if (!read) continue
+        if ("refused" in read) {
+          refuse(file, read.refused)
+          continue
+        }
+        let data: unknown
+        try {
+          data = JSON.parse(read.text)
+        } catch {
+          refuse(file, "it is not valid JSON")
+          continue
+        }
+        if (read.linked) report(file, `service file ${file} is a symbolic link: read through it, its password and remote route stay redacted`)
+        else reported.delete(file)
         signatures.set(file, read.signature)
         for (const secret of secretsOf(data)) {
           if (seen.has(secret.value)) continue

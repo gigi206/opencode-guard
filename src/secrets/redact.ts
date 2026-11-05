@@ -208,6 +208,53 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null
 }
 
+/**
+ * Zero-width characters a format can be split with. Never removed from a text: U+200D joins composed emojis and U+200C
+ * is needed in Persian. The search runs on a copy without them, made only for a text that has one.
+ */
+const ZERO_WIDTH = /[\u200b\u200c\u200d\ufeff]/
+const ZERO_WIDTH_RUNS = /[\u200b\u200c\u200d\ufeff]+/g
+const PLACEHOLDER_PIECES = new RegExp(`(${MARKER})`)
+/** A placeholder followed by key characters behind a zero-width character: the end of a token cut by that character. */
+const CUT_TOKEN_END = new RegExp(`(${MARKER})(?:[\\u200b\\u200c\\u200d\\ufeff]+[A-Za-z0-9._~+/=:-]+)+`, "g")
+
+/** Position in `text` of each character of the copy without zero-width characters. */
+function keptPositions(text: string, length: number): Uint32Array {
+  const kept = new Uint32Array(length)
+  let at = 0
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i)
+    if (code !== 0x200b && code !== 0x200c && code !== 0x200d && code !== 0xfeff) kept[at++] = i
+  }
+  return kept
+}
+
+/**
+ * `redacted`, the redaction of `stripped`, laid over `text`, the same text with its zero-width characters: what stands
+ * between two placeholders in `redacted` is unchanged text of `stripped`, in order, so each placeholder replaces only the
+ * stretch up to the next unchanged text, and a zero-width character outside it stays. The earliest match is enough: any
+ * placement leaves exactly the text of `redacted`, zero-width characters aside. `undefined` if that text is not found.
+ */
+function overOriginal(text: string, stripped: string, kept: Uint32Array, redacted: string): string | undefined {
+  const pieces = redacted.split(PLACEHOLDER_PIECES)
+  // Odd indexes: the placeholders (captured).
+  if (!stripped.startsWith(pieces[0]!)) return undefined
+  let position = pieces[0]!.length
+  let copied = 0
+  const out: string[] = []
+  for (let i = 1; i < pieces.length; i += 2) {
+    const after = pieces[i + 1]!
+    const end = i + 2 === pieces.length ? stripped.length - after.length : stripped.indexOf(after, position)
+    if (end < position) return undefined
+    const from = position < kept.length ? kept[position]! : text.length
+    out.push(text.slice(copied, from), pieces[i]!)
+    copied = end > position ? kept[end - 1]! + 1 : from
+    position = end + after.length
+  }
+  out.push(text.slice(copied))
+  return out.join("")
+}
+
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 interface KnownValue {
@@ -346,7 +393,26 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
     return redactText(text, 0)
   }
 
+  /**
+   * A copy without zero-width characters first, whose matches replace only their own stretch of the text: searched as it
+   * stands, a token would stop at the character and its end would stay. Then the text as it stands, where such a character
+   * can be the only boundary before a token; what this search stopped at a zero-width character goes with it.
+   */
   function redactText(text: string, depth: number): RedactResult<string> {
+    if (!ZERO_WIDTH.test(text)) return scanText(text, depth)
+    const stripped = text.replace(ZERO_WIDTH_RUNS, "")
+    const whole = scanText(stripped, depth)
+    const laid = whole.count ? (overOriginal(text, stripped, keptPositions(text, stripped.length), whole.value) ?? whole.value) : text
+    if (!ZERO_WIDTH.test(laid)) return { value: laid, count: whole.count }
+    const bounded = scanText(laid, depth)
+    if (!bounded.count) return { value: laid, count: whole.count }
+    // Only what this search stopped: a placeholder that was already there keeps what follows it, unless a token falls in
+    // the same stretch, which then goes as a whole (more is hidden, nothing shows).
+    const stood = new Set(laid.match(CUT_TOKEN_END))
+    return { value: bounded.value.replace(CUT_TOKEN_END, (cut, marker: string) => (stood.has(cut) ? cut : marker)), count: whole.count + bounded.count }
+  }
+
+  function scanText(text: string, depth: number): RedactResult<string> {
     if (!text || isBinaryBlob(text)) return { value: text, count: 0 }
     // Large string entirely base64 (raw image in a request's JSON, output of `base64`): decoded in one go;
     // the patterns are not run on the base64 text itself (costly over megabytes, and pointless).

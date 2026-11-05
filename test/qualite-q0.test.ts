@@ -230,7 +230,7 @@ describe("quality batch, check Q0", () => {
 
   it("RQ-11: an execute call of the unprotected agent refused by the placeholder rule leaves no mark on its identifier", async () => {
     const AGENT = "build-unprotected"
-    const w = world({ unprotectedAgent: AGENT })
+    const w = world({ unprotectedAgent: AGENT, global: { unprotectedAgent: AGENT } })
     w.save({ exceptions: { [RULE]: [w.env] } })
     const plugin = await w.plugin()
     plugin.fake.switchAgent("ses_1", AGENT)

@@ -2699,6 +2699,8 @@ const INTERPRETER_DANGEROUS_CODE =
 /** Length beyond which inline code is not examined: an ask replaces it (64 KiB). */
 const INLINE_CODE_LIMIT = 65536
 
+const DANGEROUS_CODE_REASON = "interpreter code launching a dangerous command"
+
 /** Recursive/forced deletion in a text (an option token starting with `-` contains `r`, `R` or `f`). */
 function codeHasRecursiveRm(code: string): boolean {
   for (const match of code.matchAll(/(?:^|[\s;&|(`'"])rm\b/gi)) {
@@ -2723,21 +2725,32 @@ function interpreterDangerousCode(command: string): boolean {
     const quoted = match[2] ?? ""
     const code = quoted.length >= 2 ? quoted.slice(1, -1) : quoted
     if (code.length === 0 || code.length > INLINE_CODE_LIMIT) continue
-    const lower = code.toLowerCase()
-    // Execution sink (system call, evaluation, process creation); prefixes (`exec*`, `spawn*`) included.
-    const hasSink =
-      /\b(?:system|popen|subprocess|child_process|open3|eval|fork|qx|shell_exec|passthru|proc_open|pcntl_exec|spawn\w*|exec\w*)\b/.test(lower) ||
-      code.includes("`") ||
-      /%x/.test(code)
-    if (!hasSink) continue
-    if (codeHasRecursiveRm(code)) return true
-    if (/(?:^|[\s;&|(`'"])dd\b[^;|&]{0,200}?\bof=\/dev\//i.test(code)) return true
-    if (/\bmkfs\b/i.test(code) || /\bshred\b/i.test(code)) return true
-    if (/(?:^|[\s;&|(`'"])find\b[^;&|]{0,200}?(?:-delete\b|-exec\s+rm\b)/i.test(code)) return true
-    if (gitClean(code) || gitResetHard(code) || gitPushForceOption(code) || pushForcesRefs(code) || gitDiscardAll(code) || GIT_STASH_OR_FILTER.test(code)) return true
-    if (pipesDownloadToShell(code)) return true
+    if (codeLaunchesDangerous(code)) return true
   }
   return false
+}
+
+/** One piece of code with an execution sink that cites an already-condemned command (`interpreterDangerousCode`). */
+function codeLaunchesDangerous(code: string): boolean {
+  return codeHasDangerSink(code) && citesDangerousCommand(code)
+}
+
+/** Execution sink (system call, evaluation, process creation); prefixes (`exec*`, `spawn*`) included. */
+function codeHasDangerSink(code: string): boolean {
+  return (
+    /\b(?:system|popen|subprocess|child_process|open3|eval|fork|qx|shell_exec|passthru|proc_open|pcntl_exec|spawn\w*|exec\w*)\b/.test(code.toLowerCase()) ||
+    code.includes("`") ||
+    /%x/.test(code)
+  )
+}
+
+function citesDangerousCommand(code: string): boolean {
+  if (codeHasRecursiveRm(code)) return true
+  if (/(?:^|[\s;&|(`'"])dd\b[^;|&]{0,200}?\bof=\/dev\//i.test(code)) return true
+  if (/\bmkfs\b/i.test(code) || /\bshred\b/i.test(code)) return true
+  if (/(?:^|[\s;&|(`'"])find\b[^;&|]{0,200}?(?:-delete\b|-exec\s+rm\b)/i.test(code)) return true
+  if (gitClean(code) || gitResetHard(code) || gitPushForceOption(code) || pushForcesRefs(code) || gitDiscardAll(code) || GIT_STASH_OR_FILTER.test(code)) return true
+  return pipesDownloadToShell(code)
 }
 
 /** String literal of inline code: single, double or backtick quotes, with escapes. */
@@ -2870,36 +2883,44 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
   if (!awk && !HAS_INTERPRETER_CODE.test(command)) return undefined
   const text = reentersShell(withoutData(command)) ? command : withoutHeredocBodies(command)
   const lines: string[] = []
-  const redirect = (path: string, content = false) => {
-    const kind = protectedWriteClass(path, ctx.home, ctx)
-    if (kind !== undefined && !(content && kind === "system")) lines.push(`: >${path}`)
-  }
   for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
     const code = inlineCode(match[2] ?? "")
-    if (code === undefined) continue
-    for (const literal of codeMatches(code, CODE_LITERAL)) {
-      const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
-      const end = literal.index + literal[0].length
-      const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
-      const path = perl ? value.slice(perl.length) : value
-      if (!pathCandidate(path)) continue
-      const before = code.slice(Math.max(0, literal.index - 240), literal.index)
-      const after = code.slice(end, end + 80)
-      const call = before.lastIndexOf("(")
-      const byCall = call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))
-      const written =
-        perl !== undefined ||
-        byCall ||
-        (OPEN_BEFORE.test(before) && WRITE_MODE_AFTER.test(after)) ||
-        PERL_OPEN_BEFORE.test(before) ||
-        (SYSOPEN_BEFORE.test(before) && SYSOPEN_WRITE_AFTER.test(after)) ||
-        (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
-      if (written) redirect(path, byCall && notWritten(before.slice(Math.max(0, call - 40), call), before.slice(call + 1), after))
-    }
-    if (hasExecutionSink(code)) lines.push(...literalGroups(code).map((group) => group.text).filter((group) => NAMES_LAUNCH.test(group)))
+    if (code !== undefined) lines.push(...codeViewLines(code, ctx))
   }
-  if (awk) for (const path of awkOutputs(text)) if (pathCandidate(path)) redirect(path)
+  if (awk) for (const path of awkOutputs(text)) if (pathCandidate(path)) lines.push(...protectedRedirect(path, ctx))
   return lines.length ? lines.join("\n") : undefined
+}
+
+/** Redirection to a protected `path`, if any; `content`: the code may only hold the path as text (`notWritten`). */
+function protectedRedirect(path: string, ctx: ShellRuleContext, content = false): string[] {
+  const kind = protectedWriteClass(path, ctx.home, ctx)
+  return kind !== undefined && !(content && kind === "system") ? [`: >${path}`] : []
+}
+
+/** Lines of `interpreterCodeView` for one piece of code: its protected writes, then its launches. */
+function codeViewLines(code: string, ctx: ShellRuleContext): string[] {
+  const lines: string[] = []
+  for (const literal of codeMatches(code, CODE_LITERAL)) {
+    const value = literal[1] ?? literal[2] ?? literal[3] ?? ""
+    const end = literal.index + literal[0].length
+    const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
+    const path = perl ? value.slice(perl.length) : value
+    if (!pathCandidate(path)) continue
+    const before = code.slice(Math.max(0, literal.index - 240), literal.index)
+    const after = code.slice(end, end + 80)
+    const call = before.lastIndexOf("(")
+    const byCall = call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))
+    const written =
+      perl !== undefined ||
+      byCall ||
+      (OPEN_BEFORE.test(before) && WRITE_MODE_AFTER.test(after)) ||
+      PERL_OPEN_BEFORE.test(before) ||
+      (SYSOPEN_BEFORE.test(before) && SYSOPEN_WRITE_AFTER.test(after)) ||
+      (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
+    if (written) lines.push(...protectedRedirect(path, ctx, byCall && notWritten(before.slice(Math.max(0, call - 40), call), before.slice(call + 1), after)))
+  }
+  if (hasExecutionSink(code)) lines.push(...literalGroups(code).map((group) => group.text).filter((group) => NAMES_LAUNCH.test(group)))
+  return lines
 }
 
 /** Code of a quoted block of `INTERPRETER_DANGEROUS_CODE`, double-quote escapes removed; `undefined` if empty or too long. */
@@ -3770,7 +3791,7 @@ const ASK_RULES: readonly RegexRule[] = [
   {
     id: "interpreter-dangerous-code",
     verdict: "ask",
-    reason: "interpreter code launching a dangerous command",
+    reason: DANGEROUS_CODE_REASON,
     test: interpreterDangerousCode,
   },
   {
@@ -5435,6 +5456,35 @@ function codeViewContext(ctx: ShellRuleContext): ShellRuleContext {
   return { ...ctx, custom: [], active: { dangerousCommands: false, sensitiveFiles: false, ...(overrides.size ? { overrides } : {}), ...byModel, ...keptOn } }
 }
 
+/** Finding of the equivalent shell form of code (`interpreterCodeView`), `CODE_VIEW_RULES` only. */
+function codeViewFinding(view: string, ctx: ShellRuleContext): Finding | undefined {
+  const only = codeViewContext(ctx)
+  const found = assignedFinding(view, only, layeredShellFinding(view, only).finding)
+  return found && CODE_VIEW_RULES.has(found.rule) ? found : undefined
+}
+
+/** A file's text around a command hides its end (`", shell=True)`): each literal and each list of literals is read alone too. */
+function fileLaunchesDangerous(code: string): boolean {
+  if (!codeHasDangerSink(code)) return false
+  if (citesDangerousCommand(code)) return true
+  const literals = codeMatches(code, CODE_LITERAL).map((literal) => literal[1] ?? literal[2] ?? literal[3] ?? "")
+  return [...literals, ...literalGroups(code).map((group) => group.text)].some(citesDangerousCommand)
+}
+
+/**
+ * Whole content of a file run by an interpreter, read as inline code: the protected writes and launches of
+ * `interpreterCodeView`, then the commands of `interpreter-dangerous-code`, each under its own settings. `undefined` if
+ * neither is found; `LIMIT_REACHED` past the budget of inline code, which is not read then. The language is not known:
+ * nothing is left out as a comment, since a misread multi-line string would hide real code.
+ */
+export function scriptCodeFinding(code: string, ctx: ShellRuleContext): Finding | undefined | typeof LIMIT_REACHED {
+  if (code.length > INLINE_CODE_LIMIT) return LIMIT_REACHED
+  const lines = codeViewLines(code, ctx)
+  const dangerous: Finding | undefined =
+    ruleEnabled("interpreter-dangerous-code", ctx.active) && fileLaunchesDangerous(code) ? { verdict: "ask", rule: "interpreter-dangerous-code", reason: DANGEROUS_CODE_REASON } : undefined
+  return mostSevere([lines.length ? codeViewFinding(lines.join("\n"), ctx) : undefined, hardened(dangerous, ctx.active)])
+}
+
 /**
  * Findings of a view, in order: finding of the rules and of the view without leading assignments (`assignedFinding`);
  * without a deny, that of the view of the word in command position (`commandWordView`), the ask of its flag, and that of
@@ -5448,9 +5498,7 @@ function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | u
   try {
     const code = interpreterCodeView(command, ctx)
     if (code !== undefined) {
-      const only = codeViewContext(ctx)
-      const found = assignedFinding(code, only, layeredShellFinding(code, only).finding)
-      coded = found && CODE_VIEW_RULES.has(found.rule) ? found : undefined
+      coded = codeViewFinding(code, ctx)
       // The only ask, from this view: that of a printed OpenCode secret cited in the code, as for an ask of the command.
       if (coded?.verdict === "ask" && base === undefined) coded = printedInCodeFinding(command, ctx) ?? coded
     }

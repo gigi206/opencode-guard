@@ -1,7 +1,7 @@
 // Tracking of files created in full by the agent in a session: when they are run, their content is submitted to the local
-// shell rules (at most one ask) and, if unchanged since a call judged in full by the decision model,
-// shown to it. A file that can no longer be read (too large, link…), or named by a successful `patch` call whose text
-// lacks the known grammar: unverifiable, its execution asks.
+// shell rules, or read as inline code if no shell reads it and the model does not see it whole (at most one ask), and, if
+// unchanged since a call judged in full by the decision model, shown to it. A file that can no longer be read (too
+// large, link…), or named by a successful `patch` call whose text lacks the known grammar: unverifiable, its execution asks.
 import { createHash } from "node:crypto"
 import { closeSync, constants, lstatSync, openSync, readSync, realpathSync, fstatSync } from "node:fs"
 import { join, resolve } from "node:path"

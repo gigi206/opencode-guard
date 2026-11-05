@@ -161,6 +161,8 @@ export const MAX_LOG_LINE = 8192
  * bidirectional controls (they reorder what follows on screen).
  */
 export const CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]+/g
+/** Same, plus the zero-width characters, in the log only: a terminal needs them for composed emojis and Persian text. */
+const LOG_CONTROL_CHARACTERS = /[\x00-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]+/g
 const LINE_HEAD = 6000
 const LINE_TAIL = 2000
 /** Append, create if needed, never through a final symbolic link (placed before startup or after). */
@@ -231,7 +233,7 @@ export function createLogger(
       text = "(log message withheld: redaction failed)"
     }
     // One line per entry: reasons mention paths chosen by the model and server responses.
-    text = text.replace(CONTROL_CHARACTERS, " ")
+    text = text.replace(LOG_CONTROL_CHARACTERS, " ")
     // Cut after redaction: a secret straddling the cut has already been replaced.
     if (text.length <= MAX_LOG_LINE) return text
     return `${text.slice(0, LINE_HEAD)} …[${text.length - LINE_HEAD - LINE_TAIL} characters omitted]… ${text.slice(-LINE_TAIL)}`
