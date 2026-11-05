@@ -380,7 +380,7 @@ describe("what a shell's -c writes", () => {
   ])
   cases(ASK, ["bash -c 'true; cp /tmp/x /etc/y'", "sh -c 'echo x > /etc/y'"], "witness: ")
   cases(SELF, ["bash -c 'cp /tmp/x .opencode/y'"], "witness: ")
-  // The levels are bounded; a joined name and what a word of the code launches are not read there.
+  // What only looks like a shell's -c, or reads nothing in its code.
   cases("none", [
     "bash -c 'ls /etc'",
     "bash -c 'cat \"$1\"' _ /etc/y",
@@ -390,10 +390,10 @@ describe("what a shell's -c writes", () => {
     "bash -o pipefail /tmp/s.sh -c 'cp /tmp/x /etc/y'",
     "echo bash -c 'cp /tmp/x /etc/y'",
     "git commit -m \"bash -c 'cp /tmp/x /etc/y'\"",
-    "bash -c 'sudo ls'",
-    "bash -c 'cp /tmp/hooks .git/'",
-    "sh -c \"sh -c \\\"sh -c 'sh -c cp /tmp/x /etc/y'\\\"\"",
   ], "witness: ")
+  cases("ask/privilege", ["bash -c 'sudo ls'"])
+  cases(ASK, ["bash -c 'cp /tmp/hooks .git/'"])
+  cases("ask/nested-opencode", ["sh -c \"sh -c \\\"sh -c 'sh -c cp /tmp/x /etc/y'\\\"\""])
   it("witness: nested shells stay bounded", () => {
     const command = `${"bash -c ".repeat(40_000)}'cp /tmp/x /etc/y'`
     const start = performance.now()

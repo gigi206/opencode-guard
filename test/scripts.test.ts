@@ -13,6 +13,7 @@ import { changesDirectory, directoryTargets, heredocFiles, leadingCdChain, mayCh
 import { readPatch } from "../src/patch.ts"
 import { createScriptTracker, isShellScript, resolveLike, SCRIPT_MAX_BYTES, scriptDirectories, shellDirectories } from "../src/scripts.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
+import { declaring, switchesOf } from "./declared.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -73,6 +74,12 @@ describe("lot 10: executed scripts — detection in the command", () => {
     assert.deepEqual(runs("cat > notes.md <<'EOF'\nbash f.sh\nEOF"), [])
     assert.deepEqual(runs("bash f.sh && bash f.sh"), ["shell:f.sh"])
     assert.equal(scriptRuns("bash a; bash b; bash c; bash d; bash e").length, 4)
+  })
+  it("a file named in pieces: its value", () => {
+    for (const command of [`bash s""cript.sh`, `bash 's'cript.sh`, `bash s\\cript.sh`, `bash $'s'cript.sh`, `ba""sh script.sh`, `bash < s""cript.sh`, `echo $(bash s""cript.sh)`])
+      assert.deepEqual(runs(command), ["shell:script.sh"], command)
+    assert.deepEqual(runs(`python3 s""cript.py`), ["interpreter:script.py"])
+    assert.deepEqual(runs(`node "a"b.js`), ["interpreter:ab.js"])
   })
   it("cd <path> && at the start: directory for the rest; other forms refused", async () => {
     const { afterLeadingCd } = await import("../src/rules/shell.ts")
@@ -277,6 +284,15 @@ describe("lot 10: context for the model — end-to-end gate", () => {
     await t.run("./reset.sh")
     assert.equal(t.fake.asserts.length, 1)
     assert.match(String(t.fake.asserts[0]?.metadata?.reason), /git reset --hard.*in the script \.\/reset\.sh run by this command/)
+  })
+  it("a script named in pieces is read like the plain name", async () => {
+    for (const command of [`bash r""eset.sh`, `bash r\\eset.sh`, `ba""sh reset.sh`, `./r""eset.sh`, `bash < r""eset.sh`]) {
+      const t = await gate()
+      await t.write("reset.sh", "git reset --hard\n")
+      await t.run(command)
+      assert.equal(t.fake.asserts.length, 1, command)
+      assert.match(String(t.fake.asserts[0]?.metadata?.reason), /git reset --hard.*in the script .*reset\.sh run by this command/, command)
+    }
   })
   it("Python script: content for the model, no shell rule", async () => {
     const t = await gate()
@@ -738,7 +754,7 @@ describe("lot 29: unverifiable scripts — end-to-end gate", () => {
     const dir = temp()
     const states: Array<Record<string, unknown>> = []
     const decisions: Array<{ call: ToolCall; decision: Decision }> = []
-    const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...options.settings })
+    const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...options.settings }, {}, declaring(switchesOf(options.settings ?? {})))
     const redactor = createRedactor()
     const model = async (request: { state: Record<string, unknown> }) => {
       states.push(request.state)

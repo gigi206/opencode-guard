@@ -7,6 +7,7 @@ import { createModelClient, endpoint, ModelError, type FetchLike, type ModelResp
 import { DEFAULT_THRESHOLDS, interpret } from "../src/model/questions.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { FAKE } from "./fixtures.ts"
+import { declaring } from "./declared.ts"
 
 const chatConfig = {
   protocol: "chat" as const,
@@ -329,7 +330,7 @@ describe("configuration (everything comes from settings, {env:…} substituted b
       debug: "true",
       redactPrompt: "false",
       maxStateChars: "",
-    })
+    }, {}, declaring({ redactPrompt: "false" }))
     assert.equal(config.thresholds.askNoul, 0.8)
     assert.equal(config.thresholds.askRisk, 1.8)
     assert.equal(config.thresholds.minConfidence, DEFAULT_THRESHOLDS.minConfidence)
@@ -500,7 +501,7 @@ describe("audit no. 3: configuration", () => {
     assert.match(warnings.join(), /rules\[1\]\.tools must be/)
   })
   it("booleans: true/false in any case, 1/0", () => {
-    const { config, warnings } = parseConfig({ debug: "True", redactPrompt: "0" })
+    const { config, warnings } = parseConfig({ debug: "True", redactPrompt: "0" }, {}, declaring({ redactPrompt: "0" }))
     assert.equal(config.debug, true)
     assert.equal(config.redactPrompt, false)
     assert.deepEqual(warnings, [])

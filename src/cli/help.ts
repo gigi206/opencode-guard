@@ -1,6 +1,7 @@
 // `guard help`: the commands, in two groups (what they read, what they write in the global guard.json). The same
 // entries give the plain text (`USAGE`, printed as is when the output is not a terminal, and after a usage error) and
 // the terminal layout (a banner, the groups as headings, the commands in color, descriptions wrapped to the width).
+import { RELAX_SWITCHES } from "../config.ts"
 import type { Pretty } from "./context.ts"
 import { DEFAULT_LAST, MAX_LAST } from "./last.ts"
 import { rowLines, title } from "./pretty.ts"
@@ -40,7 +41,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "rules off|ask|deny|model <rule>", text: 'set a built-in rule ("off" turns it off, "model" leaves its asks to the decision model)' },
       { usage: "rules reset <rule>", text: "remove the rule's setting there: it applies with its own verdict again" },
       { usage: "  --path <file>", text: "rules off|reset secret-file-read only: add or remove the file's real path in the rule's exceptions there, the rest of the rule unchanged (top level or --project, never --agent)" },
-      { usage: "set <setting> <value>", text: "a policy setting: profile, localAsks, selfProtectionByModel, dangerousCommands, sensitiveFiles, scripts, decisionModel, rememberConfirmations (minutes, 1 to 60)" },
+      { usage: "set <setting> <value>", text: "a policy setting: profile, localAsks, selfProtectionByModel, dangerousCommands, sensitiveFiles, scripts, decisionModel, rememberConfirmations (minutes, 1 to 60); with --project only: redactOutputs, redactPrompt, redactWire, outputCheck, promptCheck" },
       { usage: "unset <setting>", text: "remove that setting there" },
       { usage: "  --agent <name>", text: "rules <setting>|reset, set, unset: in the section of this agent (main agent, or subagent); never with --path, nor set rememberConfirmations (unset removes a value written there)" },
       { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
@@ -67,6 +68,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
 const NOTES = [
   "Only the global guard.json is written (OpenCode's global configuration directory, from this terminal's environment).",
   "The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.",
+  `In a project section, ${RELAX_SWITCHES.join(", ")} count from the next start of the plugin.`,
 ]
 
 const COMPLETION = 'completion script for the shell: eval "$(guard completion zsh)" in its startup file'

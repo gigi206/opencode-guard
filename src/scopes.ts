@@ -1,7 +1,7 @@
 // Settings of each call (guard.json files, `agents` and `projects` sections): the version in force, rebuilt when a
 // guard.json file changes (identity of the candidates checked at most once per interval: never a read per call), and the
 // scope of the call from the main agent recorded at the user's last prompt (`hooks/agents.ts`).
-import { resolveVersion, type AgentRelaxation, type GuardConfig, type Scope, type Version } from "./config.ts"
+import { RELAX_SWITCHES, resolveVersion, type AgentRelaxation, type GuardConfig, type Scope, type Version } from "./config.ts"
 import { waiverSummary } from "./rules/features.ts"
 import { guardIdentity, readGuardFiles, type GuardPaths } from "./guard-file.ts"
 import type { MainAgents } from "./hooks/agents.ts"
@@ -68,8 +68,16 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
     warnings: [],
     rules: config.rules,
     summary: "",
+    switches: {
+      redactOutputs: config.features.redactOutputs,
+      redactPrompt: config.features.redactPrompt,
+      redactWire: config.features.redactWire,
+      outputCheck: config.outputCheck !== undefined,
+      promptCheck: config.promptCheck !== undefined,
+    },
   }
   let current = config.version ?? plain
+  const started = current.switches
   let identity = deps.identity
   let checked = clock()
   deps.onVersion?.(current)
@@ -100,6 +108,8 @@ export function createScopes(deps: ScopeDeps): ScopeResolver {
       announce(current)
       log.info(`guard.json re-read (${current.summary || "guard.json: none; startup settings"}${waiverSummary(current.base.policy)})`)
       for (const warning of current.warnings) log.warn(warning)
+      const moved = RELAX_SWITCHES.filter((name) => current.switches[name] !== started[name])
+      if (moved.length) log.warn(`${moved.join(", ")}: changed in guard.json, counts from the next start of the plugin`)
       for (const error of current.errors ?? []) log.error(error)
     } catch (error) {
       // Identity kept: the files are read again at the next check.

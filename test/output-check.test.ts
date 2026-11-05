@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
-import { DEFAULT_OUTPUT_CHECK, parseConfig } from "../src/config.ts"
+import { checkRequested, DEFAULT_OUTPUT_CHECK, parseConfig } from "../src/config.ts"
 import { MAX_ACTION_DETAIL } from "../src/hooks/gate.ts"
 import { promptWords } from "../src/hooks/secret-check.ts"
 import { registerOutputCheck, UNCHECKED_NOTE, withhold, withheldNotice } from "../src/hooks/output-check.ts"
@@ -15,6 +15,7 @@ import { ModelError, type ModelRequest, type ModelResponse } from "../src/model/
 import { OUTPUT_QUESTION_ID, OUTPUT_VERIFY_QUESTION_ID, OUTPUT_WORD_QUESTION_ID, PROMPT_QUESTION_ID, PROMPT_VERIFY_QUESTION_ID, PROMPT_WORD_QUESTION_ID } from "../src/model/questions.ts"
 import { declaredOutputCheck, globalConfigDirectory } from "../src/output-check.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
+import { declaring } from "./declared.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -24,7 +25,7 @@ const temp = (prefix: string) => mkdtempSync(join(tmpdir(), `guard-oc-${prefix}-
 const entry = (options: unknown) => JSON.stringify({ plugins: [{ package: PLUGIN, options }] })
 
 describe("batch 32: outputCheck option", () => {
-  const parse = (value: unknown) => parseConfig({ outputCheck: value })
+  const parse = (value: unknown) => (checkRequested(value) ? parseConfig({ outputCheck: value }) : parseConfig({ outputCheck: value }, {}, declaring({ outputCheck: value })))
   it("on by default (absent, empty); false, \"false\", \"0\" or enabled false → off; true, string, object → explicit values", () => {
     for (const value of [undefined, ""]) assert.deepEqual(parse(value).config.outputCheck, DEFAULT_OUTPUT_CHECK)
     for (const value of [false, "false", "0", { enabled: false }, { enabled: "false" }]) assert.equal(parse(value).config.outputCheck, undefined)
@@ -457,7 +458,9 @@ describe("batch 32: startup (option, global file, INFO line)", () => {
     const declared = temp("global")
     writeFileSync(join(declared, "opencode.json"), entry({ decision }))
     assert.match(await start({ decision }, declared), /INFO active \(.*; output check: active(?:; prompt check: \w+)?\)/)
-    assert.match(await start({ decision, outputCheck: false }, declared), /INFO active \(.*; output check: off(?:; prompt check: \w+)?\)/)
+    const declaredOff = temp("global")
+    writeFileSync(join(declaredOff, "opencode.json"), entry({ outputCheck: false, decision }))
+    assert.match(await start({ decision, outputCheck: false }, declaredOff), /INFO active \(.*; output check: off(?:; prompt check: \w+)?\)/)
     const global = temp("global")
     writeFileSync(join(global, "opencode.json"), entry({ outputCheck: true, decision }))
     const log = await start({ decision, outputCheck: true }, global)

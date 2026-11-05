@@ -228,7 +228,7 @@ describe("lot 48 step B3: guard.json files", () => {
     assert.equal(await later.verdict("git clean -fdx"), "ask")
   })
 
-  it("PRT-7: a switch set to false in a section or a guard.json of a project not listed is dropped; at the top of the options, as before", async () => {
+  it("PRT-7: a switch set to false in a section or a guard.json of a project not listed is dropped; at the top of the options, it must be declared by a global source", async () => {
     const plugin = await guard({ projectGuard: { dangerousCommands: false, profile: "credentials-only", agents: { build: { dangerousCommands: false } } } })
     await plugin.prompt("ses_1", "build")
     assert.equal(await plugin.verdict("git reset --hard"), "ask")
@@ -236,7 +236,7 @@ describe("lot 48 step B3: guard.json files", () => {
     assert.match(plugin.log(), /project guard\.json \([^)]*\), agents\.build: dangerousCommands false ignored: its directory is not trusted/)
     const projectSection = await guard({ globalGuard: { projects: { "<ROOT>/work/app": { dangerousCommands: false } } } })
     assert.equal(await projectSection.verdict("git reset --hard"), "allow") // a global source may relax
-    const options = await guard({ options: { dangerousCommands: false }, projectGuard: {} })
+    const options = await guard({ global: { dangerousCommands: false }, options: { dangerousCommands: false }, projectGuard: {} })
     assert.equal(await options.verdict("git reset --hard"), "allow")
   })
 })
@@ -352,7 +352,7 @@ describe("lot 48 step B3: agent sections", () => {
 
 describe("lot 48 step B3: nothing changes without these settings", () => {
   it("PRT-14 (guard): no guard.json, no agents, projects or trustedProjects: no start line, no session read by the prompt hook", async () => {
-    const plugin = await guard({ options: { redactPrompt: false } })
+    const plugin = await guard({ global: { redactPrompt: false }, options: { redactPrompt: false } })
     assert.equal(plugin.hooks.get("session.prompt")?.length, 1)
     assert.ok(!plugin.log().includes("settings by agent and by project"))
     assert.equal(await plugin.verdict("git reset --hard"), "ask")

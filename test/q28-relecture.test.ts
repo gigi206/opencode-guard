@@ -12,6 +12,7 @@ import { toolFinding } from "../src/rules/tools.ts"
 import type { Finding } from "../src/rules/types.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { fastEnough } from "./budget.ts"
+import { declaring, switchesOf } from "./declared.ts"
 
 const HOME = "/home/test"
 const PROJECT = `${HOME}/work/app`
@@ -159,7 +160,7 @@ describe("Q28 review", () => {
       },
     })
     for (const setting of settings) {
-      const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...setting })
+      const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...setting }, {}, declaring(switchesOf(setting)))
       const decider = createDecider({ config, redactor: createRedactor(), model: allow as never })
       for (const [tool, input] of [
         [CREATE, { title: "API", files: { "index.html": html(`<script>${post(ROUTE)}</script>`) } }],

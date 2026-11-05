@@ -4,9 +4,10 @@
 // ever printed.
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { parseConfig, type GuardConfig, type Version } from "../config.ts"
+import { parseConfig, RELAX_SWITCHES, type GuardConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
-import { PLUGIN_DIR, readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
+import { declaredOutputCheck } from "../output-check.ts"
+import { PLUGIN_DIR, readSources, realOrUndefined, resolution, serverEnv, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment, Style } from "./style.ts"
 import { pluginVersion, runGit } from "./version.ts"
@@ -47,7 +48,7 @@ function showSettings(io: CliIo, agent: string | undefined, offline: boolean): v
   const listed = version.listed?.length ? version.listed.join(", ") : "none"
   const patterns = redactionSettings(io, sources)
   const formatsOff = (version.redactionOff ?? []).map((type) => ({ key: `redactionOff.${type}`, value: "off", origin: "global guard.json" }))
-  const rows = [...(version.settings?.(agent) ?? []), ...relaxationRows(version, agent)]
+  const rows = [...startRows(io, sources, version, agent), ...relaxationRows(version, agent)]
   // Exceptions apart: a path would widen every column of the settings.
   const settings = [...rows.filter((row) => !row.key.startsWith(EXCEPTIONS)), ...patterns.rows, ...formatsOff]
   const exceptions = rows.filter((row) => row.key.startsWith(EXCEPTIONS)).map((row) => ({ rule: row.key.slice(EXCEPTIONS.length), path: String(row.value), origin: row.origin }))
@@ -77,6 +78,29 @@ function showSettings(io: CliIo, agent: string | undefined, offline: boolean): v
     io.out("Set aside:")
     for (const warning of warnings) io.out(`  ${warning}`)
   }
+}
+
+const READ_AT_START: readonly string[] = RELAX_SWITCHES
+
+/**
+ * The settings, with what the files alone cannot say. The switches read at start say so (the running plugin may hold
+ * another value: its state is not known here). A check that is on but finds no model it may use does not show as on.
+ */
+function startRows(io: CliIo, sources: Sources, version: Version, agent: string | undefined) {
+  const env = serverEnv(io.env, sources.globalDir)
+  const served = readSources({ ...io, env })
+  const { config } = parseConfig(served.options, env, () => served.declarations)
+  const idle = (option: "outputCheck" | "promptCheck") => {
+    const enabledBySection = version.sectionChecks?.includes(option) ?? false
+    const state = version.base.decisionModel && config.decision ? declaredOutputCheck({ option, enabledBySection, pluginDir: PLUGIN_DIR, effectiveBaseURL: config.decision.baseURL, globalDir: sources.globalDir, systemDir: io.systemDir, env }) : { active: false, reason: "no decision model" }
+    return state.active ? undefined : state.reason
+  }
+  return (version.settings?.(agent) ?? []).map((row) => {
+    if (!READ_AT_START.includes(row.key)) return row
+    const reason = row.value === true && (row.key === "outputCheck" || row.key === "promptCheck") ? idle(row.key) : undefined
+    const origin = `${row.origin} (read when the plugin starts)`
+    return reason === undefined ? { ...row, origin } : { ...row, value: "inactive", origin: `${origin}: ${reason}` }
+  })
 }
 
 /**
@@ -177,8 +201,8 @@ const VALUE_STYLES: ReadonlyArray<readonly [string, Style]> = [
 ]
 const valueStyle = (value: string): Style | undefined => VALUE_STYLES.find(([word]) => word === value)?.[1]
 
-/** Switches whose `true` keeps a protection on (`policy` switches of `config.ts`). */
-const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "decisionModel"])
+/** Switches whose `true` keeps a protection on (`Version.settings`). */
+const PROTECTIVE = new Set(["dangerousCommands", "sensitiveFiles", "scripts", "decisionModel", ...RELAX_SWITCHES])
 const RELAXES = "relaxes"
 const EXCEPTIONS = "exceptions."
 
@@ -203,7 +227,6 @@ export function stillRelaxed(version: Version, config: GuardConfig, agent: strin
   return [
     ...(version.settings?.(agent) ?? []).filter((row) => row.key.startsWith(EXCEPTIONS) || relaxes(row.key, String(row.value))).map((row) => row.key),
     ...(version.redactionOff ?? []).map((type) => `redactionOff.${type}`),
-    ...(["redactOutputs", "redactPrompt", "redactWire"] as const).filter((key) => !config.features[key]),
     ...(config.unprotectedAgent === agent ? ["unprotectedAgent"] : []),
   ]
 }

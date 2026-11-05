@@ -6,7 +6,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
+import { declaredDecision, DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
 import { createDecider } from "./decide.ts"
 import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
@@ -18,7 +18,7 @@ import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, withAgentSections, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
 import { isRegularFile } from "./real-path.ts"
-import { declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, type OutputCheckState } from "./output-check.ts"
+import { checkCutByModel, declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, type OutputCheckState } from "./output-check.ts"
 import { RULE_FEATURES, waiverSummary } from "./rules/features.ts"
 import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
@@ -324,7 +324,7 @@ export async function setupGuard(
     try {
       promptCheck =
         model && config.decision
-          ? declaredOutputCheck({ option: "promptCheck", pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decision.baseURL, globalDir, systemDir, env })
+          ? declaredOutputCheck({ option: "promptCheck", enabledBySection: config.version?.sectionChecks?.includes("promptCheck") ?? false, pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decision.baseURL, globalDir, systemDir, env })
           : { active: false, reason: "the decision model is disabled" }
       if (promptCheck.active && config.decision) {
         promptGate = createPromptGate(ctx, {
@@ -377,7 +377,7 @@ export async function setupGuard(
     try {
       outputCheck =
         model && config.decision
-          ? declaredOutputCheck({ pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decision.baseURL, globalDir, systemDir, env })
+          ? declaredOutputCheck({ enabledBySection: config.version?.sectionChecks?.includes("outputCheck") ?? false, pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decision.baseURL, globalDir, systemDir, env })
           : { active: false, reason: "the decision model is disabled" }
       if (outputCheck.active && config.decision) {
         await registerOutputCheck(ctx, {
@@ -409,6 +409,20 @@ export async function setupGuard(
       degraded.push("output check: UNAVAILABLE")
     }
   }
+  // A check the user did not ask for by name stays silent above: when the options in force carry another address than a
+  // global source declares for it (a project replaced or removed `decision`), the log says which checks that cuts. Read
+  // as written: a `decision` of the user's that cannot be used is the same one, and was not replaced by anyone.
+  const cut = [
+    ["output check", "outputCheck", outputCheck],
+    ["prompt check", "promptCheck", promptCheck],
+  ] as const
+  const cutNames = cut.flatMap(([label, option, state]) => {
+    const settings = config[option]
+    if (!settings || settings.explicit || state?.active) return []
+    const input = { option, enabledBySection: config.version?.sectionChecks?.includes(option) ?? false, pluginDir: protectedDirs[0]!, effectiveBaseURL: declaredDecision(ctx.options)?.baseURL, globalDir, systemDir, env }
+    return checkCutByModel(input) ? [label] : []
+  })
+  if (cutNames.length) log.warn(`${cutNames.join(" and ")} not running: the decision model in use is not the one the global configuration declares (a project's opencode.json can replace or remove it)`)
   // Always written: a misspelled {env:…} variable (empty askAs → "ask") is visible here.
   const confirmations = config.askAs === "deny" ? "denied (unattended mode)" : "ask"
   const enforced = enforcedBySystemConfig(protectedDirs[0]!, systemDir) ? "enforced" : "not enforced"
@@ -421,7 +435,7 @@ export async function setupGuard(
   const profile = config.profile === "standard" ? "" : `; profile: ${config.profile}`
   const settings = [...(config.policy.overrides ?? [])].map(([rule, setting]) => `${rule} ${setting}`)
   const overrides = `${settings.length ? `; rule overrides: ${settings.join(", ")}` : ""}${localAsksByModel ? "; local asks: model" : ""}${selfProtectionByModel ? "; self-protection by model" : ""}${waiverSummary(config.policy)}`
-  // Prompt check: its state whenever the decision model is on (`off` when turned off, so that a project doing it shows).
+  // Prompt check: its state whenever the decision model is on (`off` when turned off).
   const custom = (settings: { custom: boolean } | undefined) => (settings?.custom ? " (custom settings)" : "")
   const prompted = promptCheck !== undefined ? `; prompt check: ${promptCheck.active ? "active" : "inactive"}${custom(config.promptCheck)}` : model && !config.promptCheck ? "; prompt check: off" : ""
   const outputs = outputCheck !== undefined ? `; output check: ${outputCheck.active ? "active" : "inactive"}${custom(config.outputCheck)}` : model && !config.outputCheck ? "; output check: off" : ""

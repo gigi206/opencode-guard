@@ -41,7 +41,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "nested-opencode",
     detail(
-      "Recognizes a command that starts another OpenCode agent or server, or that changes its configuration or the environment it reads. It also asks when the program a command runs cannot be determined (a command word built at run time, too long or too complex to read), because the plugin cannot rule out another OpenCode.",
+      "Recognizes a command that starts another OpenCode agent or server, or that changes its configuration or the environment it reads. It also asks when the program a command runs cannot be determined (a command word built at run time, too long or too complex to read, or code given to a shell by `-c` nested too deep to read), because the plugin cannot rule out another OpenCode.",
       "launches another OpenCode agent or server, or changes its configuration: it may run without the guard or approve its confirmations (--auto)",
       "another OpenCode or a configuration change",
     ),

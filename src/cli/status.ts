@@ -20,6 +20,8 @@ const MESSAGES = 5
 /** A log line: `<time> <LEVEL> <text>`. */
 const LINE = /^(\d{4}-\d{2}-\d{2}T\S+) (DEBUG|INFO|WARN|ERROR) (.*)$/
 const START = /^active \((.*)\)$/
+/** A relaxation of the project refused at start: one of that start's warnings, with its reason. */
+const REFUSED = /\bignored: a relaxation counts only if /
 
 interface Entry {
   readonly time: string
@@ -35,6 +37,8 @@ export interface LogState {
   readonly errors: number
   readonly warnings: number
   readonly messages: readonly Entry[]
+  /** Relaxations of the project refused by the latest start, which are start warnings. */
+  readonly refused: readonly Entry[]
 }
 
 /**
@@ -57,6 +61,7 @@ export function logState(lines: readonly string[]): LogState {
     errors: after.filter((entry) => entry.level === "ERROR").length,
     warnings: after.filter((entry) => entry.level === "WARN").length,
     messages: after.slice(-MESSAGES),
+    refused: latest === undefined ? [] : entries.slice(0, latest).filter((entry) => entries[latest]!.ms - entry.ms <= 1000 && entry.level === "WARN" && REFUSED.test(entry.text)),
   }
 }
 
@@ -126,6 +131,8 @@ export async function status(io: CliIo, options: { readonly offline: boolean }, 
     for (const start of state!.starts) rows.push({ label: "start", value: `${when(start.time, io.env)}  ${start.details}`, style: /UNAVAILABLE|INCOMPLETE|NO protection/.test(start.details) ? "bad" : undefined })
     if (state!.starts.length) {
       rows.push({ label: "since", value: `${state!.errors} error(s), ${state!.warnings} warning(s) after the latest start (from any OpenCode instance writing this log)`, style: state!.errors ? "bad" : state!.warnings ? "warn" : "good" })
+      if (state!.refused.length) rows.push({ label: "warn", value: `${state!.refused.length} setting(s) refused by the latest start, the last ones:`, style: "warn" })
+      for (const entry of state!.refused.slice(-MESSAGES)) rows.push({ label: "warn", value: `${when(entry.time, io.env)}  ${entry.text}`, style: "warn" })
       for (const entry of state!.messages) rows.push({ label: entry.level.toLowerCase(), value: `${when(entry.time, io.env)}  ${entry.text}`, style: entry.level === "ERROR" ? "bad" : "warn" })
       rows.push(stale ? { label: "files", value: "plugin files changed after the latest start: not loaded yet (OpenCode reloads the plugin by itself)", style: "warn" } : { label: "files", value: "no plugin file changed since the latest start", style: "good" })
     }

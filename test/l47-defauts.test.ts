@@ -14,6 +14,7 @@ import { scriptRuns, shellFinding } from "../src/rules/shell.ts"
 import { toolFinding } from "../src/rules/tools.ts"
 import { createScriptTracker, SCRIPT_MAX_BYTES } from "../src/scripts.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
+import { declaring, switchesOf } from "./declared.ts"
 import { fakeContext } from "./fake-ctx.ts"
 
 const redactor = createRedactor()
@@ -43,7 +44,7 @@ const answer = () => ({
 /** Wired like `index.ts`: decider, script tracking and switches taken from the same config. */
 async function gate(settings: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "guard-defauts-"))
-  const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...settings })
+  const { config } = parseConfig({ decision: { baseURL: "https://nox.invalid/v1", model: "nox-4b" }, ...settings }, {}, declaring(switchesOf(settings)))
   const decided: Array<string | undefined> = []
   const inner = createDecider({ config, redactor: createRedactor(), model: (async () => answer()) as never })
   const decider = {

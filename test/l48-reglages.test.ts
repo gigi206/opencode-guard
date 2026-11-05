@@ -31,7 +31,7 @@ const configOf = (options: Record<string, unknown>, declared?: () => unknown[]) 
 /** Policy built from the options (the deployed code has none: all rules active, no setting). */
 const policyOf = (options: Record<string, unknown>, declared?: () => unknown[]) => (configOf(options, declared).config as { policy?: ActiveRules }).policy
 /** Relaxed settings, declared in the global configuration too. */
-const relaxed = (ruleOverrides: Record<string, string>, extra: Record<string, unknown> = {}) => policyOf({ ruleOverrides, ...extra }, declaredBy({ ruleOverrides }))
+const relaxed = (ruleOverrides: Record<string, string>, extra: Record<string, unknown> = {}) => policyOf({ ruleOverrides, ...extra }, declaredBy({ ruleOverrides, ...extra }))
 const shell = (command: string, active?: ActiveRules) => toolFinding("shell", { command }, { ...ctx, active })
 const brief = (finding?: { verdict: string; rule: string; dataOnly?: boolean; modelDecides?: string }) =>
   finding && [finding.verdict, finding.rule, Boolean(finding.dataOnly || finding.modelDecides)]
@@ -141,7 +141,7 @@ describe("lot 48 step B: ruleOverrides", () => {
     assert.deepEqual(brief(shell("echo hi; git reset --hard; a$(echo b)", policyOf({ ruleOverrides: { "nested-opencode": "deny" } }))), ["deny", "nested-opencode", false])
   })
   it("RGL-7: a setting on a rule wins over its group switch", () => {
-    assert.deepEqual(brief(shell("git reset --hard", policyOf({ dangerousCommands: false, ruleOverrides: { "git-reset-hard": "deny" } }))), ["deny", "git-reset-hard", false])
+    assert.deepEqual(brief(shell("git reset --hard", policyOf({ dangerousCommands: false, ruleOverrides: { "git-reset-hard": "deny" } }, declaredBy({ dangerousCommands: false })))), ["deny", "git-reset-hard", false])
     assert.deepEqual(brief(shell("git reset --hard", relaxed({ "git-reset-hard": "ask" }, { dangerousCommands: false }))), ["ask", "git-reset-hard", false])
     assert.equal(shell("cat .env", relaxed({ "secret-file-read": "off" })), undefined)
     assert.deepEqual(brief(shell("cat .env; cat id_rsa", relaxed({ "secret-file-read": "off" }))), undefined)

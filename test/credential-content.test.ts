@@ -11,6 +11,7 @@ import { isCredentialFile } from "../src/rules/sensitive-paths.ts"
 import { LIMIT_REACHED } from "../src/rules/types.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
 import { FAKE } from "./fixtures.ts"
+import { declaring } from "./declared.ts"
 
 /** Directory with a fake key under an arbitrary name, an ordinary file and a link to the key. */
 function workspace() {
@@ -128,7 +129,7 @@ describe("batch 23: private keys recognized by their content", () => {
     const names = createDecider({ config, redactor })
     assert.notEqual((await names.decide({ tool: "shell", input: { command: "cat deploy_material" }, directory: dir })).rule, "secret-file-read")
     // sensitiveFiles switch off: rule not evaluated.
-    const off = createDecider({ config: parseConfig({ sensitiveFiles: false }).config, redactor, readContent: true })
+    const off = createDecider({ config: parseConfig({ sensitiveFiles: false }, {}, declaring({ sensitiveFiles: false })).config, redactor, readContent: true })
     assert.notEqual((await off.decide({ tool: "shell", input: { command: "cat deploy_material" }, directory: dir })).rule, "secret-file-read")
   })
 })

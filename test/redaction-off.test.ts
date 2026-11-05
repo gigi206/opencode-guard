@@ -88,7 +88,7 @@ describe("redaction formats turned off by the global guard.json", () => {
   })
 
   it("RO-4: the plugin applies it at startup (start line) and keeps the model's right to allow asks", async () => {
-    const w = world({ decision: DECISION })
+    const w = world({ decision: DECISION, outputCheck: false })
     writeFileSync(w.guardFile, JSON.stringify({ redactionOff: ["jwt"] }))
     // Output check off: its model is unreachable here, and each call would wait for its timeout.
     const p = await plugin(w, { decision: DECISION, outputCheck: false })

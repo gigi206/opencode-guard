@@ -30,8 +30,11 @@ export interface OptionEntry {
 }
 
 const PLUGIN = "plugin options (opencode.json)"
+const SWITCH_WHERE = "plugin options, or a project section of a global source"
 const POLICY = "plugin options, guard.json, or an agent or project section of it"
-const SWITCH_RELAX = "false counts only if the global or system configuration sets it too; a project may only set it to true"
+const SWITCH_RELAX = "false counts only if the global or system configuration sets it too, or a matching projects section of a global source; a project may only set it to true"
+const POLICY_SWITCH_RELAX = `${SWITCH_RELAX}, unless it is trusted`
+const CHECK_RELAX = "false counts only if the global or system configuration sets it too, or a matching projects section of a global source; a project's true turns it back on only where a global source leaves it on"
 const SAME_VALUE = "kept only if the global or system configuration sets the same value; otherwise the default"
 const count = (noun: string) => (value: unknown) => {
   const size = Array.isArray(value) ? value.length : value instanceof Map ? value.size : value !== null && typeof value === "object" ? Object.keys(value).length : 0
@@ -43,8 +46,8 @@ const feature = (name: keyof GuardConfig["features"], what: string, policy: bool
   name,
   type: "boolean",
   what,
-  where: policy ? POLICY : PLUGIN,
-  relaxing: SWITCH_RELAX,
+  where: policy ? POLICY : SWITCH_WHERE,
+  relaxing: policy ? POLICY_SWITCH_RELAX : SWITCH_RELAX,
   read: (config) => config.features[name],
 })
 const threshold = (name: keyof GuardConfig["thresholds"], max: number, what: string): OptionEntry => ({
@@ -99,7 +102,7 @@ export const OPTIONS: readonly OptionEntry[] = [
   feature("scripts", "Checks of scripts written then run.", true),
   feature("redactOutputs", "Redaction of tool results and errors at the source.", false),
   feature("redactWire", "The safety net on model requests.", false),
-  { name: "redactPrompt", type: "boolean", what: "Redaction of the typed prompt; the redacted text is what gets stored.", where: PLUGIN, relaxing: SWITCH_RELAX, read: (config) => config.redactPrompt },
+  { name: "redactPrompt", type: "boolean", what: "Redaction of the typed prompt; the redacted text is what gets stored.", where: SWITCH_WHERE, relaxing: SWITCH_RELAX, read: (config) => config.redactPrompt },
   { name: "profile", type: "string", values: [["standard", "every feature on"], ["credentials-only", "dangerousCommands, decisionModel and scripts default to false"]], what: "A set of defaults for the feature switches.", where: POLICY, relaxing: "credentials-only counts only if the global or system configuration sets it too", read: (config) => config.profile },
   { name: "ruleOverrides", type: "object: rule → off | ask | deny | model", what: "One built-in rule set by its identifier (guard rules lists them); each one set appears on its own row.", where: POLICY, relaxing: "off, ask and model count only if the global or system configuration sets them too; deny counts from anywhere", read: (config) => config.policy.overrides, shown: count("rule") },
   { name: "exceptions", type: "object: rule → array of absolute paths", what: "Files whose confirmation by a rule is not asked, only for secret-file-read.", where: POLICY, relaxing: "a path counts only if a global source lists it, or in a trusted project", read: () => undefined, shown: () => "see rows below" },
@@ -119,15 +122,15 @@ export const OPTIONS: readonly OptionEntry[] = [
   { name: "secretPatterns", type: "array of objects or strings", what: "Extra secret patterns; guard redaction prints them.", where: PLUGIN, read: (config) => config.secretPatterns, shown: count("pattern") },
   { name: "redactionOff", type: "array of strings", what: "Built-in redaction formats turned off, by name.", where: "global or system configuration, global guard.json", read: (config) => config.disabledPatterns },
   { name: "allowlist", type: "array of strings", what: "Strings that are never redacted. Never printed.", where: PLUGIN, relaxing: "each entry counts only if a global source lists it", read: (config) => config.allowlist, shown: count("entry") },
-  { name: "outputCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Tool outputs checked by the decision model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck !== undefined },
-  { name: "outputCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: PLUGIN, read: (config) => config.outputCheck !== undefined },
+  { name: "outputCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Tool outputs checked by the decision model.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.outputCheck !== undefined },
+  { name: "outputCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.outputCheck !== undefined },
   { name: "outputCheck.threshold", type: "number", range: [0, 1], what: "Stage 1: probability from which a part holds a secret.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.threshold },
   { name: "outputCheck.timeoutMs", type: "integer", range: [100, 60_000], what: "Timeout of one call; a call that fails holds the output for a confirmation.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.timeoutMs },
   { name: "outputCheck.skip", type: "array of strings", what: "Tools whose output is not checked; replaces the default list.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.skip },
   { name: "outputCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.custom, shown: customized },
   ...tuning("outputCheck", Object.keys(DEFAULT_OUTPUT_CHECK.tuning)),
-  { name: "promptCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Typed prompts checked by the decision model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.promptCheck !== undefined },
-  { name: "promptCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: PLUGIN, read: (config) => config.promptCheck !== undefined },
+  { name: "promptCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Typed prompts checked by the decision model.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.promptCheck !== undefined },
+  { name: "promptCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.promptCheck !== undefined },
   { name: "promptCheck.threshold", type: "number", range: [0, 1], what: "Stage 1: probability from which a part holds a secret.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.promptCheck?.threshold },
   { name: "promptCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.promptCheck?.custom, shown: customized },
   ...tuning("promptCheck", Object.keys(DEFAULT_PROMPT_TUNING)),

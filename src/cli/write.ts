@@ -402,7 +402,7 @@ function switchValue(key: string, raw: string): string | boolean | number {
     if (minutes >= 1 && minutes <= 60) return minutes
     throw new CliError(`invalid value for ${key}: whole minutes from 1 to 60 expected (guard unset ${key} turns it off)`)
   }
-  const allowed = SWITCHES[key]!
+  const allowed = SWITCHES[key] ?? ["true", "false"]
   if (allowed[0] === "true") {
     if (word === "true" || word === "on") return true
     if (word === "false" || word === "off") return false
@@ -415,6 +415,11 @@ function refusedFor(io: CliIo, sources: Sources, guard: GlobalGuard, data: Json,
   const after = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).warnings
   const before = resolution(io, sources, target.project, guard.file ? [guard.file] : []).warnings
   return after.filter((line) => !before.includes(line) && line.includes(key))
+}
+
+/** The switches read when the plugin starts: a section's value is written at once, but counts only then. */
+function startNote(io: CliIo, key: string): void {
+  if ((RELAX_SWITCHES as readonly string[]).includes(key)) io.out(`${key} counts from the next start of the plugin`)
 }
 
 /** A policy setting (`guard set <key> <value>`) at the target, refused when the plugin would not apply it there. */
@@ -433,6 +438,7 @@ export function setSwitch(io: CliIo, key: string, raw: string, target: Target): 
   if (refused.length) throw new CliError(`refused, nothing written: ${refused.join("; ")}`)
   write(guard, data)
   io.out(`${key} set to ${JSON.stringify(value)} in ${placeOf(target)} of ${guard.path}`)
+  startNote(io, key)
   const still = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).settings?.(target.agent).find((item) => item.key === key)
   // As `guard show` prints it: minutes with their unit.
   if (still && String(still.value) !== (key === MINUTES ? `${value} min` : String(value))) io.out(`${key} is still ${JSON.stringify(still.value)} there, set by ${still.origin}`)
@@ -450,6 +456,7 @@ export function unsetSwitch(io: CliIo, key: string, target: Target): void {
     prune(data, target, "")
     write(guard, data)
     io.out(`${key} removed from ${placeOf(target)} of ${guard.path}`)
+    startNote(io, key)
   }
   const now = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }]).settings?.(target.agent).find((item) => item.key === key)
   if (now) io.out(`${key} is now ${JSON.stringify(now.value)} there, set by ${now.origin}`)

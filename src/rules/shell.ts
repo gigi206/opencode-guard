@@ -22,7 +22,7 @@ import {
   type WriteClass,
   type WritePathContext,
 } from "./sensitive-paths.ts"
-import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type WaiverContext } from "./types.ts"
+import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type Waiver, type WaiverContext } from "./types.ts"
 
 export interface ShellRuleContext extends WritePathContext, CredentialContext, WaiverContext {
   readonly redactor: Redactor
@@ -247,8 +247,9 @@ function deletionFinding(segment: string): Finding | undefined {
  * sources are the arguments other than the destination (last argument, or all with `-t`/`--target-directory`).
  */
 function moveFinding(segment: string, home?: string): Finding | undefined {
-  const { name, args } = commandOf(segment)
+  const { name, args: tokens } = commandOf(segment)
   if (name !== "mv") return undefined
+  const args = withoutRedirections(tokens)
   const positional: string[] = []
   let targetOption = false
   for (let i = 0; i < args.length; i++) {
@@ -260,7 +261,7 @@ function moveFinding(segment: string, home?: string): Finding | undefined {
     } else if (arg.startsWith("--target-directory=") || (arg.startsWith("--t") && arg.includes("=") && isLongOption(arg, "target-directory")))
       targetOption = true
     else if (/^-[a-zA-Z]*S$/.test(arg)) i++ // -S suffix
-    else if (!arg.startsWith("-") && !/^(?:\d*|&)[<>]/.test(arg)) positional.push(arg)
+    else if (!arg.startsWith("-")) positional.push(arg)
   }
   const sources = targetOption ? positional : positional.slice(0, -1)
   return sources.some((source) => isHomeLevelTarget(cleanTarget(source), home))
@@ -388,8 +389,21 @@ function commandOf(segment: string): { name: string; args: string[]; path: strin
   return { name: commandName(tokens[i] ?? ""), args: tokens.slice(i + 1), path: commandToken(tokens[i] ?? "") }
 }
 
-/** A word that opens a redirection (`<`, `2>x`, `&>x`). */
-const REDIRECTION_WORD = /^(?:\d*|&)[<>]/
+/** A word that opens a redirection (`<`, `2>x`, `&>x`, `{fd}>x`). */
+const REDIRECTION_WORD = /^(?:\d*|&|\{[A-Za-z_]\w*\})[<>]/
+/** A redirection operator alone, its target in the next word (`2>`, `>|`, `<<-`, `2>&`). `2>&-` closes: it has no target. */
+const LONE_REDIRECTION = /^(?:\d*|&|\{[A-Za-z_]\w*\})(?:<<-|[<>]+[&|]?)$/
+
+/** The words of a command without its redirections and their targets. A process substitution (`<(x)`) stays a word: it is an operand. */
+function withoutRedirections(args: readonly string[]): string[] {
+  const words: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (!REDIRECTION_WORD.test(arg) || /^[<>]\(/.test(arg)) words.push(arg)
+    else if (LONE_REDIRECTION.test(arg)) i++
+  }
+  return words
+}
 
 /** One short option of a word, with its value when it takes one (attached to the letter, otherwise the next word). */
 interface ShortOption {
@@ -551,7 +565,7 @@ function ownOutputs(name: string, tokens: readonly string[]): string[] {
   }
 }
 
-/** Levels of `bash -c` read inside each other by `writeTargets`. */
+/** Levels of `bash -c` read inside each other (`shellCodeFinding`); deeper, `UNSTABLE_SHELL_CODE`. */
 const MAX_SHELL_LEVELS = 3
 
 /** Index of the code of a shell's `-c` among its arguments (`-lc 'x'`, `-e -c -- 'x'`), -1 without one: an operand ends the options. */
@@ -569,20 +583,18 @@ function shellCodeWord(args: readonly string[]): number {
 
 /**
  * Actually written targets: redirections to a file (not `2>&1` or `/dev/null`), arguments of
- * write commands, files modified in place (`sed -i`, `perl -i`), the outputs of `ownOutputs`, and the same in the code of
- * a shell's `-c`. The positional words after that code stay with it: its write command may name them (`"$1"`).
+ * write commands, files modified in place (`sed -i`, `perl -i`) and the outputs of `ownOutputs`. The code of a shell's
+ * `-c` is read as a command of its own by every rule (`shellCodeFinding`).
  */
-export function writeTargets(command: string, level = 0): string[] {
+export function writeTargets(command: string): string[] {
   const targets: string[] = []
-  if (level === 0) for (const match of command.matchAll(/(?:^|[^<>])(?:\d|&)?>>?\|?\s*([^\s;&|<>()]+)/g)) targets.push(unquote(match[1] ?? ""))
+  for (const match of command.matchAll(/(?:^|[^<>])(?:\d|&)?>>?\|?\s*([^\s;&|<>()]+)/g)) targets.push(unquote(match[1] ?? ""))
   for (const segment of segments(command)) {
     const { name, args: tokens } = commandOf(segment)
     const args = tokens.filter((token) => !token.startsWith("-") && !/^\d*>/.test(token))
     const inPlace = (name === "sed" || name === "perl") && tokens.some((t) => /^-[a-zA-Z]*i/.test(t) || t.startsWith("--in-place"))
     if (WRITE_COMMANDS.has(name) || inPlace) targets.push(...args)
     targets.push(...ownOutputs(name, tokens))
-    const code = level < MAX_SHELL_LEVELS && DYNAMIC_SHELLS.has(name) ? shellCodeWord(tokens) : -1
-    if (code >= 0) targets.push(...writeTargets(tokens.slice(code).join(" "), level + 1))
   }
   return targets.filter((target) => target && !target.startsWith("/dev/"))
 }
@@ -592,9 +604,10 @@ const ATTACHED_TARGET = /^-[^-gmoSt]*t(.+)$/
 
 /**
  * Write target of a copy command: `-t`/`--target-directory`, abbreviated or with an attached value (cp, mv, install; for
- * rsync, `-t` preserves the dates), otherwise the last argument (if there is a source).
+ * rsync, `-t` preserves the dates), otherwise the last argument (if there is a source). Redirections are no arguments.
  */
-function copyDestination(args: readonly string[], targetOption: boolean): string | undefined {
+function copyDestination(words: readonly string[], targetOption: boolean): string | undefined {
+  const args = withoutRedirections(words)
   const positional: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
@@ -614,7 +627,7 @@ const COPY_COMMANDS = new Set(["cp", "mv", "install", "rsync"])
 /** Write to a device by a command: `tee` (all its targets), cp/mv/install/rsync (destination). */
 function writesDevice(command: string): boolean {
   const device = new RegExp(`^${DEVICE}`)
-  return segments(command).some((segment) => {
+  return segments(command, SHELL_SEPARATORS).some((segment) => {
     const { name, args } = commandOf(segment)
     if (name === "tee") return args.some((arg) => !arg.startsWith("-") && device.test(arg))
     if (!COPY_COMMANDS.has(name)) return false
@@ -722,19 +735,40 @@ const SHOWN_FILES = 3
  */
 function credentialTokens(command: string, ctx: ShellRuleContext): CredentialReading {
   const waiving = waivable("secret-file-read", ctx.active)
-  let unchecked = false
-  const files = new Set<string>()
-  for (const token of pathTokens(command)) {
-    const found = files.size > 0 && !waiving ? namedCredentialFile(token, ctx) : credentialFile(token, ctx)
-    if (found === true) files.add(token)
-    else if (found === LIMIT_REACHED) unchecked = true
-  }
+  const { files, unchecked } = credentialWords(command, waiving, ctx)
   if (files.size === 0) return { found: unchecked ? LIMIT_REACHED : false, shown: [] }
   // Relative or with a `..` component: as written (the file the shell opens is not known without reading).
   const shown = [...files].map((file) => (hasParentComponent(file) ? undefined : lexicalPath(file, ctx.home, undefined)) ?? file)
-  const targets = waiving && !unchecked ? credentialTargets(command, [...files], ctx) : undefined
+  const targets = waiving && !unchecked ? (credentialTargets(command, [...files], ctx) ?? reducedTargets(command, files, ctx)) : undefined
   if (targets && waiverOf("secret-file-read", targets, ctx.active, ctx)) return { found: false, shown: [] }
   return { found: true, shown, ...(targets ? { targets } : {}) }
+}
+
+/** Credential files among the words of a command; `every`: each word in full, otherwise names only after the first file. */
+function credentialWords(command: string, every: boolean, ctx: ShellRuleContext): { files: Set<string>; unchecked: boolean } {
+  let unchecked = false
+  const files = new Set<string>()
+  for (const token of pathTokens(command)) {
+    const found = files.size > 0 && !every ? namedCredentialFile(token, ctx) : credentialFile(token, ctx)
+    if (found === true) files.add(token)
+    else if (found === LIMIT_REACHED) unchecked = true
+  }
+  return { files, unchecked }
+}
+
+/**
+ * Targets of a command whose files are pieces of words (`.env""`, `''.env`, `"<dir>"/.env`, which `pathTokens` cuts at the
+ * quotes): those of the words reduced to their value, provided every file read here is part of one of them.
+ */
+function reducedTargets(command: string, files: ReadonlySet<string>, ctx: ShellRuleContext): string[] | undefined {
+  let view = command
+  try {
+    view = commandWordView(command, MAX_SHELL_LEVELS).view
+  } catch {}
+  if (view === command) return undefined
+  const words = credentialWords(view, true, ctx)
+  const covered = [...files].every((file) => [...words.files].some((word) => word.includes(file)))
+  return covered && !words.unchecked ? credentialTargets(view, [...words.files], ctx) : undefined
 }
 
 /** Blank or operator around a whole word, outside quotes. */
@@ -4252,10 +4286,10 @@ const SUBSTITUTION_REDIRECT = /(?:^|[^<>])(?:\d|&)?>>?\|?\s*["']?(?:\$\(|`)(?:[^
  */
 function joinedCopyTargets(command: string, ctx: ShellRuleContext): string[] {
   const joined: string[] = []
-  for (const segment of segments(command)) {
+  for (const segment of segments(command, SHELL_SEPARATORS)) {
     const { name, args: tokens } = commandOf(segment)
     if (!COPY_COMMANDS.has(name)) continue
-    const args = tokens.filter((token, index) => !REDIRECTION_WORD.test(token) && !/^(?:\d*|&)[<>]+$/.test(tokens[index - 1] ?? ""))
+    const args = withoutRedirections(tokens)
     const destination = copyDestination(args, name !== "rsync")
     if (destination === undefined) continue
     const directory = destination.replace(/["']/g, "")
@@ -4497,7 +4531,8 @@ export interface ScriptRun {
  * `commandOf`, then, files added after, with the redirections set aside (`SHELL_SEPARATORS`, `launchedCommand`, input
  * opened for reading and writing included; only the segments where `readsLaunched`), then both on the command with its
  * continued lines joined (`joinedLines`): none takes the place of a file of a previous reading, and the files of the
- * first reading (operands, then redirected input read as written) come before any other.
+ * first reading (operands, then redirected input read as written) come before any other. The command is read with its
+ * words reduced to their value (`commandWordView`).
  */
 export function scriptRuns(command: string, max = 4): ScriptRun[] {
   const runs: ScriptRun[] = []
@@ -4505,8 +4540,13 @@ export function scriptRuns(command: string, max = 4): ScriptRun[] {
     const literal = literalPath(run?.path)
     if (run && literal && runs.length < max && !runs.some((item) => item.path === literal)) runs.push({ path: literal, kind: run.kind })
   }
-  const joined = joinedLines(command)
-  for (const view of joined === command ? [command] : [command, joined]) {
+  // The words as the shell reads them (`bash s""cript.sh`), in place of the command: a piece must not take one of the places.
+  let read = command
+  try {
+    read = commandWordView(command, MAX_SHELL_LEVELS).view
+  } catch {}
+  const joined = joinedLines(read)
+  for (const view of joined === read ? [read] : [read, joined]) {
     let bare = view
     try {
       bare = withoutAssignments(view).view
@@ -4517,7 +4557,7 @@ export function scriptRuns(command: string, max = 4): ScriptRun[] {
       // Files added after the others (read from the redirected input, or by a shell's options read like the shell): none
       // takes the place of a script operand. First reading (the command, read by `commandOf`): files of its redirected
       // input read as written (`stdin`) before those of the other readings (`later`), none of which takes their place.
-      const firstReading = view === command && !launched
+      const firstReading = view === read && !launched
       const [stdin, later]: Array<Array<ScriptRun | undefined>> = [[], []]
       for (const segment of launched ? segments(text, SHELL_SEPARATORS) : segments(text)) {
         if (runs.length >= max) break
@@ -5242,22 +5282,26 @@ const LITERAL_STRING = /^(?:'[^']*'|"[^"\\$`]*")$/
  * strict). The string after a `-c` option (any program, as `commandRegex` opens there) written as a single literal
  * quoted piece, and bash's `$'…'` after a shell launcher, is replaced by its own view, quoted again (single quotes unless
  * it holds one). Zero cost without a
- * special character; not descended into a substitution (limit).
+ * special character; not descended into a substitution (limit). With `levels` above 0 (`viewFindings`), every other word in
+ * pieces is reduced too, by the same scan and in the same view (`bareWord`), and the substitutions of a word are read the same
+ * way, one level fewer each; the delimiter of a heredoc stays as written (its quotes decide whether the body expands).
  */
-function commandWordView(command: string): { view: string; flag?: string } {
+function commandWordView(command: string, levels = 0): { view: string; flag?: string } {
   if (!COMMAND_WORD_SPECIAL.test(command)) return { view: command }
   const data = withoutData(command)
   const text = data !== command && !reentersShell(data) ? data : command
   const budget = { left: 8 * text.length + 1024 }
   let [out, cursor, changed, i, head, launcher, flag, mask] = ["", 0, false, 0, true, false, undefined as string | undefined, undefined as string | undefined]
-  let [reach, wrapper, string] = [0, "", false]
+  let [reach, wrapper, string, delimiter] = [0, "", false, false]
   const outside = (from: number, to?: number) => COMMAND_WORD_SPECIAL.test((mask ??= heredocsAreReal(text) ? withoutHeredocBodies(text, false, true) : text).slice(from, to))
   while (i < text.length && budget.left > 0) {
     const c = text[i]!
     if (/[;&|\n({]/.test(c)) [head, launcher, reach, string, i] = [true, false, 0, false, i + 1]
     else if (c === ")") [head, launcher, reach, string, i] = [false, false, 0, false, i + 1]
-    else if (/[<>]/.test(c)) [head, launcher, i] = [false, false, i + 1]
-    else if (/\s/.test(c)) i++
+    else if (/[<>]/.test(c)) {
+      delimiter ||= c === "<" && text[i - 1] === "<" && text[i - 2] !== "<" && text[i + 1] !== "<"
+      ;[head, launcher, i] = [false, false, i + 1]
+    } else if (/\s/.test(c)) i++
     else if (c === "#" && (i === 0 || /[\s;&|()<>]/.test(text[i - 1]!))) i = Math.min(text.indexOf("\n", i) >>> 0, text.length)
     else {
       const subs: Array<readonly [number, number]> = []
@@ -5280,7 +5324,7 @@ function commandWordView(command: string): { view: string; flag?: string } {
         if (SHELL_LAUNCHER.test(literal)) launcher = true
         if (COMMAND_WORD_SPECIAL.test(word)) {
           if (subs.length === 0) {
-            if (literal !== word && literal !== "" && !/[\s;&|()<>`]/.test(literal)) [out, cursor, changed] = [out + text.slice(cursor, i) + literal, stop, true]
+            if (literal !== word && literal !== "" && !/[\s;&|()<>`]/.test(literal)) [out, cursor, changed, rewritten] = [out + text.slice(cursor, i) + literal, stop, true, true]
           } else if (head && !assign) {
             const first = subs[0]!
             const before = dequoteWord(text, i, text[first[0] - 1] === "(" ? first[0] - 2 : first[0] - 1)
@@ -5289,6 +5333,11 @@ function commandWordView(command: string): { view: string; flag?: string } {
           }
         }
       }
+      if (levels > 0 && !rewritten && !delimiter && end >= 0 && (subs.length > 0 || /["'\\]/.test(text.slice(i, stop)))) {
+        const bare = bareWord(text, i, stop, subs, levels)
+        if (bare !== text.slice(i, stop)) [out, cursor, changed] = [out + text.slice(cursor, i) + bare, stop, true]
+      }
+      delimiter = false
       // Budget exhausted during this word: text unread or misread, from this word to the end.
       if ((budget.left < 0 || (budget.left === 0 && stop < text.length)) && (outside(i) || mask === text)) flag ??= UNDETERMINED_WORD_REASON
       const literal = small && subs.length === 0 ? dequoteWord(text, i, stop) : word
@@ -5302,6 +5351,67 @@ function commandWordView(command: string): { view: string; flag?: string } {
     }
   }
   return { view: changed ? out + text.slice(cursor) : command, flag }
+}
+
+/** In the value of a piece of a word: the word is not a word once read bare, so it stays as it is. */
+const NOT_BARE_WORD = /[\s;&|()<>]/
+/** In the value of a piece of a word: bare, it would mean something else (expansion, joker, `~`, comment), so that piece stays written. */
+const KEPT_PIECE = /["'`$\\*?[\]{}~#!]/
+
+/**
+ * The word `text[i..stop)` as the rules should read it: a word in pieces (`.e""nv`, `/e'tc'/y`, `--f\orce`, `$'/'`) becomes
+ * its value, so that one reading serves every rule. A word that is one `"…"` or `'…'` keeps its quotes and what it counts today,
+ * and a piece of value with a blank or an operator leaves the whole word as it is: quoted text never turns into commands.
+ * What the shell expands stays where it is, written, so a word with `$HOME` or a joker still loses its other pieces; a piece
+ * glued to a `$NAME` stays written too (it would change the name). The bodies of substitutions are read by `commandWordView`.
+ */
+function bareWord(text: string, i: number, stop: number, subs: ReadonlyArray<readonly [number, number]>, levels: number): string {
+  const bodies = new Map(subs.map(([start, end], index) => [start, { end, index }]))
+  const views = subs.map(([start, end]) => (levels > 1 ? commandWordView(text.slice(start, end), levels - 1).view : text.slice(start, end)))
+  let next = 0
+  const written = (from: number, to: number) => {
+    let [copied, at] = ["", from]
+    for (; next < subs.length && subs[next]![1] <= to; next++) [copied, at] = [copied + text.slice(at, subs[next]![0]) + views[next], subs[next]![1]]
+    return copied + text.slice(at, to)
+  }
+  const unchanged = () => {
+    next = 0
+    return written(i, stop)
+  }
+  let [out, j, pieces, others, parameter] = ["", i, 0, false, false]
+  while (j < stop) {
+    const c = text[j]!
+    const prefixed = c === "$" && (text[j + 1] === "'" || text[j + 1] === '"')
+    const sub = c === "`" ? bodies.get(j + 1) : c === "$" && text[j + 1] === "(" ? bodies.get(j + 2) : undefined
+    if (c === "\\" || c === "'" || c === '"' || prefixed) {
+      const from = j
+      let held = false
+      if (c === "\\") j += 2
+      else {
+        const close = prefixed ? text[j + 1]! : c
+        for (j += prefixed ? 2 : 1; j < stop && text[j] !== close; ) {
+          const inner = close !== '"' ? undefined : text[j] === "`" ? bodies.get(j + 1) : text[j] === "$" && text[j + 1] === "(" ? bodies.get(j + 2) : undefined
+          if (inner) [held, j] = [true, inner.end + 1]
+          else j += close === "'" && !prefixed ? 1 : text[j] === "\\" ? 2 : 1
+        }
+        j++
+      }
+      const value = dequoteWord(text, from, Math.min(j, stop))
+      if (!held && NOT_BARE_WORD.test(value)) return unchanged()
+      pieces += c === "\\" || prefixed ? 2 : 1
+      out += KEPT_PIECE.test(value) || (parameter && !/^\W/.test(value)) ? written(from, Math.min(j, stop)) : value
+      parameter = false
+    } else if (sub) {
+      out += written(j, sub.end + 1)
+      ;[others, parameter, j] = [true, false, sub.end + 1]
+    } else {
+      parameter = c === "$" ? /\w/.test(text[j + 1] ?? "") : parameter && /\w/.test(c)
+      out += c
+      others = true
+      j++
+    }
+  }
+  return out === "" || pieces === 0 || (pieces === 1 && !others) ? unchanged() : out
 }
 
 const ENV_WORD = /(?<![\w.$-])env["']?(?=\s)/g
@@ -5390,6 +5500,210 @@ function splitStrings(command: string): SplitView {
   return { view, unread }
 }
 
+/** Ask of a `-c` code that is not read: nested too deep, or past the reading budget. Always active. */
+const UNSTABLE_SHELL_CODE: Finding = {
+  verdict: "ask",
+  rule: "nested-opencode",
+  reason: `the code given to a shell by \`-c\` is nested more than ${MAX_SHELL_LEVELS} levels deep, or too complex for the plugin to read: what it runs cannot be checked`,
+}
+
+/**
+ * Views of `-c` codes read for one command, all levels together (levels multiply): each costs a full examination even
+ * for a few words, the text of all of them staying within three times the command. A command with this many codes that
+ * cannot be joined (mostly heredocs) is written to be hard to read; past it, an ask.
+ */
+const MAX_SHELL_READS = 32
+/** Text that may hold a shell's `-c`: elsewhere, zero cost. */
+const SHELL_CODE_HINT = /-[a-zA-Z"'\\]*c/
+/** A character after which `#` opens a comment. */
+const COMMENT_BEFORE = /[\s;&|()<>]/
+/** A wrapper's duration, as in `commandOf`. */
+const TIMEOUT_DURATION = /^\d+(?:\.\d+)?[smhd]?$/
+/** How many words behind a wrapper without known options the shell is looked for, the reach of `commandRegex`. */
+const WRAPPER_REACH = 9
+
+/** A word of a simple command, as written: `subs`, the bodies of its outermost substitutions. */
+interface ShellWord {
+  readonly start: number
+  readonly stop: number
+  readonly subs: ReadonlyArray<readonly [number, number]>
+}
+
+/** A word that assigns (`A=1`, `A+=1`, `A[0]=1`), read as `withoutAssignments` reads it. */
+const assignmentWord = (token: string) => assignedName(token, 0, {}) > 0
+
+/** Option of `env` whose value is the next word, grouped behind flags (`-iu V`) or abbreviated (`--un V`). */
+const envTakesValue = (token: string) => /^-[iv0]*[uCa]$/.test(token) || (!token.includes("=") && ["unset", "chdir", "argv0"].some((name) => isLongOption(token, name)))
+
+/** Indexes of the program a simple command launches behind its structural words, assignments and wrappers (`commandOf`), -1 for `command -v`. */
+function launchedWord(literal: (index: number) => string | undefined, from: number): number {
+  let wrapper: string | undefined
+  for (let i = from; ; ) {
+    const token = literal(i)
+    if (token === undefined) return i
+    if (GROUPING_WORDS.has(token) || assignmentWord(token)) i++
+    else if (Object.hasOwn(PREFIX_OPTIONS, commandName(token))) [wrapper, i] = [commandName(token), i + 1]
+    else if (wrapper === "command" && /^-[a-zA-Z]*[vV]$/.test(token)) return -1
+    else if (wrapper && token.startsWith("-") && (token !== "-" || wrapper === "env")) i += PREFIX_OPTIONS[wrapper]!.has(token) || (wrapper === "env" && envTakesValue(token)) ? 2 : 1
+    else if (wrapper === "timeout" && TIMEOUT_DURATION.test(token)) [wrapper, i] = [undefined, i + 1]
+    else return i
+  }
+}
+
+/**
+ * Codes of the shells a simple command launches, each with the positional words that follow it, written as they are (its
+ * command may name them, `"$1"`): at its program, behind a wrapper of `commandRegex`, after each `-exec` of `find`. A
+ * word used as a code leaves `used`: its substitutions are read with it, on the next level.
+ */
+function simpleCommandCodes(text: string, words: readonly ShellWord[], used: Set<ShellWord>): string[] {
+  const literals = new Map<number, string>()
+  const literal = (index: number) => {
+    const word = words[index]
+    if (!word) return undefined
+    let value = literals.get(index)
+    if (value === undefined) literals.set(index, (value = dequoteWord(text, word.start, word.stop)))
+    return value
+  }
+  const codes: string[] = []
+  const shellAt = (program: number, end: number) => {
+    const args: string[] = []
+    for (let i = program + 1; i < end; i++) args.push(literal(i)!)
+    const offset = shellCodeWord(args)
+    if (offset < 0) return false
+    const code = program + 1 + offset
+    used.add(words[code]!)
+    codes.push([literal(code)!, ...words.slice(code + 1, end).map((word) => text.slice(word.start, word.stop))].join(" "))
+    return true
+  }
+  const launched = (from: number, end: number) => {
+    const program = launchedWord(literal, from)
+    const name = program >= 0 && program < end ? commandName(literal(program)!) : ""
+    if (DYNAMIC_SHELLS.has(name)) shellAt(program, end)
+    else if (WRAPPER_WORD.test(name))
+      for (let i = program + 1; i < Math.min(end, program + 1 + WRAPPER_REACH); i++) {
+        if (DYNAMIC_SHELLS.has(commandName(literal(i)!))) {
+          shellAt(i, end)
+          break
+        }
+      }
+    return name
+  }
+  if (launched(0, words.length) === "find")
+    for (let i = 1; i < words.length; i++) {
+      if (!FIND_EXEC.test(literal(i)!)) continue
+      let end = i + 1
+      while (end < words.length && !/^[;+]$/.test(literal(end)!)) end++
+      launched(i + 1, end)
+      i = end
+    }
+  return codes
+}
+
+/** A heredoc or here-string operator, split by a continued line or not: such a code is never joined. */
+const HEREDOC_OPERATOR = /<(?:\\\n)*</
+
+/** Whether the scan of a code stops cleanly at its end: no open quote or substitution, no final `\`, no heredoc (`HEREDOC_OPERATOR`). Comments skipped. */
+function codeIsClosed(code: string): boolean {
+  if (HEREDOC_OPERATOR.test(code)) return false
+  for (let i = 0; i < code.length; ) {
+    if (code[i] === "#" && (i === 0 || COMMENT_BEFORE.test(code[i - 1]!))) i = Math.min(code.indexOf("\n", i) >>> 0, code.length)
+    else {
+      const end = shellEnd(code, i, code.length, { left: Infinity }, false)
+      if (end < 0) return false
+      i = Math.max(end, i + 1)
+    }
+  }
+  return true
+}
+
+/**
+ * The codes of the shells a command launches (`sh -c`, `bash -lc`, `-e -c --`…), one level, as the views to read: the
+ * shell runs each code apart, so only codes that stop cleanly (`codeIsClosed`) are joined by lines, one view; any other
+ * would swallow what follows it and is a view of its own. A scan by words (`shellEnd`) over the command without
+ * heredoc bodies: the quoted text of an argument, read as a single word, stays an argument (`echo 'bash -c "x"'`), and the
+ * substitutions of a word are read as commands, bounded by `MAX_SHELL_LEVELS`. `unread`: a substitution deeper than that
+ * holds a `-c`, or the reading budget ran out.
+ */
+function shellCodeViews(command: string): { views: string[]; unread: boolean } {
+  const text = command.includes("<<") && heredocsAreReal(command) ? withoutHeredocBodies(command, false, true) : command
+  const budget = { left: 8 * text.length + 1024 }
+  const codes: string[] = []
+  const pending: Array<readonly [number, number, number]> = [[0, text.length, 0]]
+  let unread = false
+  for (let range = pending.pop(); range; range = pending.pop()) {
+    const [from, to, depth] = range
+    let words: ShellWord[] = []
+    let target = false
+    const flush = () => {
+      const used = new Set<ShellWord>()
+      if (words.length) codes.push(...simpleCommandCodes(text, words, used))
+      for (const word of words)
+        if (!used.has(word))
+          for (const [start, end] of word.subs) {
+            if (depth < MAX_SHELL_LEVELS) pending.push([start, end, depth + 1])
+            else unread ||= SHELL_CODE_HINT.test(text.slice(start, end))
+          }
+      ;[words, target] = [[], false]
+    }
+    for (let i = from; i < to && budget.left > 0; ) {
+      const c = text[i]!
+      const operator = c === "&" || c === "<" || c === ">" ? stickyEnd(REDIRECTION_OPERATOR, text, i) : i
+      if (operator > i) [target, i] = [true, operator]
+      else if (/[;&|\n(){]/.test(c)) {
+        flush()
+        i++
+      } else if (/\s/.test(c)) i++
+      else if (c === "#" && (i === 0 || COMMENT_BEFORE.test(text[i - 1]!))) i = Math.min(text.indexOf("\n", i) >>> 0, to)
+      else {
+        const subs: Array<readonly [number, number]> = []
+        const end = shellEnd(text, i, to, budget, false, subs)
+        const stop = Math.min(end < 0 ? stickyEnd(/[^;&|\n]*/y, text, i) : Math.max(end, i + 1), to)
+        const descriptor = /[<>]/.test(text[stop] ?? "") && /^\d+$/.test(text.slice(i, stop))
+        if (!target && !descriptor) words.push({ start: i, stop, subs })
+        else if (subs.length) words.push({ start: stop, stop, subs })
+        ;[target, i] = [false, stop]
+      }
+    }
+    if (budget.left <= 0) unread = true
+    flush()
+  }
+  const [closed, open]: string[][] = [[], []]
+  for (const code of codes) (codeIsClosed(code) ? closed : open).push(code)
+  return { views: [...(closed.length ? [closed.join("\n")] : []), ...open], unread }
+}
+
+/** One examination of a command across the levels of its `-c` codes: `reads` left; `held`, what the rules lifted inside a code. */
+interface CodeReading {
+  reads: number
+  readonly held: Waiver[]
+}
+
+/**
+ * Finding of the code of the `-c` of the shells a command launches (`shellCodeViews`): each view read as a command by the
+ * whole composition of the views, under the same context, to `MAX_SHELL_LEVELS`, the strongest kept (`strength`). Deeper,
+ * past `MAX_SHELL_READS` for the whole command, or not read to its end: an ask never left to the decision model
+ * (`UNSTABLE_SHELL_CODE`). A finding lifted inside a code is only held: another view may still ask for it (`shellFinding`).
+ */
+function shellCodeFinding(command: string, ctx: ShellRuleContext, level: number, reading: CodeReading): Finding | undefined {
+  if (!SHELL_CODE_HINT.test(command)) return undefined
+  const { views, unread } = shellCodeViews(command)
+  let unfinished = unread
+  let found: Finding | undefined
+  const inner: ShellRuleContext = { ...ctx, waived: (waiver) => reading.held.push(waiver) }
+  for (const view of views) {
+    if (level >= MAX_SHELL_LEVELS || reading.reads <= 0) {
+      unfinished = true
+      break
+    }
+    reading.reads--
+    const added = viewsFinding(view, inner, level + 1, reading)
+    if (strength(added) > strength(found)) found = added
+    if (found?.verdict === "deny") return found
+  }
+  const unstable = unfinished ? hardened(UNSTABLE_SHELL_CODE, ctx.active) : undefined
+  return strength(unstable) > strength(found) ? unstable : found
+}
+
 /**
  * Shell finding: finding of the rules (`priorShellFinding`, kept word for word), then, without a deny and if the cost guard
  * allows it (`layerGuard`), layer of indirectly designated devices (`deviceLayer`). The strongest wins
@@ -5401,14 +5715,17 @@ function splitStrings(command: string): SplitView {
  * (reading not stable), or a string of `env -S` not read to its end: ask (`UNSTABLE_JOIN`, `UNSTABLE_SPLIT`). Internal error of these layers: findings already obtained kept, prudent ask added
  * (`ANALYSIS_FAILED`), in its own place for the joined view. The findings of the joined view, of its unstable reading
  * and of its error come after those of the original view, by `strength` (deny, ask without a mark, ask that the model
- * can decide): at equal strength, the finding of the original view is kept.
+ * can decide): at equal strength, the finding of the original view is kept. The code of a shell's `-c`, read on the
+ * joined view (`shellCodeFinding`), comes last in the same way; `level`: how many such codes this text is inside.
  */
-function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+function viewsFinding(command: string, ctx: ShellRuleContext, level: number, reading: CodeReading): Finding | undefined {
   const [base, normalized, flag, coded] = viewFindings(command, ctx)
   if (base?.verdict === "deny") return base
   let [continued, unstable, failed]: Array<Finding | undefined> = []
+  let lines = command
   try {
     const { view: joined, unread } = splitStrings(joinedLines(command))
+    lines = joined
     if (joined !== command) {
       continued = mostSevere(viewFindings(joined, ctx))
       const again = joinedLines(joined)
@@ -5422,19 +5739,38 @@ function viewsFinding(command: string, ctx: ShellRuleContext): Finding | undefin
     failed = hardened(ANALYSIS_FAILED, ctx.active)
   }
   // Findings of the original view first, in their order; an added finding takes the place only if it is stronger.
-  return [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag, coded]))
+  const found = [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag, coded]))
+  if (found?.verdict === "deny") return found
+  try {
+    const inner = shellCodeFinding(lines, ctx, level, reading)
+    return strength(inner) > strength(found) ? inner : found
+  } catch {
+    return strength(found) >= 2 ? found : hardened(ANALYSIS_FAILED, ctx.active)
+  }
 }
 
 /**
  * Shell finding (`viewsFinding`), then the deny of a rule set to `ask` (`ruleOverrides`) lowered, once, here: inside, it
  * stays a deny, which early exits and first matches can return in place of another rule's. The command is then
  * examined again with the rules set to `ask` turned off (same call predicates, memoized: no new read of an already
- * read path); a deny found then holds, otherwise the lowered ask, without a mark (the user is asked).
+ * read path); a deny found then holds, otherwise the lowered ask, without a mark (the user is asked). What the rules
+ * lifted inside a `-c` code is reported only if the command gets no finding at all, what a reading lifted unless the
+ * command gets a finding of that same rule from another one.
  */
 export function shellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
-  const found = viewsFinding(command, ctx)
+  const lifted: Waiver[] = []
+  const found = heldShellFinding(command, ctx.waived ? { ...ctx, waived: (waiver) => lifted.push(waiver) } : ctx)
+  for (const waiver of lifted) if (waiver.rule !== found?.rule) ctx.waived?.(waiver)
+  return found
+}
+
+/** `shellFinding`, what the rules lift reported to `ctx.waived` as it happens. */
+function heldShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+  const reading: CodeReading = { reads: MAX_SHELL_READS, held: [] }
+  const found = viewsFinding(command, ctx, 0, reading)
+  if (!found) for (const waiver of reading.held) ctx.waived?.(waiver)
   if (found?.verdict !== "deny" || overrideOf(found.rule, ctx.active) !== "ask") return found
-  const other = viewsFinding(command, { ...ctx, active: ctx.active && withoutLowered(ctx.active) })
+  const other = viewsFinding(command, { ...ctx, active: ctx.active && withoutLowered(ctx.active) }, 0, { reads: MAX_SHELL_READS, held: [] })
   return other?.verdict === "deny" ? other : { verdict: "ask", rule: found.rule, reason: found.reason }
 }
 
@@ -5487,7 +5823,9 @@ export function scriptCodeFinding(code: string, ctx: ShellRuleContext): Finding 
 
 /**
  * Findings of a view, in order: finding of the rules and of the view without leading assignments (`assignedFinding`);
- * without a deny, that of the view of the word in command position (`commandWordView`), the ask of its flag, and that of
+ * without a deny, that of the view of the words reduced to their literal value (`commandWordView`: the word in command
+ * position, and every word in pieces, down to two levels of substitution), that of the word in command position alone, when
+ * it is another view (the stronger of the two; reducing an argument may hide what a rule reads in its quotes), the ask of its flag, and that of
  * the equivalent shell form of inline interpreter code (`interpreterCodeView`), for `CODE_VIEW_RULES` only. Internal error of one of the latter two:
  * prudent ask in its place (`ANALYSIS_FAILED`), the other's finding kept.
  */
@@ -5506,13 +5844,24 @@ function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | u
     coded = hardened(ANALYSIS_FAILED, ctx.active)
   }
   try {
-    const { view, flag } = commandWordView(command)
-    const normalized = view !== command ? assignedFinding(view, ctx, layeredShellFinding(view, ctx).finding) : undefined
-    return [base, normalized, flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined, coded]
+    const { view, flag } = commandWordView(command, MAX_SHELL_LEVELS)
+    // The word in command position alone: a rule may read a piece the reduced word no longer shows (`"c"url -d "@.env"*`).
+    const head = commandWordView(command).view
+    const reduced = reducedFinding(command, view, ctx)
+    const alone = head !== view ? reducedFinding(command, head, ctx) : undefined
+    return [base, strength(alone) > strength(reduced) ? alone : reduced, flag ? hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active) : undefined, coded]
   } catch {
+    // An error on a word in pieces never costs the deny of the word in command position.
+    try {
+      const head = reducedFinding(command, commandWordView(command).view, ctx)
+      if (head?.verdict === "deny") return [base, head, undefined, coded]
+    } catch {}
     return [base, hardened(ANALYSIS_FAILED, ctx.active), undefined, coded]
   }
 }
+
+/** Finding of a view of the command with its words reduced (`commandWordView`), nothing more if it is the command. */
+const reducedFinding = (command: string, view: string, ctx: ShellRuleContext) => (view !== command ? assignedFinding(view, ctx, layeredShellFinding(view, ctx).finding) : undefined)
 
 /** Target groups of the device family: one per rule that compares a target (`mkfs` compares none). */
 type DeviceGroup = "dd" | "redirect" | "write" | "shred"
@@ -5555,7 +5904,7 @@ function deviceTargets(group: DeviceGroup, text: string): string[] {
   const targets: string[] = []
   if (group === "redirect") for (const match of text.matchAll(REDIRECT_TARGET)) targets.push(unquote(match[1] ?? ""))
   else if (group === "write")
-    for (const segment of segments(text)) {
+    for (const segment of segments(text, SHELL_SEPARATORS)) {
       const { name, args } = commandOf(segment)
       if (name === "tee") targets.push(...args.filter((arg) => !arg.startsWith("-")))
       else if (COPY_COMMANDS.has(name)) {
@@ -5915,7 +6264,7 @@ const LAUNCHED_WRITE = new RegExp(`\\b(?:tee|${[...COPY_COMMANDS].join("|")})\\b
 function unknownMayApply(command: string): boolean {
   const after = (text: string, index: number) => index >= 0 && isNonLiteralSource(text.slice(index))
   if (!isNonLiteralSource(command) || (!after(command, command.indexOf("of=")) && !after(command, command.search(LAUNCHED_WRITE)))) return false
-  return segments(command).some((segment) => {
+  return segments(command, SHELL_SEPARATORS).some((segment) => {
     const raw = after(segment, segment.indexOf("of="))
     const write = after(segment, segment.search(LAUNCHED_WRITE))
     if (!raw && !write) return false

@@ -10,6 +10,7 @@ import { setupGuard } from "../src/index.ts"
 import { RULE_FEATURES, type ActiveRules } from "../src/rules/features.ts"
 import { toolFinding } from "../src/rules/tools.ts"
 import { createRedactor } from "../src/secrets/redact.ts"
+import { declaring, globalConfig, switchesOf } from "./declared.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -159,7 +160,7 @@ describe("batch 15: options and hooks", () => {
     const logFile = silentFile()
     const fake = fakeContext({ logFile, ...options })
     if (directory) Object.assign(fake.ctx, { location: { directory } })
-    await setupGuard(fake.ctx, {})
+    await setupGuard(fake.ctx, {}, undefined, globalConfig(switchesOf(options)))
     return { ...fake, log: () => readFileSync(logFile, "utf8") }
   }
   const base = { sessionID: "ses_1", agent: "build", messageID: "msg_1" }
@@ -167,7 +168,7 @@ describe("batch 15: options and hooks", () => {
   it("options: default true, \"false\" string accepted, invalid value reported; redactPrompt reflected", () => {
     const { config } = parseConfig({})
     for (const name of FEATURE_NAMES) assert.equal(config.features[name], true, name)
-    const parsed = parseConfig({ redactOutputs: "false", redactPrompt: false, scripts: "maybe" })
+    const parsed = parseConfig({ redactOutputs: "false", redactPrompt: false, scripts: "maybe" }, {}, declaring({ redactOutputs: "false", redactPrompt: false }))
     assert.equal(parsed.config.features.redactOutputs, false)
     assert.equal(parsed.config.redactPrompt, false)
     assert.equal(parsed.config.features.scripts, true)

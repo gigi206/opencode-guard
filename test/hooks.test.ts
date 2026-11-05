@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 import * as zlib from "node:zlib"
 import plugin, { setupGuard } from "../src/index.ts"
 import { GUARD_ACTION, GUARD_SEPARATOR, MAX_ACTION_DETAIL } from "../src/hooks/gate.ts"
+import { globalConfig, switchesOf } from "./declared.ts"
 import { fakeContext } from "./fake-ctx.ts"
 import { FAKE } from "./fixtures.ts"
 
@@ -21,9 +22,9 @@ async function setup(options: Record<string, unknown> = {}, env: Record<string, 
 }
 
 /** Global configuration directory that declares `unprotectedAgent`: a value from the options alone is ignored. */
-function declaring(unprotectedAgent: string) {
+function declaring(unprotectedAgent: string, extra: Record<string, unknown> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "guard-global-"))
-  const plugins = [{ package: resolve(fileURLToPath(new URL("..", import.meta.url))), options: { unprotectedAgent } }]
+  const plugins = [{ package: resolve(fileURLToPath(new URL("..", import.meta.url))), options: { unprotectedAgent, ...extra } }]
   writeFileSync(join(dir, "opencode.json"), JSON.stringify({ plugins }))
   return dir
 }
@@ -45,7 +46,9 @@ describe("registration", () => {
     ])
   })
   it("redactPrompt: false → no prompt redaction hook", async () => {
-    const { hooks, trigger } = await setup({ redactPrompt: false })
+    const fake = fakeContext({ redactPrompt: false })
+    await setupGuard(fake.ctx, {}, undefined, globalConfig({ redactPrompt: false }))
+    const { hooks, trigger } = fake
     // Only the main agents' hook, always registered: the typed prompt is left as is.
     assert.equal(hooks.get("session.prompt")?.length, 1)
     const event = await trigger("session.prompt", { sessionID: "ses_1", prompt: { text: `my key ${FAKE.anthropic}` } })
@@ -651,7 +654,7 @@ describe("lot 7: unprotected agent (unprotectedAgent option)", () => {
   const prompt = (sessionID = "ses_1", text = `DB_PASSWORD=${FAKE.password}`) => ({ sessionID, messageID: `msg_p${++messages}`, prompt: { text } })
   async function unprotected(extra: Record<string, unknown> = {}) {
     const fake = fakeContext({ ...options, ...extra })
-    await setupGuard(fake.ctx, {}, undefined, declaring(AGENT))
+    await setupGuard(fake.ctx, {}, undefined, declaring(AGENT, switchesOf(extra)))
     fake.switchAgent("ses_1", AGENT)
     return fake
   }
@@ -1392,7 +1395,7 @@ describe("lot 30: variable named like a secret, through the gate", () => {
   // Empty fake environment passed explicitly (never the process's own), log in a temporary directory.
   async function guard(options: Record<string, unknown> = {}) {
     const fake = fakeContext({ logFile: join(mkdtempSync(join(tmpdir(), "guard-lot30-")), "guard.log"), ...options })
-    await setupGuard(fake.ctx, {}, undefined, typeof options.unprotectedAgent === "string" ? declaring(options.unprotectedAgent) : undefined)
+    await setupGuard(fake.ctx, {}, undefined, typeof options.unprotectedAgent === "string" ? declaring(options.unprotectedAgent) : globalConfig(switchesOf(options)))
     return fake
   }
 

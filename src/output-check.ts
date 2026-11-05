@@ -4,7 +4,7 @@
 // its own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
-import { checkRequested, declaredDecision, normalizedURL, type PluginDeclaration } from "./config.ts"
+import { checkRequested, declaredDecision, modelSwitchedOn, normalizedURL, type PluginDeclaration } from "./config.ts"
 
 /**
  * OpenCode 2.0.31 global configuration directory (`util/src/global.ts`, `global-roots.ts`): `OPENCODE_CONFIG_DIR`
@@ -126,12 +126,38 @@ export function declaredPluginOptions(input: {
 }
 
 /**
+ * Does a global source want this check, with a decision model of its own switched on, that is not the model in use (other
+ * address, or none)? Then the check does not run because of the effective options, not by the user's choice. `false` when
+ * no global source declares a model: nothing is cut for a user without one.
+ */
+export function checkCutByModel(input: {
+  readonly option: "outputCheck" | "promptCheck"
+  readonly enabledBySection: boolean
+  readonly pluginDir: string
+  readonly effectiveBaseURL: unknown
+  readonly globalDir: string | undefined
+  readonly systemDir: string | undefined
+  readonly env: Record<string, string | undefined>
+}): boolean {
+  const effective = normalizedURL(input.effectiveBaseURL)
+  return [input.globalDir, input.systemDir].some((dir) => {
+    const options = dir ? pluginOptions(dir, input.pluginDir, input.env).options : undefined
+    if (!options || JSON.stringify([options[input.option], options.decision]).includes("{file:")) return false
+    if ((!input.enabledBySection && !checkRequested(options[input.option])) || !modelSwitchedOn(options)) return false
+    const declared = normalizedURL(declaredDecision(options)?.baseURL)
+    return declared !== undefined && declared !== effective
+  })
+}
+
+/**
  * Is the option declared, with the same address as the effective configuration, by the global file or by the
  * system configuration? Reason in words (never a value) otherwise.
  */
 export function declaredOutputCheck(input: {
   /** Option checked (default `outputCheck`); both are on when the file leaves them out. */
   readonly option?: "outputCheck" | "promptCheck"
+  /** A `projects` section of a global source turns it on: a file that turns it off does not count. */
+  readonly enabledBySection?: boolean
   readonly pluginDir: string
   readonly effectiveBaseURL: string
   readonly globalDir: string | undefined
@@ -160,7 +186,7 @@ export function declaredOutputCheck(input: {
       reasons.push(`${label} configuration: it uses a {file:…} reference`)
       continue
     }
-    if (!checkRequested(options[option])) {
+    if (!input.enabledBySection && !checkRequested(options[option])) {
       reasons.push(`${label} configuration: ${option} is not enabled there`)
       continue
     }

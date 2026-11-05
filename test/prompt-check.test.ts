@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
-import { DEFAULT_PROMPT_CHECK, parseConfig } from "../src/config.ts"
+import { checkRequested, DEFAULT_PROMPT_CHECK, parseConfig } from "../src/config.ts"
 import { createPromptChecker, createPromptGate, PROMPT_CHECK_TUNING, PromptBlockedError, promptWords } from "../src/hooks/prompt-check.ts"
 import { registerRedaction } from "../src/hooks/redaction.ts"
 import { setupGuard } from "../src/index.ts"
@@ -76,7 +76,7 @@ async function setup(secrets: readonly string[], options: { override?: Parameter
 describe("promptCheck option", () => {
   /** Options as received; `global`: the same key in the global configuration (absent = not declared there). */
   const parse = (value: unknown, global?: unknown) =>
-    parseConfig({ promptCheck: value }, {}, () => [{ label: "global", options: global === undefined ? {} : { promptCheck: global } }, { label: "system", reason: "it is missing or unreadable" }])
+    parseConfig({ promptCheck: value }, {}, () => [{ label: "global", options: global !== undefined ? { promptCheck: global } : checkRequested(value) ? {} : { promptCheck: value } }, { label: "system", reason: "it is missing or unreadable" }])
   it("on by default (absent, empty); false, \"false\", \"0\" or enabled false → off; true, string, object → explicit values", () => {
     for (const value of [undefined, ""]) assert.deepEqual(parse(value).config.promptCheck, DEFAULT_PROMPT_CHECK)
     for (const value of [false, "false", "0", " FALSE ", { enabled: false }, { enabled: "0" }]) assert.equal(parse(value).config.promptCheck, undefined)
@@ -359,8 +359,10 @@ describe("prompt check: startup", () => {
     const tuned = temp("global")
     writeFileSync(join(tuned, "opencode.json"), entry({ decision, promptCheck: { verify: 0.8 } }))
     assert.match(await start({ decision, promptCheck: { verify: 0.8 } }, tuned), /INFO active \(.*; prompt check: active \(custom settings\)\)/)
-    // Turned off (by the user or by a project's opencode.json): shown, never silent.
-    assert.match(await start({ decision, promptCheck: false }, global), /INFO active \(.*; prompt check: off\)/)
+    // Turned off by the user: shown, never silent.
+    const declaredOff = temp("global")
+    writeFileSync(join(declaredOff, "opencode.json"), entry({ decision, promptCheck: false }))
+    assert.match(await start({ decision, promptCheck: false }, declaredOff), /INFO active \(.*; prompt check: off\)/)
     const empty = temp("global")
     mkdirSync(empty, { recursive: true })
     const quiet = await start({ decision }, empty)

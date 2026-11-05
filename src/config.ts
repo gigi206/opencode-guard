@@ -364,7 +364,7 @@ function otherModelSettings(options: Readonly<Record<string, unknown>>, raw: Rea
 }
 
 /** The model switched on by a plugin entry's own options (`credentials-only` turns it off unless it is set). */
-const modelSwitchedOn = (options: Readonly<Record<string, unknown>>) => flag(options.decisionModel) ?? profileValue(options.profile) !== "credentials-only"
+export const modelSwitchedOn = (options: Readonly<Record<string, unknown>>) => flag(options.decisionModel) ?? profileValue(options.profile) !== "credentials-only"
 /** Plugin entry of a global source (`global` or `system`), if it declares the plugin. */
 const entryOf = (declarations: readonly PluginDeclaration[] | string, label: string) => (typeof declarations === "string" ? undefined : declarations.find((entry) => entry.label === label)?.options)
 /** The system configuration's switch of the model, when it declares the plugin (loaded last by OpenCode, it decides). */
@@ -1002,8 +1002,8 @@ export function parseConfig(
 
   const rules = rulesOption(options.rules, warnings)
 
-  // Relaxations (`profile`, rules set to `off`, `ask` or `model`, `localAsks: "model"`, `selfProtectionByModel`): a
-  // project's opencode.json can replace the plugin's options, so each one is kept only if the global or system
+  // Relaxations (`profile`, rules set to `off`, `ask` or `model`, `localAsks: "model"`, `selfProtectionByModel`, a switch
+  // at `false`): a project's opencode.json can replace the plugin's options, so each one is kept only if the global or system
   // configuration declares the plugin with the same value (`deny`: from anywhere). Files read once, only if one is
   // requested; at the slightest doubt, the relaxation is ignored.
   const overrides = ruleOverridesOption(options.ruleOverrides, rules, warnings)
@@ -1030,7 +1030,7 @@ export function parseConfig(
   }
   // Settings and questions of the output and prompt checks: a project's opencode.json could weaken a check without it
   // showing (a threshold of 1, a question rewritten): kept only when the global or system configuration sets the same
-  // value; otherwise the defaults, with the check still on. Turning a check off (`false`) is shown on the start line.
+  // value; otherwise the defaults, with the check still on.
   const guardedCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", parsed: T | undefined, defaults: T): T | undefined => {
     if (!parsed?.custom) return parsed
     const why = refusal((declared) => JSON.stringify(declared[name]) === JSON.stringify(options[name]))
@@ -1141,13 +1141,35 @@ export function parseConfig(
   const defaultOf = (name: string) => !(profile === "credentials-only" && CREDENTIALS_ONLY_OFF.has(name))
   const parsed = Object.fromEntries(
     FEATURE_NAMES.map((name) => [name, bool(name === "decisionModel" && misplaced ? undefined : options[name], defaultOf(name), name, warnings)]),
-  ) as unknown as Features
-  // Layered: the policy switches are those of the startup version (redaction switches unchanged).
+  ) as unknown as Record<(typeof FEATURE_NAMES)[number], boolean>
+  // Without layers, a protection switched off by the options is a relaxation like the others; a default of the profile
+  // retained is not. With layers, `resolveVersion` decides, and also reads the `projects` sections.
+  const keptOff = (name: string) => {
+    const why = switchRefusal(refusal, name, false, inputs?.project)
+    if (why) certification.push(`${name} false ignored: ${why}`)
+    return !why
+  }
+  if (!version) for (const name of FEATURE_NAMES) if (!parsed[name] && defaultOf(name) && !keptOff(name)) parsed[name] = true
+  // Layered: every switch is that of the startup version.
   if (version) warnings.push(...version.warnings)
   const base = version?.base
   const features: Features = base
-    ? { ...parsed, dangerousCommands: base.policy.dangerousCommands, sensitiveFiles: base.policy.sensitiveFiles, decisionModel: base.decisionModel, scripts: base.scripts }
+    ? {
+        ...parsed,
+        dangerousCommands: base.policy.dangerousCommands,
+        sensitiveFiles: base.policy.sensitiveFiles,
+        decisionModel: base.decisionModel,
+        scripts: base.scripts,
+        redactOutputs: version!.switches.redactOutputs,
+        redactPrompt: version!.switches.redactPrompt,
+        redactWire: version!.switches.redactWire,
+      }
     : parsed
+  // A check turned off counts like a switch; a check turned back on by a `projects` section starts from the defaults.
+  const finalCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", requested: T | undefined, defaults: T): T | undefined => {
+    const on = version ? version.switches[name] : requested !== undefined || !keptOff(name)
+    return on ? (requested ?? defaults) : undefined
+  }
   // Without layers: switched on by the system configuration when it declares the plugin, otherwise by the global file
   // (absent: on).
   const modelGrants = base ? base.modelGrants : modelUndeclared === undefined && (systemSwitch(loaded()) ?? modelSwitchedOn(entryOf(loaded(), "global") ?? {}))
@@ -1174,8 +1196,8 @@ export function parseConfig(
       allowlist,
       rules,
       ...(unprotectedAgent === undefined ? {} : { unprotectedAgent }),
-      outputCheck: guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK),
-      promptCheck: guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), DEFAULT_PROMPT_CHECK),
+      outputCheck: finalCheck("outputCheck", guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK), DEFAULT_OUTPUT_CHECK),
+      promptCheck: finalCheck("promptCheck", guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), DEFAULT_PROMPT_CHECK), DEFAULT_PROMPT_CHECK),
       ...(layers ? { layers } : {}),
       ...(version ? { version } : {}),
       modelGrants,
@@ -1220,6 +1242,35 @@ export function redactionOffOption(value: unknown, label: string, warnings: stri
 /** Protections an `agents` section may switch off for that agent: the only keys of the plugin options it accepts. */
 export const RELAX_SWITCHES = ["redactOutputs", "redactPrompt", "redactWire", "outputCheck", "promptCheck"] as const
 export type RelaxSwitch = (typeof RELAX_SWITCHES)[number]
+const CHECK_SWITCHES: readonly string[] = ["outputCheck", "promptCheck"]
+/** Every switch resolved by layers: the policy ones differ by agent, the others hold for the whole project. */
+type LayeredSwitch = PolicySwitch | RelaxSwitch
+const LAYERED_SWITCHES: readonly LayeredSwitch[] = [...POLICY_SWITCHES, ...RELAX_SWITCHES]
+
+/** A switch as a source reads: its value, or what its profile gives (checks: on unless turned off). */
+function switchIn(source: Readonly<Record<string, unknown>>, name: string): boolean {
+  if (CHECK_SWITCHES.includes(name)) return checkRequested(source[name])
+  return flag(source[name]) ?? !(profileValue(source.profile) === "credentials-only" && CREDENTIALS_ONLY_OFF.has(name))
+}
+
+/** A switch as a section writes it; `undefined` not set, `null` invalid. A check takes only on or off here. */
+function switchFlag(name: RelaxSwitch, value: unknown): boolean | undefined | null {
+  if (!CHECK_SWITCHES.includes(name)) return flag(value)
+  if (isEmpty(value)) return undefined
+  return !checkRequested(value) ? false : explicitlyOn(value) ? true : null
+}
+
+type Refusal = (matches: (options: Readonly<Record<string, unknown>>) => boolean) => string | undefined
+
+/** A path as one word of a command to copy: quoted unless all its characters are harmless to a shell. */
+const shellWord = (path: string) => (/^[\w./+@%:=,-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`)
+
+/** Why a switch's value is not declared by the global or system configuration, with what to do about it. */
+function switchRefusal(refusal: Refusal, name: string, value: boolean, project: string | undefined): string | undefined {
+  const why = refusal((declaration) => switchIn(declaration, name) === value)
+  // The directory is part of the command: without it, `--project` means the terminal's own directory.
+  return why && `${why}; for this project: guard set ${name} ${value} --project${project === undefined ? "" : ` ${shellWord(project)}`}`
+}
 const RELAX_KEYS = ["guard", ...RELAX_SWITCHES, "models"]
 /** Agents OpenCode runs by itself or that every session may reach: never relaxed. */
 const BUILTIN_AGENTS = ["build", "plan", "general", "explore", "title", "compaction", "summary"]
@@ -1293,8 +1344,8 @@ interface Source {
 }
 
 /**
- * One key of the project layer; `certify`: why a global source does not declare it (`undefined`: it does); `free`: never
- * checked; `trusted`: its source is in a trusted directory.
+ * One key of the project layer; `certify`: why a global source does not declare it (`undefined`: it does); `trusted`: its
+ * source is in a trusted directory.
  */
 interface Op {
   readonly key: string
@@ -1302,7 +1353,6 @@ interface Op {
   readonly text: string
   readonly label?: string
   readonly certify?: () => string | undefined
-  readonly free?: boolean
   readonly trusted?: boolean
 }
 
@@ -1311,8 +1361,12 @@ interface EffectiveChanges {
   readonly profile: Profile
   readonly globalProfile: Profile
   readonly certifyProfile: () => string | undefined
-  readonly switches: Partial<Record<PolicySwitch, boolean>>
-  readonly globalSwitches: Partial<Record<PolicySwitch, boolean>>
+  readonly switches: Partial<Record<LayeredSwitch, boolean>>
+  readonly globalSwitches: Partial<Record<LayeredSwitch, boolean>>
+  /** Loaded last, the system configuration keeps the last word on what it sets, whatever the global file repeats. */
+  readonly systemSwitches: Partial<Record<LayeredSwitch, boolean>>
+  /** Why a global source does not declare a switch's value. */
+  readonly certifySwitch: (name: LayeredSwitch, value: boolean) => string | undefined
   readonly ops: readonly Op[]
   readonly agents: ReadonlyMap<string, readonly Op[]>
   /** The effective options' `agents` sections, as they were written. */
@@ -1367,6 +1421,10 @@ export interface Version {
   readonly summary: string
   /** Built-in formats turned off by the global guard.json (`redactionOff`), on top of `secretPatterns`; absent: none. */
   readonly redactionOff?: readonly string[]
+  /** Redaction switches and checks for this project: the hooks read them at startup, a later change counts from the next start. */
+  readonly switches: Readonly<Record<RelaxSwitch, boolean>>
+  /** Checks a `projects` section turns on, over a global file that turns them off; absent: none. */
+  readonly sectionChecks?: readonly RelaxSwitch[]
   /** Trusted directories listed by the global sources (real paths, or `*`); `resolveVersion` only. */
   readonly listed?: readonly string[]
   /**
@@ -1377,7 +1435,7 @@ export interface Version {
 }
 
 interface PolicyState {
-  readonly switches: Readonly<Record<PolicySwitch, boolean>>
+  readonly switches: Readonly<Record<LayeredSwitch, boolean>>
   readonly overrides: ReadonlyMap<string, RuleOverride>
   readonly localAsksByModel: boolean
   readonly selfProtectionByModel: boolean
@@ -1388,7 +1446,7 @@ interface PolicyState {
   readonly origins: ReadonlyMap<string, string>
 }
 const DEFAULT_STATE: PolicyState = {
-  switches: { dangerousCommands: true, sensitiveFiles: true, scripts: true, decisionModel: true },
+  switches: { dangerousCommands: true, sensitiveFiles: true, scripts: true, decisionModel: true, redactOutputs: true, redactPrompt: true, redactWire: true, outputCheck: true, promptCheck: true },
   overrides: new Map(),
   localAsksByModel: false,
   selfProtectionByModel: false,
@@ -1445,7 +1503,7 @@ const scopeOf = (state: PolicyState, modelGrants = false): Scope => ({
 /**
  * Outcome of every finding a setting can change, from the real policy functions: an ask and a deny of each built-in
  * rule (3 deny, 2 ask, 1 left to the decision model, 0 nothing), a call no rule matches (1 judged by the model, 0
- * allowed) and the scripts run (1 checked, 0 not).
+ * allowed), the scripts run (1 checked, 0 not), and each redaction switch and check (1 on, 0 off).
  */
 function outcomes(state: PolicyState): number[] {
   const { policy, decisionModel, scripts } = scopeOf(state)
@@ -1459,7 +1517,7 @@ function outcomes(state: PolicyState): number[] {
       const finding: Finding = overridden({ verdict, rule, reason: "" } as Finding, policy)
       result.push(finding.verdict === "deny" ? 3 : entrusted(finding, policy).modelDecides !== undefined && decisionModel ? 1 : 2)
     }
-  result.push(decisionModel ? 1 : 0, scripts ? 1 : 0)
+  result.push(decisionModel ? 1 : 0, scripts ? 1 : 0, ...RELAX_SWITCHES.map((name) => (state.switches[name] ? 1 : 0)))
   return result
 }
 
@@ -1469,7 +1527,7 @@ const rank = (key: string) => (key.startsWith("rule:") ? 0 : key === "localAsks"
 /** An exception or a memory delay that is not 0: a relaxation `outcomes` does not see (neither paths nor delay). */
 const waives = (op: Op) => op.key.startsWith(EXCEPTION_KEY) || (op.key === "rememberConfirmations" && op.value !== "0")
 
-/** Project layer laid over `state`: its last value of each key; unless trusted, free or certified, a key that relaxes is dropped. */
+/** Project layer laid over `state`: its last value of each key; unless trusted or certified, a key that relaxes is dropped. */
 function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => void): PolicyState {
   const last = new Map<string, Op>()
   for (const op of ops) {
@@ -1480,7 +1538,7 @@ function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => v
   for (const op of [...last.values()].sort((a, b) => rank(a.key) - rank(b.key))) {
     const candidate = applied(state, op.key, op.value, op.label ?? PLUGIN_OPTIONS)
     const after = outcomes(candidate)
-    const why = op.trusted || op.free || (!waives(op) && after.every((value, index) => value >= before[index]!)) ? undefined : op.certify ? op.certify() : "project"
+    const why = op.trusted || (!waives(op) && after.every((value, index) => value >= before[index]!)) ? undefined : op.certify ? op.certify() : "project"
     if (why === undefined) {
       state = candidate
       before = after
@@ -1518,6 +1576,7 @@ function readSection(
   warnings: string[],
   accepted: readonly string[],
   checks?: FileChecks,
+  switches = false,
 ): Section {
   const local: string[] = []
   for (const key of Object.keys(value))
@@ -1527,6 +1586,7 @@ function readSection(
     else if (GLOBAL_ONLY_KEYS.includes(key)) local.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
     // A costly pattern in a repository would slow down every check.
     else if (key === "rules") local.push("rules ignored: your rules count only in the plugin options and at the top level of the global guard.json")
+    else if ((RELAX_SWITCHES as readonly string[]).includes(key)) local.push(`${key} ignored: only the plugin options in opencode.json accept it, or a projects section of a global source`)
     else if (OPTION_KEYS.includes(key)) local.push(`${key} ignored: only the plugin options in opencode.json accept it`)
     else local.push(`unknown option ${key}, ignored`)
   const entries = new Map<string, string | boolean>()
@@ -1539,6 +1599,13 @@ function readSection(
     if (set === null) local.push(`invalid value for ${name} (${shown(value[name])}), ignored`)
     else if (set !== undefined) entries.set(name, set)
   }
+  if (switches)
+    for (const name of RELAX_SWITCHES) {
+      const set = switchFlag(name, value[name])
+      if (set === null) local.push(`invalid value for ${name} (${shown(value[name])}), ignored`)
+      else if (set !== undefined) entries.set(name, set)
+      if (CHECK_SWITCHES.includes(name) && isRecord(value[name]) && Object.keys(value[name]).some((key) => key !== "enabled")) local.push(`${name}: its settings are ignored here, only on or off counts`)
+    }
   const profile = profileValue(value.profile)
   if (profile === null) local.push(`invalid value for profile (${shown(value.profile)}), ignored`)
   else if (profile) for (const name of CREDENTIALS_ONLY_OFF) if (!entries.has(name)) entries.set(name, profile === "standard")
@@ -1632,10 +1699,12 @@ function readSource(
   checks: FileChecks,
   warnings: string[],
   report = true,
+  options = false,
 ): Source {
   const local = report ? warnings : []
   // `rules` of the global guard.json: read by `resolveVersion` (those of a global opencode.json are the plugin options').
-  const top = readSection(data, label, rules, local, [...POLICY_KEYS, ...WAIVER_KEYS, "agents", ...(global ? [...GLOBAL_ONLY_KEYS, REDACTION_OFF, "rules"] : [])], checks)
+  // `options`: plugin options, which also hold the redaction switches and the checks.
+  const top = readSection(data, label, rules, local, [...POLICY_KEYS, ...WAIVER_KEYS, "agents", ...(global ? [...GLOBAL_ONLY_KEYS, REDACTION_OFF, "rules"] : []), ...(options ? RELAX_SWITCHES : [])], checks, options)
   const agents = readAgents(data.agents, label, rules, local)
   const projects: ProjectSection[] = []
   const trusted: string[] = []
@@ -1650,7 +1719,7 @@ function readSource(
           projects.push({
             dir,
             label: where,
-            top: readSection(section, where, rules, warnings, [...POLICY_KEYS, ...WAIVER_KEYS, "agents"], checks),
+            top: readSection(section, where, rules, warnings, [...POLICY_KEYS, ...WAIVER_KEYS, "agents", ...RELAX_SWITCHES], checks, true),
             agents: readAgents(section.agents, where, rules, warnings),
           })
       }
@@ -1679,7 +1748,7 @@ function scopeLayers(
     readonly exceptions: ReadonlyArray<readonly [string, string]>
     readonly remember: number | undefined
     readonly profile: Profile
-    readonly refusal: (matches: (options: Readonly<Record<string, unknown>>) => boolean) => string | undefined
+    readonly refusal: Refusal
     readonly declarations: readonly PluginDeclaration[] | string
     readonly modelUndeclared: string | undefined
   },
@@ -1690,8 +1759,8 @@ function scopeLayers(
   const label = inputs.origin === undefined ? {} : { label: inputs.origin }
   const optionsOf = (label: string) => entryOf(parsed.declarations, label) ?? {}
   const [globalOptions, systemOptions] = [optionsOf("global"), optionsOf("system")]
-  const globalFile = readSource(globalOptions, "global configuration", true, rules, inputs, warnings, false)
-  const systemFile = readSource(systemOptions, "system configuration", true, rules, inputs, warnings, false)
+  const globalFile = readSource(globalOptions, "global configuration", true, rules, inputs, warnings, false, true)
+  const systemFile = readSource(systemOptions, "system configuration", true, rules, inputs, warnings, false, true)
   for (const key of GLOBAL_ONLY_KEYS)
     if (options[key] !== undefined && ![globalOptions, systemOptions].some((source) => JSON.stringify(source[key]) === JSON.stringify(options[key])))
       warnings.push(`${key} ignored: it counts only in the global configuration (global opencode.json, system configuration, global guard.json)`)
@@ -1726,7 +1795,12 @@ function scopeLayers(
       ...label,
     })
   const explicit = (source: Readonly<Record<string, unknown>>) =>
-    Object.fromEntries(POLICY_SWITCHES.flatMap((name) => (typeof flag(source[name]) === "boolean" ? [[name, flag(source[name])]] : []))) as Partial<Record<PolicySwitch, boolean>>
+    Object.fromEntries(
+      LAYERED_SWITCHES.flatMap((name) => {
+        const set = (RELAX_SWITCHES as readonly string[]).includes(name) ? switchFlag(name as RelaxSwitch, source[name]) : flag(source[name])
+        return typeof set === "boolean" ? [[name, set]] : []
+      }),
+    ) as Partial<Record<LayeredSwitch, boolean>>
   // `agents` sections: only what differs from the global file's (a section left out keeps the global file's).
   const effectiveAgents = readAgents(options.agents, "agents", rules, warnings)
   const agents = new Map<string, readonly Op[]>()
@@ -1751,6 +1825,8 @@ function scopeLayers(
       certifyProfile: () => refusal((declaration) => profileValue(declaration.profile) === "credentials-only"),
       switches: explicit(options),
       globalSwitches: explicit(globalOptions),
+      systemSwitches: explicit(systemOptions),
+      certifySwitch: (name, value) => switchRefusal(refusal, name, value, inputs.project),
       ops,
       agents,
       agentSections: effectiveAgents,
@@ -1848,13 +1924,19 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
       profile = "standard"
     }
   }
-  const switchOf = (explicit: Partial<Record<PolicySwitch, boolean>>, of: Profile, name: PolicySwitch) =>
+  const switchOf = (explicit: Partial<Record<LayeredSwitch, boolean>>, of: Profile, name: LayeredSwitch) =>
     explicit[name] ?? !(of === "credentials-only" && CREDENTIALS_ONLY_OFF.has(name))
-  // Switches of the effective options: accepted as before, whatever the project's trust.
-  const switchOps: Op[] = POLICY_SWITCHES.flatMap((name) => {
+  // Switches of the effective options: `true` always counts (`decisionModel` may also hand asks to the model), and `false`
+  // is a relaxation. The policy switches take the session directory's trust, like every policy setting; the others are
+  // never relaxed by a project, even a trusted one.
+  const switchOps: Op[] = LAYERED_SWITCHES.flatMap((name) => {
     const value = switchOf(effective.switches, profile, name)
-    const changed = value !== switchOf(effective.globalSwitches, effective.globalProfile, name) || (name in effective.switches && !(name in effective.globalSwitches))
-    return changed ? [{ key: name, value, text: `${name} ${value}`, free: true, ...(effective.label === undefined ? {} : { label: effective.label }) }] : []
+    const written = name in effective.switches && (!(name in effective.globalSwitches) || name in effective.systemSwitches)
+    const changed = written || value !== switchOf(effective.globalSwitches, effective.globalProfile, name)
+    const byTrust = value || ((POLICY_SWITCHES as readonly string[]).includes(name) && trusted)
+    return changed
+      ? [{ key: name, value, text: `${name} ${value}`, certify: () => effective.certifySwitch(name, value), trusted: byTrust, ...(effective.label === undefined ? {} : { label: effective.label }) }]
+      : []
   })
   // The effective options' keys take the session directory's trust (their `.opencode` cannot be told apart).
   const topOps = [
@@ -1904,7 +1986,9 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
       }
     return state
   }
-  const base = scopeOf(stateFor(undefined, undefined, undefined, (line) => warnings.push(line)), grants(undefined, undefined))
+  const top = stateFor(undefined, undefined, undefined, (line) => warnings.push(line))
+  const base = scopeOf(top, grants(undefined, undefined))
+  const sectionChecks = RELAX_SWITCHES.filter((name) => CHECK_SWITCHES.includes(name) && top.switches[name] && matched.some((section) => section.top.entries.get(name) === true))
   const agents = new Set([
     ...withAgents.flatMap((source) => [...source.agents.keys()]),
     ...effective.agents.keys(),
@@ -1957,7 +2041,7 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
       const state = stateFor(main, undefined, undefined)
       const value = (key: string, current: string | boolean) => ({ key: key.startsWith("rule:") ? `ruleOverrides.${key.slice(5)}` : key, value: current, origin: state.origins.get(key) ?? "default" })
       return [
-        ...POLICY_SWITCHES.map((name) => value(name, state.switches[name])),
+        ...LAYERED_SWITCHES.map((name) => value(name, state.switches[name])),
         value("localAsks", state.localAsksByModel ? "model" : "ask"),
         value("selfProtectionByModel", state.selfProtectionByModel),
         ...[...RULE_FEATURES.keys()].flatMap((rule) => (state.overrides.has(rule) ? [value(`rule:${rule}`, state.overrides.get(rule)!)] : [])),
@@ -1968,6 +2052,8 @@ export function resolveVersion(layers: Layers, files: readonly GuardFile[], prev
       ]
     },
     ...(redactionOff.length ? { redactionOff } : {}),
+    switches: Object.fromEntries(RELAX_SWITCHES.map((name) => [name, top.switches[name]])) as Record<RelaxSwitch, boolean>,
+    ...(sectionChecks.length ? { sectionChecks } : {}),
     summary: `guard.json: ${read.length ? read.join(", ") : "none"}${redactionOff.length ? `; redaction formats off: ${redactionOff.join(", ")}` : ""}; agent sections: ${agents.size ? [...agents].join(", ") : "none"}; project sections: ${matched.length ? matched.map((section) => section.dir).join(", ") : "none"}; this project: ${trusted ? "trusted" : "not trusted"}`,
   }
 }

@@ -4,13 +4,16 @@
 // runs the bash function through `bashcompinit`. Nothing is run on a completion.
 import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
-import { MINUTES, SETTINGS, SWITCHES } from "./write.ts"
+import { AGENT_KEYS, MINUTES, SETTINGS, SWITCHES } from "./write.ts"
 
 export const COMMANDS = ["rules", "redaction", "show", "options", "last", "status", "test", "set", "unset", "agent", "trust", "untrust", "help", "completion"] as const
 export const SHELLS = ["bash", "zsh"] as const
 
 /** Words of a shell list: only the characters of identifiers, so that nothing in them is read by the shell. */
 const words = (list: Iterable<string>) => [...list].filter((word) => /^[\w.-]+$/.test(word)).join(" ")
+
+/** Offered from the first letter; `promptCheck` only from `prom`, so that `pro` still gives `profile` alone. */
+const SECTION_KEYS = AGENT_KEYS.filter((key) => key !== "promptCheck")
 
 function bashFunction(): string {
   const values = Object.entries(SWITCHES)
@@ -20,7 +23,8 @@ function bashFunction(): string {
   local cur=\${COMP_WORDS[COMP_CWORD]} prev=\${COMP_WORDS[COMP_CWORD-1]} cmd=\${COMP_WORDS[1]} sub=\${COMP_WORDS[2]} words=""
   local rules="${words(RULE_FEATURES.keys())}"
   local formats="${words(FORMAT_SUMMARIES.keys())}"
-  local settings="${words(Object.keys(SWITCHES))}"
+  local settings="${words([...Object.keys(SWITCHES), ...SECTION_KEYS])}"
+  [[ $cur == prom* ]] && settings="$settings promptCheck"
   COMPREPLY=()
   case $prev in
     --agent|--tool|--pattern|--reason|--tools|--flags) return ;;
@@ -48,11 +52,14 @@ function bashFunction(): string {
         elif [[ $COMP_CWORD -eq 3 ]]; then
           case $sub in
 ${values}
+      ${AGENT_KEYS.join("|")}) words="true false on off" ;;
           esac
-        elif [[ $sub == ${MINUTES} ]]; then words="--project"
+        elif [[ " ${words([MINUTES, ...AGENT_KEYS])} " == *" $sub "* ]]; then words="--project"
         else words="--agent --project"; fi ;;
       unset)
-        if [[ $COMP_CWORD -eq 2 ]]; then words=$settings; else words="--agent --project"; fi ;;
+        if [[ $COMP_CWORD -eq 2 ]]; then words=$settings
+        elif [[ " ${words(AGENT_KEYS)} " == *" $sub "* ]]; then words="--project"
+        else words="--agent --project"; fi ;;
       show) words="--agent --offline" ;;
       options) words="--agent --explain" ;;
       status) words="--offline" ;;

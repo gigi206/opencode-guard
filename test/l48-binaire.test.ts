@@ -350,7 +350,7 @@ describe("lot 48 step D: effect without a restart", () => {
   })
 
   it("BIN-8: the prompt hook is always there, reads a session only while an agent section is in force", async () => {
-    const w = await world({ cli: false })
+    const w = await world({ cli: false, global: { redactPrompt: false } })
     const p = await plugin(w, { redactPrompt: false })
     await p.prompt("ses_1", "plan")
     assert.equal(p.lookups.session, 0)
