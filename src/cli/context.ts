@@ -2,6 +2,7 @@
 // environment, which may differ from the server's), the system one, the plugin's entry in their opencode.json, the
 // guard.json files and their layered resolution (config.ts). A project's opencode.json is never read: OpenCode merges it
 // into the options the plugin receives, and its discovery is not reimplemented here.
+import type { Opencode } from "./update.ts"
 import type { Git } from "./version.ts"
 import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
@@ -27,6 +28,8 @@ export interface CliIo {
   readonly errorTerminal?: boolean
   /** `git` for the plugin's version (`runGit` by default). */
   readonly git?: Git
+  /** `opencode` for `guard update` (`runOpencode` by default). */
+  readonly opencode?: Opencode
   /** Set by `main` around the redaction, for a terminal only. */
   readonly pretty?: Pretty
 }

@@ -65,7 +65,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "guard-cli",
     detail(
-      "Recognizes the guard command line, run directly, through an interpreter or only named, and another program named guard. The command changes the plugin's settings: its own verdict is a confirmation, and it is never left to the decision model.",
+      "Recognizes the guard command line, run directly, through an interpreter or only named, and another program named guard. The command changes the plugin's settings: its own verdict is a confirmation, and it is never left to the decision model. Exactly guard update --check does not ask: it changes nothing.",
       "the guard command line, which changes the plugin's settings, run or named by the command (self-protection; another program named guard asks too)",
       "changes the plugin's settings",
     ),

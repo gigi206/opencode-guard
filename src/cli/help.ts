@@ -1,4 +1,4 @@
-// `guard help`: the commands, in two groups (what they read, what they write in the global guard.json). The same
+// `guard help`: the commands, in groups (what they read, what they write in the global guard.json, the plugin's update). The same
 // entries give the plain text (`USAGE`, printed as is when the output is not a terminal, and after a usage error) and
 // the terminal layout (a banner, the groups as headings, the commands in color, descriptions wrapped to the width).
 import { RELAX_SWITCHES } from "../config.ts"
@@ -63,10 +63,18 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "untrust [<dir>|--all]", text: "remove it" },
     ],
   },
+  {
+    name: "Plugin",
+    detail: "installed from Git, through OpenCode",
+    entries: [
+      { usage: "update", text: "run opencode plugin update on the configured specifier (not a pinned commit), then say whether the installed commit changed" },
+      { usage: "update --check", text: "only run opencode plugin check on the configured specifier" },
+    ],
+  },
 ]
 
 const NOTES = [
-  "Only the global guard.json is written (OpenCode's global configuration directory, from this terminal's environment).",
+  "The commands that change settings write only the global guard.json (OpenCode's global configuration directory, from this terminal's environment).",
   "The plugin re-reads it within seconds, without a restart; an agent section counts from the next prompt.",
   `In a project section, ${RELAX_SWITCHES.join(", ")} count from the next start of the plugin.`,
 ]

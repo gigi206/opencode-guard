@@ -6,7 +6,7 @@ import { OPENCODE_FORMAT_SUMMARIES } from "../secrets/opencode-service.ts"
 import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
-import { CliError, outputRedactor, type CliIo, type Pretty } from "./context.ts"
+import { CliError, outputRedactor, PLUGIN_DIR, type CliIo, type Pretty } from "./context.ts"
 import { prettyHelp, USAGE } from "./help.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
@@ -17,6 +17,7 @@ import { show } from "./show.ts"
 import { status } from "./status.ts"
 import { test, toolInput, type TestRequest } from "./test.ts"
 import { paint } from "./style.ts"
+import { update } from "./update.ts"
 import { addRule, AGENT_KEYS, agentOn, agentSwitch, directoryOf, exceptPath, MINUTES, removeRule, resetPath, resetRule, setRedaction, setRule, setSwitch, SETTINGS, SWITCHES, trust, writeAgent, unsetSwitch, untrust, type SettingWord, type Target } from "./write.ts"
 
 export { USAGE } from "./help.ts"
@@ -195,7 +196,8 @@ function agentCommand(args: readonly string[], io: CliIo): void {
   }
 }
 
-function run(command: string, args: readonly string[], io: CliIo): void | Promise<void> {
+/** Nothing, once done; `test` and `update` are asynchronous, `update` giving its own exit code. */
+function run(command: string, args: readonly string[], io: CliIo): void | Promise<void | number> {
   if ((SETTINGS as readonly string[]).includes(command) || command === "reset" || command === "allow")
     throw new UsageError(`unknown command ${command} (a rule's setting: guard rules ${command === "allow" ? "off" : command} <rule>)`)
   switch (command) {
@@ -289,6 +291,12 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       expect(parsed, 0, 0, "")
       return parsed.explain === undefined ? settings(io, parsed.agent) : explainSetting(io, parsed.explain, parsed.agent)
     }
+    case "update": {
+      const [flag, extra] = args
+      if (flag !== undefined && flag !== "--check") throw new UsageError(flag.startsWith("-") ? `unknown option ${flag}` : `unexpected argument ${flag}`)
+      if (extra !== undefined) throw new UsageError(`unexpected argument ${extra}`)
+      return update(io, PLUGIN_DIR, flag === "--check")
+    }
     case "show": {
       const parsed = parse(args.filter((arg) => arg !== "--offline"), ["agent"])
       expect(parsed, 0, 0, "")
@@ -357,7 +365,7 @@ const isHelp = (word: string | undefined) => word === "--help" || word === "-h"
 /** `guard <verb> -h`, and `guard rules <word> -h`, `guard redaction <word> -h`: the help, not a usage error. */
 const helpAfter = (command: string, args: readonly string[]) => isHelp(args[0]) || ((command === "rules" || command === "redaction") && isHelp(args[1]))
 
-/** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error. `test` is asynchronous. */
+/** Runs one command; exit code: 0 done (or nothing to change), 1 refused or failed, 2 usage error, or the one `opencode` gave to `update`. */
 export function main(argv: readonly string[], terminal: CliIo): number | Promise<number> {
   const io = redacted(terminal)
   const [command, ...args] = argv
@@ -380,7 +388,7 @@ export function main(argv: readonly string[], terminal: CliIo): number | Promise
   }
   try {
     const done = run(command, args, io)
-    return done ? done.then(() => 0, failed) : 0
+    return done ? done.then((code) => code ?? 0, failed) : 0
   } catch (error) {
     return failed(error)
   }

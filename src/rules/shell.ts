@@ -26,6 +26,8 @@ import { LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type Waiver, 
 
 export interface ShellRuleContext extends WritePathContext, CredentialContext, WaiverContext {
   readonly redactor: Redactor
+  /** The command as written, whichever view of it a rule is given (`shellFinding`). */
+  readonly written?: string
   readonly home?: string
   readonly custom?: readonly CustomRule[]
   /**
@@ -4045,8 +4047,17 @@ export function onlyReads(command: string): boolean {
   return segments !== undefined && segments.length > 0 && segments.every(readsOnly)
 }
 
+/**
+ * `guard update --check`, which changes nothing, and nothing else: judged on the command as written, since a view of it
+ * loses what changes the program run (`PATH=x guard update --check`).
+ */
+function isGuardCheck(written: string | undefined): boolean {
+  const segments = written === undefined ? undefined : readOnlyWords(written)
+  return segments?.length === 1 && segments[0]!.join("\0") === "guard\0update\0--check"
+}
+
 function namesGuardCli(command: string, ctx: ShellRuleContext): boolean {
-  if (onlyReads(command)) return false
+  if (onlyReads(command) || isGuardCheck(ctx.written)) return false
   if (GUARD_COMMAND.test(command)) return true
   const plugins = ctx.pluginDirs ?? ctx.protectedDirs ?? []
   const bases = ctx.cwds?.length ? ctx.cwds : ctx.cwd ? [ctx.cwd] : []
@@ -5766,6 +5777,7 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
 
 /** `shellFinding`, what the rules lift reported to `ctx.waived` as it happens. */
 function heldShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
+  ctx = { ...ctx, written: command }
   const reading: CodeReading = { reads: MAX_SHELL_READS, held: [] }
   const found = viewsFinding(command, ctx, 0, reading)
   if (!found) for (const waiver of reading.held) ctx.waived?.(waiver)

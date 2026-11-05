@@ -81,7 +81,7 @@ OpenCode can also install the plugin from a Git specifier. Pin the full commit, 
 }
 ```
 
-The plugin recognizes its entry only by the exact specifier it was installed from, and treats the whole OpenCode cache entry of that specifier as its own directory. Do not use `opencode plugin add`, which writes the entry without its options. To change version, edit the commit in both places and restart the server.
+The plugin recognizes its entry only by the exact specifier it was installed from, and treats the whole OpenCode cache entry of that specifier as its own directory. Do not use `opencode plugin add`, which writes the entry without its options. To change version, edit the commit in both places and restart the server. With a specifier that follows a branch (`github:gigi206/opencode-guard#main`), `guard update --check` runs `opencode plugin check` and `guard update` runs `opencode plugin update`, on that specifier, then says whether the installed commit changed ([Operations](docs/operations.md#updating-the-plugin)); neither acts on a pinned commit.
 
 Node refuses TypeScript under `node_modules`, so the `guard` command needs its own launcher. Once OpenCode has installed the plugin, run:
 

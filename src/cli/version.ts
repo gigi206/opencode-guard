@@ -2,7 +2,7 @@
 // the commit comes from the lock file OpenCode wrote beside `node_modules` and the references from `git ls-remote`, unless
 // offline; run from a repository, everything comes from that repository. A failure only leaves the state unknown.
 import { execFileSync } from "node:child_process"
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { packageInstall } from "../output-check.ts"
 import type { Style } from "./style.ts"
@@ -35,10 +35,10 @@ export interface PluginVersion {
 }
 
 const SHORT = 7
-const short = (commit: string) => commit.slice(0, SHORT)
+export const short = (commit: string) => commit.slice(0, SHORT)
 
 /** The Git entry of the installed plugin: its specifier, its commit and its repository's address. */
-function installed(generation: string, name: string) {
+export function installed(generation: string, name: string) {
   try {
     const lock = JSON.parse(readFileSync(join(generation, "package-lock.json"), "utf8"))
     const resolved = lock?.packages?.[`node_modules/${name}`]?.resolved
@@ -46,6 +46,17 @@ function installed(generation: string, name: string) {
     const match = typeof resolved === "string" ? /github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?#([0-9a-f]{40})$/.exec(resolved) : null
     if (!match || typeof specifier !== "string") return undefined
     return { specifier, url: `https://github.com/${match[1]}.git`, commit: match[2]! }
+  } catch {
+    return undefined
+  }
+}
+
+/** Commit of the generation OpenCode loads, the highest of the entry; `undefined` if its lock file does not give one. */
+export function latestCommit(entry: string, name: string): string | undefined {
+  try {
+    const generations = readdirSync(entry).filter((item) => /^\d+$/.test(item))
+    const latest = generations.reduce((high, item) => (Number(item) > Number(high) ? item : high), "0")
+    return installed(join(entry, latest), name)?.commit
   } catch {
     return undefined
   }

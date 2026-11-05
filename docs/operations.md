@@ -39,6 +39,21 @@ DEBUG execute.after read: 2 secret(s) redacted
 - `opencode plugin list`, run from a project directory, should show `guard  local  /path/to/plugin_opencode/index.ts`. The first call from a directory the service has not opened yet may answer "No plugins found"; run it again from the same directory.
 - `~/.local/share/opencode/log/opencode.log` should contain `loading plugin`, and neither `failed to load plugin` nor `configured plugin path must be a directory`.
 
+## Updating the plugin
+
+For a plugin installed from a Git specifier that follows a branch or a tag ([README](../README.md#from-git)):
+
+- `guard update --check` runs `opencode plugin check <specifier>` and nothing else;
+- `guard update` runs `opencode plugin update <specifier>`, always with the specifier, so that no other plugin is updated, then compares the commit in the lock file of the generation OpenCode loads, before and after: it says the old and new commit, or that nothing changed.
+
+Both relay OpenCode's output and its exit code, at most 60 seconds for the check and 5 minutes for the update. `opencode` is looked up in `PATH`, with the terminal's environment and current directory.
+
+After a change of commit, the `files` line of `guard status` says whether the new files are loaded; if they are not, restart the server.
+
+Nothing is run for a plugin loaded from a directory, which is updated with Git there. Nothing is run either for a specifier pinned to a full commit: `guard update` is refused, `guard update --check` says there is nothing to check (exit code `0`). To change that commit, edit it in the plugin entry of `opencode.json` and in its `plugin.use` policy, then restart the server.
+
+An agent gets a confirmation for `guard update`, under the rule `guard-cli`, as for the other commands of `guard`, and for `opencode plugin update`, under `self-protection`. Neither is left to the decision model. `guard update --check`, exactly and alone, asks nothing.
+
 ## Trying it out
 
 Use a throwaway git repository and ask the agent to run:
@@ -154,7 +169,7 @@ src/hooks/output-check.ts    tool.execute.before, tool.execute.after: optional c
 src/hooks/prompt-check.ts    optional check of the typed prompt by the decision model (called by the session.prompt hook)
 src/hooks/unprotected.ts     unprotected agent: sessions and prompts where the plugin does nothing
 src/hooks/agents.ts          session.prompt: main agent of each session, for the agent sections
-src/cli/                     the guard command (rules, settings, trust, show, last)
+src/cli/                     the guard command (rules, settings, trust, show, last, update)
 src/model/client.ts          decision model client (System One API: chat and systemone protocols)
 src/model/questions.ts       question set and verdict mapping
 src/rules/                   shell rules, per-tool rules, network checks shared by both (code-network.ts), sensitive paths, feature of each rule
