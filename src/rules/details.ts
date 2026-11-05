@@ -73,7 +73,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "secret-file-read",
     detail(
-      "Recognizes a read of a credential file: a known credential path or name, a backup copy of one, a private key recognized by its content, or OpenCode's own credential stores. The check covers shell commands, the read/glob/grep tools and path arguments of MCP or plugin tools; what is read is never kept, logged or sent.",
+      "Recognizes a read of a credential file: a known credential path or name, a backup copy of one, the system's password files (/etc/shadow, /etc/gshadow, /etc/shadow-, /etc/gshadow-), a private key recognized by its content, or OpenCode's own credential stores. The check covers shell commands, the read/glob/grep tools and path arguments of MCP or plugin tools; what is read is never kept, logged or sent.",
       "access to a credential file",
     ),
   ],
@@ -289,7 +289,7 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
   [
     "protected-write",
     detail(
-      "A write target in a protected location: shell startup files, /etc, ~/.ssh, git hooks, OpenCode's configuration, .opencode/, opencode.json(c), guard.json, OpenCode's service file or the plugin directory. The target is checked as written, lexically and through symbolic links; a target that cannot be fully checked asks.",
+      "A write target in a protected location: shell startup files, /etc, ~/.ssh, git hooks, fish and nushell configuration, OpenCode's configuration, .opencode/, opencode.json(c), guard.json, OpenCode's service file or the plugin directory. The target is checked as written, lexically and through symbolic links; a target that cannot be fully checked asks. A copy into a directory counts the file it creates there, and a literal path that inline interpreter code or an awk program writes counts as a target.",
       "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
       "writes to a protected location",
     ),

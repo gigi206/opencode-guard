@@ -3,9 +3,11 @@ import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Red
 import { decodeUnicodeEscapes, NETWORK_FUNCTION, OWN_HTTP_CALLS, PYTHON_HTTP_CALL, UNPARSED_QUOTING } from "./code-network.ts"
 import { entrusted, hardened, overrideOf, ruleEnabled, waivable, waiverOf, withoutLowered, type ActiveRules } from "./features.ts"
 import {
+  completesProtectedPath,
   credentialFile,
   hasParentComponent,
   isCredentialFile,
+  isStartupName,
   lexicalPath,
   namedCredentialFile,
   pathTokens,
@@ -549,33 +551,59 @@ function ownOutputs(name: string, tokens: readonly string[]): string[] {
   }
 }
 
+/** Levels of `bash -c` read inside each other by `writeTargets`. */
+const MAX_SHELL_LEVELS = 3
+
+/** Index of the code of a shell's `-c` among its arguments (`-lc 'x'`, `-e -c -- 'x'`), -1 without one: an operand ends the options. */
+function shellCodeWord(args: readonly string[]): number {
+  let code = false
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!
+    if (arg === "--") return code ? i + 1 : -1
+    if (!/^[-+]./.test(arg)) return code ? i : -1
+    if (/^-[a-zA-Z]*c[a-zA-Z]*$/.test(arg)) code = true
+    if (/^[-+][a-zA-Z]*[oO]$/.test(arg) || arg === "--rcfile" || arg === "--init-file") i++
+  }
+  return -1
+}
+
 /**
  * Actually written targets: redirections to a file (not `2>&1` or `/dev/null`), arguments of
- * write commands, files modified in place (`sed -i`, `perl -i`) and the outputs of `ownOutputs`.
+ * write commands, files modified in place (`sed -i`, `perl -i`), the outputs of `ownOutputs`, and the same in the code of
+ * a shell's `-c`. The positional words after that code stay with it: its write command may name them (`"$1"`).
  */
-export function writeTargets(command: string): string[] {
+export function writeTargets(command: string, level = 0): string[] {
   const targets: string[] = []
-  for (const match of command.matchAll(/(?:^|[^<>])(?:\d|&)?>>?\|?\s*([^\s;&|<>()]+)/g)) targets.push(unquote(match[1] ?? ""))
+  if (level === 0) for (const match of command.matchAll(/(?:^|[^<>])(?:\d|&)?>>?\|?\s*([^\s;&|<>()]+)/g)) targets.push(unquote(match[1] ?? ""))
   for (const segment of segments(command)) {
     const { name, args: tokens } = commandOf(segment)
     const args = tokens.filter((token) => !token.startsWith("-") && !/^\d*>/.test(token))
     const inPlace = (name === "sed" || name === "perl") && tokens.some((t) => /^-[a-zA-Z]*i/.test(t) || t.startsWith("--in-place"))
     if (WRITE_COMMANDS.has(name) || inPlace) targets.push(...args)
     targets.push(...ownOutputs(name, tokens))
+    const code = level < MAX_SHELL_LEVELS && DYNAMIC_SHELLS.has(name) ? shellCodeWord(tokens) : -1
+    if (code >= 0) targets.push(...writeTargets(tokens.slice(code).join(" "), level + 1))
   }
   return targets.filter((target) => target && !target.startsWith("/dev/"))
 }
 
+/** `-t` with its value attached (`-t/etc`, `-rt.git`), after letters that take no value (`install -m`, `-g`, `-o`, `-S`). */
+const ATTACHED_TARGET = /^-[^-gmoSt]*t(.+)$/
+
 /**
- * Write target of a copy command: `-t`/`--target-directory` (cp, mv, install; for rsync, `-t` preserves
- * the dates), otherwise the last argument (if there is a source).
+ * Write target of a copy command: `-t`/`--target-directory`, abbreviated or with an attached value (cp, mv, install; for
+ * rsync, `-t` preserves the dates), otherwise the last argument (if there is a source).
  */
 function copyDestination(args: readonly string[], targetOption: boolean): string | undefined {
   const positional: string[] = []
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!
-    if (targetOption && (arg === "-t" || arg === "--target-directory" || /^-[a-zA-Z]+t$/.test(arg))) return args[i + 1]
-    if (targetOption && arg.startsWith("--target-directory=")) return arg.slice("--target-directory=".length)
+    if (targetOption) {
+      if (isLongOption(arg, "target-directory")) return arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1]
+      if (arg === "-t" || /^-[a-zA-Z]+t$/.test(arg)) return args[i + 1]
+      const attached = ATTACHED_TARGET.exec(arg)
+      if (attached) return attached[1]
+    }
     if (!arg.startsWith("-")) positional.push(arg)
   }
   return positional.length >= 2 ? positional[positional.length - 1] : undefined
@@ -2790,22 +2818,62 @@ const SYSOPEN_WRITE_AFTER = /^\s*,(?!\s*(?:0|O_RDONLY)\s*[,);])/
 /** A path object of the literal, then a method that writes it (`Path(p).write_text(…)`). */
 const PATH_BEFORE = /\bPath\s*\(\s*$/
 const PATH_WRITE_AFTER = /^\s*\)\s*\.\s*(?:write_\w+|touch|unlink|rename|replace|symlink_to|hardlink_to|mkdir|rmdir|chmod|open\s*\(\s*(?:mode\s*=\s*)?['"][rbt]*[wax+])/
-/** A literal that may be a path to the plugin's settings: a slash, or a JSON name (`guard.json`, `service.json`…). */
-const SETTINGS_CANDIDATE = /^[^\s;&|<>()'"`]*(?:\/[^\s;&|<>()'"`]*|\.jsonc?)$/
+/** A literal that may be a path to a protected location: a slash, or a JSON name (`guard.json`, `service.json`…); or `isStartupName`. */
+const PATH_CANDIDATE = /^[^\s;&|<>()'"`]*(?:\/[^\s;&|<>()'"`]*|\.jsonc?)$/
+const pathCandidate = (literal: string) => PATH_CANDIDATE.test(literal) || isStartupName(literal)
+/** A word that may be an awk program's name. */
+const AWK_WORD = /\b[gnm]?awk\b/
+/** Output of an awk program to a literal file (`print "x" > "f"`, `>> "f"`, `> ("f")`); its quotes are escaped in a double-quoted program. */
+const AWK_OUTPUT = />>?\s*(?:\(\s*)?\\?"([^"\\\n]*)\\?"/g
+
+/** Literal files the awk programs of a text write to. */
+function awkOutputs(text: string): string[] {
+  const outputs: string[] = []
+  for (const segment of awkSegments(text)) {
+    if (!DYNAMIC_AWKS.has(bareHead(commandOf(segment).name))) continue
+    for (const program of quotedStrings(segment) ?? []) for (const match of program.matchAll(AWK_OUTPUT)) outputs.push(match[1]!)
+  }
+  return outputs
+}
+
+/** A method of a value that takes content (`f.write(…)`, `sys.path.append(…)`, `w.writerow(…)`). */
+const CONTENT_METHOD = /(?:\.|->)\s*(?:write(?:_text|_bytes|lines|rows?)?|append)\s*$/
+/** The `write` of a file API, whose first argument is a path. */
+const FILE_API_WRITE = /\b(?:File|IO|Bun)\s*\.\s*write\s*$/
+/** A call whose first argument is the file written and the others its content. */
+const WRITES_FIRST = /\b(?:write\w*|append\w*|file_put_contents)\s*$/
+/** A call whose first argument is the source when a second one follows (`Path.copy` takes the destination alone). */
+const COPIES_FIRST = /\b(?:copy\w*|cp(?:Sync)?|install)\s*$/
+const SECOND_POSITIONAL = /^\s*,(?!\s*(?:\w+\s*=[^=]|\*|[)\]]))/
+
+/** A literal of a call of `WRITE_CALL` that the call does not write: content, or the source of a copy. */
+function notWritten(callee: string, between: string, after: string): boolean {
+  if (CONTENT_METHOD.test(callee) && !FILE_API_WRITE.test(callee)) return true
+  const first = between.trim() === ""
+  return WRITES_FIRST.test(callee) ? !first : first && COPIES_FIRST.test(callee) && SECOND_POSITIONAL.test(after)
+}
 
 /**
  * Equivalent shell form of what inline interpreter code launches or writes, for the rules that protect the plugin's
- * settings (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`, `opencode-server-api`): with an execution sink, each literal
- * (or list of literals separated by commas, one command) that names `guard` or `opencode`, as a command; a redirection
- * to each literal path of OpenCode's configuration or the plugin's settings that a call writes (argument of a write, copy,
- * move or removal call, opened for writing, Perl's `>` target, its `open` with a separate mode, `sysopen`), never one only read. Literal paths only (a path built by the
- * code or known once the shell runs is not followed); `undefined` without either. Judged in addition to the command, for those rules only
+ * settings and the protected locations (`guard-cli`, `nested-opencode`, `self-protection`, `opencode-service`, `opencode-server-api`,
+ * `protected-write`): with an execution sink, each literal (or list of literals separated by commas, one command) that
+ * names `guard` or `opencode`, as a command; a redirection to each literal path of a protected location that a call
+ * writes (argument of a write, copy, move or removal call, opened for writing, Perl's `>` target, its `open` with a
+ * separate mode, `sysopen`) or an awk program sends its output to, never one only read. The `system` class leaves out what
+ * `notWritten` tells apart: a text that names `/etc` is frequent, a text that names the plugin's settings is not. A path
+ * past the limit on links counts, as for the command. Literal paths only (a path built by the code or known once the
+ * shell runs is not followed); `undefined` without either. Judged in addition to the command, for those rules only
  * (`CODE_VIEW_RULES`).
  */
 function interpreterCodeView(command: string, ctx: ShellRuleContext): string | undefined {
-  if (!HAS_INTERPRETER_CODE.test(command)) return undefined
+  const awk = AWK_WORD.test(command)
+  if (!awk && !HAS_INTERPRETER_CODE.test(command)) return undefined
   const text = reentersShell(withoutData(command)) ? command : withoutHeredocBodies(command)
   const lines: string[] = []
+  const redirect = (path: string, content = false) => {
+    const kind = protectedWriteClass(path, ctx.home, ctx)
+    if (kind !== undefined && !(content && kind === "system")) lines.push(`: >${path}`)
+  }
   for (const match of text.matchAll(INTERPRETER_DANGEROUS_CODE)) {
     const code = inlineCode(match[2] ?? "")
     if (code === undefined) continue
@@ -2814,22 +2882,23 @@ function interpreterCodeView(command: string, ctx: ShellRuleContext): string | u
       const end = literal.index + literal[0].length
       const perl = /^(?:\+[<>]|>)>?\s*/.exec(value)?.[0]
       const path = perl ? value.slice(perl.length) : value
-      if (!SETTINGS_CANDIDATE.test(path)) continue
+      if (!pathCandidate(path)) continue
       const before = code.slice(Math.max(0, literal.index - 240), literal.index)
       const after = code.slice(end, end + 80)
       const call = before.lastIndexOf("(")
+      const byCall = call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))
       const written =
         perl !== undefined ||
-        (call >= 0 && WRITE_CALL.test(before.slice(Math.max(0, call - 40), call)) && FIRST_ARGUMENTS.test(before.slice(call + 1))) ||
+        byCall ||
         (OPEN_BEFORE.test(before) && WRITE_MODE_AFTER.test(after)) ||
         PERL_OPEN_BEFORE.test(before) ||
         (SYSOPEN_BEFORE.test(before) && SYSOPEN_WRITE_AFTER.test(after)) ||
         (PATH_BEFORE.test(before) && PATH_WRITE_AFTER.test(after))
-      const kind = written ? protectedWriteClass(path, ctx.home, ctx) : undefined
-      if (kind === "settings" || kind === "opencode") lines.push(`: >${path}`)
+      if (written) redirect(path, byCall && notWritten(before.slice(Math.max(0, call - 40), call), before.slice(call + 1), after))
     }
     if (hasExecutionSink(code)) lines.push(...literalGroups(code).map((group) => group.text).filter((group) => NAMES_LAUNCH.test(group)))
   }
+  if (awk) for (const path of awkOutputs(text)) if (pathCandidate(path)) redirect(path)
   return lines.length ? lines.join("\n") : undefined
 }
 
@@ -3760,7 +3829,7 @@ const ASK_RULES: readonly RegexRule[] = [
     id: "protected-write",
     verdict: "ask",
     reason: "write to a protected location (startup file, ~/.ssh, git hook, /etc)",
-    test: (command, ctx) => outranksSelfProtection(ctx.active) && writtenTargets(command).some((target) => systemWrite(target, ctx.home, ctx)),
+    test: (command, ctx) => outranksSelfProtection(ctx.active) && writtenTargets(command, ctx).some((target) => systemWrite(target, ctx.home, ctx)),
   },
   // Net: a protected location named by a command that does more than read, in a form of write no rule above reads. After
   // them: an ask above keeps its place. Limit reached or settings named: never left to the decision model, as the entries above.
@@ -3945,7 +4014,7 @@ function protectedTargets(command: string, ctx: ShellRuleContext): Array<WriteCl
     const kind = protectedWriteClass(joined, ctx.home, ctx)
     return kind === "settings" || kind === "opencode" ? kind : undefined
   }
-  const kinds = writtenTargets(command).map((target) => {
+  const kinds = writtenTargets(command, ctx).map((target) => {
     const kind = protectedWriteClass(target, ctx.home, ctx)
     const joined = target.replace(SUBSTITUTION_END, "")
     return joined === target ? kind : strictestKind(kind, selfProtection(joined))
@@ -4154,11 +4223,41 @@ const SUBSTITUTION_END = /["']?[)`](?=\/)/g
  */
 const SUBSTITUTION_REDIRECT = /(?:^|[^<>])(?:\d|&)?>>?\|?\s*["']?(?:\$\(|`)(?:[^()`;&|\n]*\s)?([^\s()`;&|'"]+)["']?[)`]["']?(\/[^\s;&|<>()'"]*)/g
 
-/** Targets of the command's writes. */
-function writtenTargets(command: string): string[] {
+/**
+ * Paths of a copy that its words do not give: the destination joined with the name of each source that can complete a
+ * protected location (`completesProtectedPath`: `cp -r /tmp/hooks .git`), and a destination attached to its option
+ * (`cp -t/etc x`). The file system is not asked whether the destination is a directory, and any other name costs no
+ * lookup: `cp x y` does not ask about `y/x`.
+ */
+function joinedCopyTargets(command: string, ctx: ShellRuleContext): string[] {
+  const joined: string[] = []
+  for (const segment of segments(command)) {
+    const { name, args: tokens } = commandOf(segment)
+    if (!COPY_COMMANDS.has(name)) continue
+    const args = tokens.filter((token, index) => !REDIRECTION_WORD.test(token) && !/^(?:\d*|&)[<>]+$/.test(tokens[index - 1] ?? ""))
+    const destination = copyDestination(args, name !== "rsync")
+    if (destination === undefined) continue
+    const directory = destination.replace(/["']/g, "")
+    const sources = args.filter((arg) => !arg.startsWith("-"))
+    const own = sources.lastIndexOf(destination)
+    if (own >= 0) sources.splice(own, 1)
+    else joined.push(directory)
+    for (const source of sources) {
+      const base = posix.basename(source.replace(/["']/g, ""))
+      // A remote source of `rsync` (`host:.bashrc`).
+      const file = name === "rsync" ? base.slice(base.lastIndexOf(":") + 1) : base
+      if (completesProtectedPath(file, ctx)) joined.push(`${directory}/${file}`)
+    }
+  }
+  return joined
+}
+
+/** Targets of the command's writes, the files of `joinedCopyTargets` included. */
+function writtenTargets(command: string, ctx: ShellRuleContext): string[] {
   // Without shell re-entry, an interpreter's code (`node -e "x => …"`) is not a redirection.
   const data = withoutData(command)
-  return writeTargets(reentersShell(data) ? command : data)
+  const text = reentersShell(data) ? command : data
+  return [...writeTargets(text), ...joinedCopyTargets(text, ctx)]
 }
 
 /**
@@ -5319,16 +5418,21 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
 }
 
 /** Rules the equivalent shell form of inline interpreter code is judged for (`interpreterCodeView`): the others judge the command alone. */
-const CODE_VIEW_RULES: ReadonlySet<string> = new Set(["guard-cli", "nested-opencode", "self-protection", "opencode-service", "opencode-server-api"])
+const CODE_VIEW_RULES: ReadonlySet<string> = new Set(["guard-cli", "nested-opencode", "self-protection", "opencode-service", "opencode-server-api", "protected-write"])
+
+/** The rule of a group among `CODE_VIEW_RULES`: on in that view as it is on for the command. */
+const CODE_VIEW_GROUP_RULE: ReadonlySet<string> = new Set(["protected-write"])
 
 /**
  * Context of that view: groups turned off, settings of `CODE_VIEW_RULES` only (a setting turns a rule on in a disabled
- * group), no user rule. Only the always-active rules remain, so a deny of another rule never hides their ask.
+ * group), no user rule. Only the always-active rules remain, and `protected-write` when it is enabled for the command
+ * (`keptOn`), so a deny of another rule never hides their ask.
  */
 function codeViewContext(ctx: ShellRuleContext): ShellRuleContext {
   const overrides = new Map([...(ctx.active?.overrides ?? [])].filter(([rule]) => CODE_VIEW_RULES.has(rule)))
   const byModel = { ...(ctx.active?.localAsksByModel ? { localAsksByModel: true } : {}), ...(ctx.active?.selfProtectionByModel ? { selfProtectionByModel: true } : {}) }
-  return { ...ctx, custom: [], active: { dangerousCommands: false, sensitiveFiles: false, ...(overrides.size ? { overrides } : {}), ...byModel } }
+  const keptOn = ruleEnabled("protected-write", ctx.active) ? { keptOn: CODE_VIEW_GROUP_RULE } : {}
+  return { ...ctx, custom: [], active: { dangerousCommands: false, sensitiveFiles: false, ...(overrides.size ? { overrides } : {}), ...byModel, ...keptOn } }
 }
 
 /**

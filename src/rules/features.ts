@@ -20,6 +20,8 @@ export interface ActiveRules {
   readonly localAsksByModel?: boolean
   /** `selfProtectionByModel` retained: `"model"` and `localAsks` also reach the always-active rules' asks. */
   readonly selfProtectionByModel?: boolean
+  /** View of inline code (`codeViewContext`): rules left on while their group is off, without acting as a setting. */
+  readonly keptOn?: ReadonlySet<string>
   /** `exceptions` retained: rule (`TARGETED_RULES`) → real paths whose findings are lifted (asks only). */
   readonly exceptions?: ReadonlyMap<string, ReadonlySet<string>>
   /** `rememberConfirmations` retained (1 to 60 minutes): a confirmed set of targets is not asked again meanwhile. */
@@ -182,7 +184,7 @@ export function ruleEnabled(rule: string, active?: ActiveRules): boolean {
   const feature = RULE_FEATURES.get(rule)
   if (feature === undefined || feature === "always") return true
   const override = overrideOf(rule, active)
-  return override === undefined ? active[feature] : override !== "off"
+  return override === undefined ? active[feature] || active.keptOn?.has(rule) === true : override !== "off"
 }
 
 /**

@@ -94,6 +94,9 @@ const SECRET_PATH_PATTERNS = [
   /\/\.cursor\/projects\/[^/]{1,255}\/mcp-auth\.json/,
 ]
 
+/** Password hashes of the system and their copies: exact paths only, a file named `shadow` elsewhere is no credential. */
+const SYSTEM_SECRET_PATHS = new Set(["/etc/shadow", "/etc/shadow-", "/etc/gshadow", "/etc/gshadow-"])
+
 /**
  * Suffix of a backup copy (cc-safety-net list), anchored at the end of the name: behind it, only forms
  * without a new extension (`.bak1`, `.bak-20261016`, `.bak.2`), otherwise `x.key.tmp.sh` would be a credential name.
@@ -112,17 +115,33 @@ const PROTECTED_WRITE_BASENAMES = new Set([
   ".zprofile",
   ".zshenv",
   ".zlogin",
+  ".zlogout",
+  ".bash_logout",
+  ".kshrc",
+  ".cshrc",
+  ".tcshrc",
+  ".login",
+  ".xprofile",
+  ".xsessionrc",
 ])
+
+/** A bare startup file name: a literal of inline code without a slash can still name one (`interpreterCodeView`). */
+export const isStartupName = (name: string): boolean => PROTECTED_WRITE_BASENAMES.has(name)
 
 const PROTECTED_WRITE_SEGMENTS = [
   "/.ssh/",
   "/.git/hooks/",
   "/.config/autostart/",
   "/.config/systemd/",
+  "/.config/fish/",
+  "/.config/nushell/",
 ]
 
 /** OpenCode config: the agent must not be able to disable the guardrail without confirmation. */
 const OPENCODE_WRITE_SEGMENTS = ["/.config/opencode/", "/.opencode/"]
+
+/** Last name of a protected directory: under its parent, a copy of that name lands on it (`hooks` in `.git`, `etc` in `/`). */
+const PROTECTED_DIRECTORY_NAMES = new Set(["etc", ...[...PROTECTED_WRITE_SEGMENTS, ...OPENCODE_WRITE_SEGMENTS].map((segment) => basename(segment))])
 
 /** The plugin's settings, recognized by name wherever they are (a directory known only once expanded included). */
 const PROTECTED_WRITE_FILES = new Set(["opencode.json", "opencode.jsonc", GUARD_FILE])
@@ -211,10 +230,15 @@ function backupStems(base: string): string[] {
   return stems
 }
 
+/** A word that is a file of `SYSTEM_SECRET_PATHS`, home form expanded. */
+const isSystemSecret = (word: string): boolean => isAbsolute(word) && SYSTEM_SECRET_PATHS.has(resolve(word))
+
 export function isSecretFile(raw: string, home?: string): boolean {
   const p = normalizePath(raw, home)
   const base = basename(p)
   if (isSecretBasename(base, p)) return true
+  // `normalizePath` puts a `/` in front of a relative path: `etc/shadow` is not the system's file.
+  if (p.includes("shadow") && isSystemSecret(strip(raw).replace(HOME_FORM, home ?? "~"))) return true
   // Segments and patterns all start with `/.`: test avoided for most words of a command.
   if (p.includes("/.")) {
     if (SECRET_SEGMENTS.some((segment, index) => p.includes(segment) || p.endsWith(SECRET_SEGMENT_ENDS[index]!))) return true
@@ -225,6 +249,9 @@ export function isSecretFile(raw: string, home?: string): boolean {
 
 export interface CredentialContext {
   readonly home?: string
+  /** Base directories of a relative path (`WritePathContext`): `./shadow` from `/etc` is the system's file. */
+  readonly cwd?: string
+  readonly cwds?: readonly string[]
   /**
    * Private key recognized by its content (`credential-content.ts`, built per tool call with its directories);
    * absent: known names and extensions only; `LIMIT_REACHED`: content not checked (limit).
@@ -246,6 +273,13 @@ function isServiceFile(raw: string, ctx: CredentialContext): boolean {
   return [base, ...backupStems(base)].some((name) => SERVICE_BASENAME.test(name))
 }
 
+/** A relative path to a file of `SYSTEM_SECRET_PATHS` from a base directory; a bare word (`getent shadow`) is no path. */
+function isSystemSecretFrom(raw: string, ctx: CredentialContext): boolean {
+  if (!raw.includes("shadow") || !raw.includes("/") || isAbsolute(strip(raw)) || HOME_FORM.test(strip(raw))) return false
+  const bases = ctx.cwds?.length ? ctx.cwds : ctx.cwd ? [ctx.cwd] : []
+  return bases.some((base) => SYSTEM_SECRET_PATHS.has(resolve(base, strip(raw))))
+}
+
 /**
  * Credential file: known name or extension (`isSecretFile`), `service.json` under a service directory, or private
  * key recognized by its content; `LIMIT_REACHED`: neither a known name nor a service file, content not checked (limit of
@@ -255,7 +289,7 @@ export const credentialFile = (raw: string, ctx: CredentialContext): boolean | t
   namedCredentialFile(raw, ctx) || (ctx.credentialContent?.(raw) ?? false)
 
 /** Credential file by its name alone (`credentialFile` without its content): no file read. */
-export const namedCredentialFile = (raw: string, ctx: CredentialContext): boolean => isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx)
+export const namedCredentialFile = (raw: string, ctx: CredentialContext): boolean => isSecretFile(raw, ctx.home) || isServiceFile(raw, ctx) || isSystemSecretFrom(raw, ctx)
 
 /** Recognized credential file (`credentialFile`); content not checked does not make one. */
 export const isCredentialFile = (raw: string, ctx: CredentialContext) => credentialFile(raw, ctx) === true
@@ -344,12 +378,13 @@ function kindOf(p: string, absolutes: readonly string[], context: WritePathConte
     p === "/etc/opencode" || OPENCODE_WRITE_SEGMENTS.some((segment) => p.endsWith(segment.slice(0, -1))) || absolutes.some((absolute) => context.protectedDirs?.includes(absolute))
   if (directory || p.startsWith("/etc/opencode/") || OPENCODE_WRITE_SEGMENTS.some((segment) => p.includes(segment)) || within(context.protectedDirs))
     return directory || NON_LITERAL_NAME.test(base) || pluginSource(p, absolutes, context) ? "settings" : "opencode"
-  return systemLocation(p, base) ? "system" : undefined
+  // `normalizePath` reads a relative `etc` as `/etc`: only a resolved form is the system's directory.
+  return systemLocation(p, base) && (p !== "/etc" || absolutes.includes(p)) ? "system" : undefined
 }
 
 /** Protected location of the `system` kind (startup files, `/etc`, `~/.ssh`, git hooks…), OpenCode's configuration included. */
 function systemLocation(p: string, base = basename(p)): boolean {
-  return PROTECTED_WRITE_BASENAMES.has(base) || p.startsWith("/etc/") || PROTECTED_WRITE_SEGMENTS.some((segment) => p.includes(segment) || p.endsWith(segment.slice(0, -1)))
+  return PROTECTED_WRITE_BASENAMES.has(base) || p === "/etc" || p.startsWith("/etc/") || PROTECTED_WRITE_SEGMENTS.some((segment) => p.includes(segment) || p.endsWith(segment.slice(0, -1)))
 }
 
 /** The OpenCode service file (`service.json`, a variant or a backup copy) under a service directory, in one of the `absolutes`. */
@@ -357,6 +392,17 @@ function serviceFile(base: string, absolutes: readonly string[], context: WriteP
   const dirs = context.serviceDirs
   if (!dirs?.length || ![base, ...backupStems(base)].some((name) => SERVICE_BASENAME.test(name))) return false
   return absolutes.some((absolute) => dirs.some((dir) => absolute.startsWith(`${dir}/`)))
+}
+
+/**
+ * A name that a directory can make a protected location, without any file read: the last name of a protected directory
+ * or of a directory of `context`, or a service file. Any other name is protected on its own or not at all, so joining it
+ * to a directory adds nothing (`joinedCopyTargets`).
+ */
+export function completesProtectedPath(name: string, context: WritePathContext): boolean {
+  if (PROTECTED_DIRECTORY_NAMES.has(name)) return true
+  if (name.startsWith("service") && [name, ...backupStems(name)].some((stem) => SERVICE_BASENAME.test(stem))) return true
+  return [...(context.pluginDirs ?? []), ...(context.protectedDirs ?? [])].some((dir) => dir.endsWith(`/${name}`))
 }
 
 /** A final name the shell or a program expands (pattern, variable, quotes): it may be any file of its directory. */
@@ -446,7 +492,8 @@ function writeForms(raw: string, home: string | undefined, context: WritePathCon
  */
 export function systemWrite(raw: string, home?: string, context: WritePathContext = {}): boolean {
   const { lexical, linked } = writeForms(raw, home, context)
-  if (systemLocation(normalizePath(raw, home)) || lexical.some((form) => systemLocation(form))) return true
+  const written = normalizePath(raw, home)
+  if ((written !== "/etc" && systemLocation(written)) || lexical.some((form) => systemLocation(form))) return true
   return linked.some((forms) => forms.some((form) => systemReal(form, context)))
 }
 

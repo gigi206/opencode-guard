@@ -36,7 +36,7 @@ A local `deny` is final, and the decision model can only make a decision **stric
 | Destructive git and system changes | `git reset --hard`, force-push, `sudo`, shutdown, package installs, `kubectl delete` | `ask` |
 | Credential files | reading `.env`, `~/.ssh/`, `~/.aws/`, cloud keys, other agents' credential stores | `ask` |
 | Secrets leaving the machine | a credential file or a detected secret in a network command, web request, MCP call or CodeMode code | `deny` |
-| Protected locations | writes to the plugin directory, `opencode.json(c)`, `.opencode/`, shell startup files, `/etc`, git hooks | `ask` |
+| Protected locations | recognized writes to the plugin directory, `opencode.json(c)`, `.opencode/`, shell startup files, `/etc`, git hooks | `ask` |
 | Redaction placeholder | writing a placeholder back into a file would destroy the real secret | `deny` |
 | Secrets in prompts and results | API keys, tokens, passwords in code or configuration (`DB_PASSWORD=…`), private keys, base64 and hex dumps; with the decision model, passwords written in plain words in the prompt and in tool outputs | redacted |
 
