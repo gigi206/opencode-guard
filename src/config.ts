@@ -2,7 +2,7 @@ import type { ModelConfig } from "./model/client.ts"
 import { DEFAULT_OUTPUT_QUESTIONS, DEFAULT_PROMPT_QUESTIONS, DEFAULT_THRESHOLDS, type CheckQuestion, type CheckQuestionTexts, type OutputQuestionTexts, type PromptQuestionTexts, type Thresholds } from "./model/questions.ts"
 import { OPENCODE_FORMAT_SUMMARIES } from "./secrets/opencode-service.ts"
 import { FORMAT_SUMMARIES, MIN_KNOWN_SECRET, type SecretPattern } from "./secrets/patterns.ts"
-import { DENY_ONLY_RULES, RULE_FEATURES, TARGETED_RULES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
+import { DENY_ONLY_RULES, OFF_BY_DEFAULT_RULES, RULE_FEATURES, TARGETED_RULES, UNSEEN_CONTENT_RULES, USER_ONLY_RULES, entrusted, overridden, ruleEnabled, rulePolicy, type ActiveRules, type RuleOverride } from "./rules/features.ts"
 import { hasParentComponent } from "./rules/sensitive-paths.ts"
 import { INTERNAL_ERROR_RULE, type CustomRule, type Finding } from "./rules/types.ts"
 
@@ -771,7 +771,11 @@ function ruleOverridesOption(value: unknown, userRules: readonly CustomRule[], w
       warnings.push(`${name} "model" ignored: this rule only denies, it has no confirmation to leave to the decision model`)
     else if (feature === "always" && setting !== "deny" && setting !== "model")
       warnings.push(`${name} "${overrideValue(raw)}" ignored: this rule is always active (only "deny" is accepted)`)
-    else overrides.set(rule, setting)
+    else {
+      if (setting === "model" && UNSEEN_CONTENT_RULES.has(rule))
+        warnings.push(`${name} "model": the decision model gets only the file's name, never its content, so the rule stays on and its confirmations stay with you`)
+      overrides.set(rule, setting)
+    }
   }
   return overrides
 }
@@ -1127,10 +1131,13 @@ export function parseConfig(
       overrides.delete(rule)
       continue
     }
-    if (setting === "deny") continue
+    // Turning on a rule that is off by default only hardens.
+    if (setting === "deny" || (OFF_BY_DEFAULT_RULES.has(rule) && setting !== "off")) continue
     const why = refusal((declaration) => isRecord(declaration.ruleOverrides) && overrideValue(declaration.ruleOverrides[rule]) === setting)
     if (why) {
-      certification.push(`ruleOverrides.${rule} "${overrideValue((options.ruleOverrides as Record<string, unknown>)[rule])}" ignored: ${why}`)
+      // `off` refused on a rule that stays off anyway: nothing was ignored.
+      if (!OFF_BY_DEFAULT_RULES.has(rule) || ruleEnabled(rule, version?.base.policy))
+        certification.push(`ruleOverrides.${rule} "${overrideValue((options.ruleOverrides as Record<string, unknown>)[rule])}" ignored: ${why}`)
       overrides.delete(rule)
     }
   }

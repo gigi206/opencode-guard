@@ -5,7 +5,7 @@ import { QUESTIONS, SCRIPTS_NOTE, STATE_NOTE, interpret } from "./model/question
 import { scriptCodeFinding, shellFinding, type ShellRuleContext } from "./rules/shell.ts"
 import { CODEMODE_TOOL, toolFinding } from "./rules/tools.ts"
 import { INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type Verdict, type Waiver, type WaiverContext } from "./rules/types.ts"
-import { createCredentialContent } from "./credential-content.ts"
+import { createAttachmentKind, createCredentialContent } from "./credential-content.ts"
 import { createRealPath } from "./real-path.ts"
 import { bySetting, hardened, ruleEnabled, withoutWaivers } from "./rules/features.ts"
 import { scriptDirectories, type UnverifiableCause } from "./scripts.ts"
@@ -314,6 +314,7 @@ export function createDecider(deps: DeciderDeps) {
     // Lazy read: no file opened until an active rule asks for it.
     const directories = call.cwds ?? (call.directory === undefined ? [] : [call.directory])
     const credentialContent = deps.readContent && directories.length > 0 ? createCredentialContent({ directories, home: deps.home }) : undefined
+    const attachmentKind = deps.readContent && directories.length > 0 ? createAttachmentKind({ directories, home: deps.home }) : undefined
     const realPaths = deps.resolveLinks ? createRealPath({ directories }) : undefined
     const policy = call.scope?.policy ?? config.policy
     const ruleContext = {
@@ -323,6 +324,7 @@ export function createDecider(deps: DeciderDeps) {
       cwd: call.directory,
       ...(call.cwds ? { cwds: call.cwds } : {}),
       ...(credentialContent ? { credentialContent } : {}),
+      ...(attachmentKind ? { attachmentKind } : {}),
       ...(realPaths ? { realPaths } : {}),
       protectedDirs: deps.protectedDirs,
       ...(deps.pluginDirs ? { pluginDirs: deps.pluginDirs } : {}),

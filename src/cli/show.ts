@@ -7,6 +7,7 @@ import { join, resolve } from "node:path"
 import { parseConfig, RELAX_SWITCHES, type GuardConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { declaredOutputCheck } from "../output-check.ts"
+import { UNSEEN_CONTENT_RULES } from "../rules/features.ts"
 import { PLUGIN_DIR, readSources, realOrUndefined, resolution, serverEnv, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment, Style } from "./style.ts"
@@ -233,11 +234,11 @@ export function stillRelaxed(version: Version, config: GuardConfig, agent: strin
 
 /**
  * Does the setting relax a protection: a protective switch off, self-protection or local confirmations left to the
- * decision model, a rule turned off or left to the model, a redaction format turned off, confirmations remembered?
+ * decision model, a rule turned off or left to the model (`model` asks like `ask` on `UNSEEN_CONTENT_RULES`), a redaction format turned off, confirmations remembered?
  */
 function relaxes(key: string, value: string): boolean {
   if (key.startsWith("agents.")) return value === "off" || value === "false"
-  if (key.startsWith("ruleOverrides.")) return value === "off" || value === "model"
+  if (key.startsWith("ruleOverrides.")) return value === "off" || (value === "model" && !UNSEEN_CONTENT_RULES.has(key.slice("ruleOverrides.".length)))
   if (key.startsWith("redactionOff.")) return value === "off"
   if (PROTECTIVE.has(key)) return value === "false"
   if (key === "selfProtectionByModel") return value === "true"

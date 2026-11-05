@@ -21,6 +21,7 @@ import {
   type WriteClass,
   type WritePathContext,
 } from "./sensitive-paths.ts"
+import { OPAQUE_RULES, opaqueRule } from "./opaque.ts"
 import { shellFinding } from "./shell.ts"
 import { decidable, INTERNAL_ERROR_RULE, LIMIT_REACHED, mostSevere, type CustomRule, type Finding, type WaiverContext } from "./types.ts"
 
@@ -34,6 +35,8 @@ export interface ToolRuleContext extends WritePathContext, CredentialContext, Wa
    * marked there, only when the check was carried out to the end); absent = all, unchanged.
    */
   readonly active?: ActiveRules
+  /** What `read` would send as an attachment, by the first bytes of the file (`credential-content.ts`). */
+  readonly attachmentKind?: (path: string) => "document" | "image" | undefined
   /** Cause of a check that threw (log); absent: nothing is logged, the ask remains. */
   readonly report?: (message: string, error: unknown) => void
 }
@@ -122,6 +125,15 @@ function secretRead(path: string, ctx: ToolRuleContext, form: PathForm = "none")
     return entrusted(target === undefined ? finding : { ...finding, targets: [target] }, ctx.active)
   }
   return found === LIMIT_REACHED ? overridden({ verdict: "ask", rule: "secret-file-read", reason: uncheckedCredentialReason(path) }, ctx.active) : undefined
+}
+
+/** A file `read` would hand over without the plugin seeing inside it; `model` and `localAsks` leave the ask with the user. */
+function opaqueRead(path: string, ctx: ToolRuleContext): Finding | undefined {
+  // What OpenCode goes by first: a PDF named `.png` is a document, even with the image rule off.
+  const kind = path ? ctx.attachmentKind?.(path) : undefined
+  const rule = [OPAQUE_RULES.find(({ id }) => id === `opaque-${kind}`), opaqueRule(path)].find((each) => each && ruleEnabled(each.id, ctx.active))
+  if (!rule) return undefined
+  return entrusted(overridden({ verdict: "ask", rule: rule.id, reason: rule.reason }, ctx.active), ctx.active)
 }
 
 /**
@@ -400,7 +412,11 @@ export function toolFinding(tool: string, input: unknown, ctx: ToolRuleContext):
     case "shell":
       return shellFinding(str(args.command), ctx)
     case "read":
-      return mostSevere([read(str(args.path), "session"), ...custom])
+      return mostSevere([
+        read(str(args.path), "session"),
+        ...[args.path, args.filePath].map((path) => checked("the opaque file check", ctx, () => opaqueRead(str(path), ctx))),
+        ...custom,
+      ])
     case "glob":
     case "grep":
       return mostSevere([read(str(args.path), "session"), read(str(args.pattern)), read(str(args.include)), ...custom])

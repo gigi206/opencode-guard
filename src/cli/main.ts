@@ -10,7 +10,7 @@ import { CliError, outputRedactor, PLUGIN_DIR, type CliIo, type Pretty } from ".
 import { prettyHelp, USAGE } from "./help.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
-import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines } from "./rules.ts"
+import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines, stateHere } from "./rules.ts"
 import { completionScript, SHELLS } from "./completion.ts"
 import { explainSetting, settings } from "./settings.ts"
 import { show } from "./show.ts"
@@ -217,18 +217,18 @@ function run(command: string, args: readonly string[], io: CliIo): void | Promis
       const [builtins, custom] = parsed.builtins === parsed.custom ? [true, true] : [Boolean(parsed.builtins), Boolean(parsed.custom)]
       // In a terminal: grouped and aligned sections, colored unless the launcher says otherwise.
       if (io.pretty) {
-        if (builtins) prettyBuiltins(io.pretty)
+        if (builtins) prettyBuiltins(io, io.pretty)
         if (builtins && custom) for (let blank = 0; blank < 2; blank++) io.pretty.line([])
         if (custom) prettyCustom(io, io.pretty)
         return
       }
       // `--builtins` alone: the registry only, as before (no header, no configuration needed); neither or both: the two
       // sections.
-      if (!custom) for (const line of ruleLines()) io.out(line)
+      if (!custom) for (const line of ruleLines((rule) => stateHere(io, rule))) io.out(line)
       else if (!builtins) for (const line of customRuleLines(io)) io.out(line)
       else {
         io.out("Built-in rules:")
-        for (const line of ruleLines()) io.out(`  ${line}`)
+        for (const line of ruleLines((rule) => stateHere(io, rule))) io.out(`  ${line}`)
         for (const line of customRuleLines(io)) io.out(line)
       }
       return

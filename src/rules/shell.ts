@@ -2,6 +2,7 @@ import { posix } from "node:path"
 import { containsEncodedPlaceholder, PLACEHOLDER_RE, PLACEHOLDER_SHOWN, type Redactor } from "../secrets/redact.ts"
 import { decodeUnicodeEscapes, NETWORK_FUNCTION, OWN_HTTP_CALLS, PYTHON_HTTP_CALL, UNPARSED_QUOTING } from "./code-network.ts"
 import { entrusted, hardened, overrideOf, ruleEnabled, waivable, waiverOf, withoutLowered, type ActiveRules } from "./features.ts"
+import { OPAQUE_RULES } from "./opaque.ts"
 import {
   completesProtectedPath,
   credentialFile,
@@ -371,7 +372,11 @@ const commandName = (token: string) => commandToken(token).split("/").pop() ?? "
  * launched (`./build.sh`, `/usr/bin/python3`).
  */
 function commandOf(segment: string): { name: string; args: string[]; path: string } {
-  const tokens = segment.split(/\s+/).filter(Boolean).map(unquote)
+  return commandOfWords(segment.split(/\s+/).filter(Boolean).map(unquote))
+}
+
+/** `commandOf` on words already cut (changes `tokens`). */
+function commandOfWords(tokens: string[]): { name: string; args: string[]; path: string } {
   let i = 0
   let wrapper: string | undefined
   while (i < tokens.length) {
@@ -3905,6 +3910,7 @@ const ASK_RULES: readonly RegexRule[] = [
     reason: CODE_LOADING_REASON,
     test: codeLoadingEnv,
   },
+  ...OPAQUE_RULES.map(({ id, reason, hint, names }): RegexRule => ({ id, verdict: "ask", reason, test: (command) => hint.test(command) && printsRawFile(command, names) })),
 ]
 
 /**
@@ -4353,12 +4359,13 @@ const HEREDOC_START = /<<(-?)[ \t]*(["']?)([A-Za-z_][A-Za-z0-9_]*)\2/g
 /**
  * Removes heredoc bodies, traversed in order (linear cost); a body expanded by the shell (`$(…)`) is kept.
  * `withTerminators`: also removes the closing line (view of `onlyInHeredocData`); a kept body is signaled there by
- * `undefined` (never data alone). `blank`: removed bodies replaced by blanks (positions kept).
+ * `undefined` (never data alone). `blank`: removed bodies replaced by blanks (positions kept). `removed`: for each of
+ * them, where its `<<` stands, where it starts and where it ends.
  */
 function withoutHeredocBodies(command: string): string
 function withoutHeredocBodies(command: string, withTerminators: true): string | undefined
-function withoutHeredocBodies(command: string, withTerminators: false, blank: true): string
-function withoutHeredocBodies(command: string, withTerminators = false, blank = false): string | undefined {
+function withoutHeredocBodies(command: string, withTerminators: false, blank: true, removed?: Array<readonly [number, number, number]>): string
+function withoutHeredocBodies(command: string, withTerminators = false, blank = false, removed?: Array<readonly [number, number, number]>): string | undefined {
   let out = ""
   let kept = 0
   const start = new RegExp(HEREDOC_START.source, "g")
@@ -4372,6 +4379,7 @@ function withoutHeredocBodies(command: string, withTerminators = false, blank = 
     const end = terminator.exec(command)
     const bodyEnd = end ? end.index : command.length
     if (quote || !/\$\(|`/.test(command.slice(lineEnd + 1, bodyEnd))) {
+      removed?.push([match.index, lineEnd + 1, bodyEnd])
       out += blank ? command.slice(kept, Math.min(lineEnd + 1, bodyEnd)) + " ".repeat(Math.max(0, bodyEnd - lineEnd - 1)) : command.slice(kept, lineEnd + 1)
       kept = withTerminators && end ? end.index + end[0].length : bodyEnd
     } else if (withTerminators) return undefined
@@ -5685,6 +5693,122 @@ function shellCodeViews(command: string): { views: string[]; unread: boolean } {
   const [closed, open]: string[][] = [[], []]
   for (const code of codes) (codeIsClosed(code) ? closed : open).push(code)
   return { views: [...(closed.length ? [closed.join("\n")] : []), ...open], unread }
+}
+
+/** Programs that print a file as it is, the bytes of a document or an image included. */
+const RAW_READERS = new Set(["cat", "base64", "xxd", "hexdump", "od", "strings", "head", "tail"])
+
+/** Options of a reader that take a value: a number or a format, never a file it prints (`base64 -o`: the file it writes). */
+const READER_VALUES: ReadonlyMap<string, RegExp> = new Map([
+  ["head", /^-[cn]$|^--(?:bytes|lines)$/],
+  ["tail", /^-[cn]$|^--(?:bytes|lines)$/],
+  ["base64", /^-o$|^--output$/],
+  ["xxd", /^-(?:c|cols|g|groupsize|l|len|n|name|o|s|seek|R)$/],
+  ["od", /^-[AjNSt]$/],
+  ["hexdump", /^-[ens]$/],
+  ["strings", /^-[nt]$/],
+])
+
+/** Value of a word as written: without its quotes and escapes (the words in pieces are also read in `commandWordView`). */
+const wordValue = (word: string) => cleanTarget(word.replace(/\\(.)/gs, "$1").replace(/\$(?=['"])/g, "")).replace(/`$/, "")
+
+/** Operands of a reader: any word that is neither an option nor its value, every word after `--`; `xxd infile outfile` writes the second. */
+function readerOperands(name: string, args: readonly string[]): string[] {
+  const end = args.indexOf("--")
+  const operands = args.filter((word, index) => (end >= 0 && index > end) || (!word.startsWith("-") && !READER_VALUES.get(name)?.test(args[index - 1] ?? "")))
+  return name === "xxd" ? operands.slice(0, 1) : operands
+}
+
+/**
+ * Is a file `names` accepts printed by a program of `RAW_READERS`, as an operand or on its input (`<`, `<>`), or by the shell
+ * itself (`$(<file)`)? A scan by words (`shellEnd`) over the command without heredoc bodies, like `shellCodeViews`: quoted text
+ * stays an argument, the output of a redirection is not read, substitutions are read as commands. A statement (up to `;`,
+ * `&`, `&&`, `||` or a line end, outside a group; a pipeline stays whole) that launches a shell (`bash <<E`, `echo '…' | sh`,
+ * `watch '…'`) runs what it is given: its heredoc bodies, each of its quoted strings and what `echo` pipes are read as
+ * commands too, each statement again by itself. Budget run out: yes, nothing was read to its end.
+ */
+function printsRawFile(command: string, names: (file: string) => boolean): boolean {
+  const bodies: Array<readonly [number, number, number]> = []
+  const text = command.includes("<<") && heredocsAreReal(command) ? withoutHeredocBodies(command, false, true, bodies) : command
+  const budget = { left: 8 * command.length + 1024 }
+  let body = 0
+  const pending: Array<readonly [string, number, number, boolean]> = [[text, 0, text.length, false]]
+  for (let range = pending.pop(); range; range = pending.pop()) {
+    const [source, from, to, fedOutside] = range
+    let [words, inputs]: string[][] = [[], []]
+    let target: "input" | "other" | undefined
+    // Where the statement starts, its groups still open, the last separator a pipe, the first operand of the current command.
+    let [start, depth, afterPipe] = [from, 0, false]
+    let operand: number | undefined
+    // What the statement holds: substitutions, read in any case; what only a shell it launches would run.
+    let [subs, fedText]: Array<readonly [number, number]>[] = [[], []]
+    const prints = (piped?: number) => {
+      const { name, args } = commandOfWords(words)
+      const read = (RAW_READERS.has(name) && [...readerOperands(name, args), ...inputs].some(names)) || (from > 0 && !name && inputs.some(names))
+      if (piped !== undefined && operand !== undefined && (name === "echo" || name === "printf")) fedText.push([operand, piped])
+      ;[words, inputs, target, operand] = [[], [], undefined, undefined]
+      return read
+    }
+    const endStatement = (end: number) => {
+      let next = body
+      while (next < bodies.length && bodies[next]![0] < end) next++
+      if (subs.length || fedText.length || next > body) {
+        budget.left -= end - start
+        const fed = fedOutside || reentersShell(withoutData(source.slice(start, end).replace(/(^|[;&|(\n])[^\S\n]*(?:then|do|else)\s+/g, "$1").replace(/<+/g, " $&")))
+        for (const [a, b] of subs) pending.push([source, a, b, fed])
+        if (fed) {
+          for (const [a, b] of fedText) pending.push([source, a, b, false])
+          for (const [, a, b] of bodies.slice(body, next)) pending.push([command, a, b, false])
+        }
+      }
+      ;[subs, fedText, body, start] = [[], [], next, end + 1]
+    }
+    for (let i = from; i < to && budget.left > 0; ) {
+      const c = source[i]!
+      const operator = c === "&" || c === "<" || c === ">" ? stickyEnd(REDIRECTION_OPERATOR, source, i) : i
+      // `<(…)`: read as a command; the words around it stay those of its command.
+      if ((c === "<" || c === ">") && source[i + 1] === "(") {
+        const end = shellEnd(source, i + 1, to, budget, true)
+        if (end < 0) return true
+        subs.push([i + 2, end])
+        i = end
+      } else if (operator > i) {
+        target = /^\d*<>?$/.test(source.slice(i, operator)) ? "input" : "other"
+        i = operator
+      } else if (/[;&|\n()]/.test(c)) {
+        const pipe = c === "|" && source[i + 1] !== "|" && source[i - 1] !== "|"
+        if (prints(pipe ? i : undefined)) return true
+        depth = c === "(" ? depth + 1 : c === ")" ? Math.max(0, depth - 1) : depth
+        const ends = c === ";" || (c === "\n" && !afterPipe) || (c === "&" && source[i - 1] !== "|") || (c === "|" && !pipe)
+        if (ends && !depth) endStatement(i)
+        if (c !== "\n") afterPipe = pipe
+        i++
+      } else if (/\s/.test(c)) i++
+      else if (c === "#" && (i === 0 || COMMENT_BEFORE.test(source[i - 1]!))) i = Math.min(source.indexOf("\n", i) >>> 0, to)
+      else {
+        const found: Array<readonly [number, number]> = []
+        const end = shellEnd(source, i, to, budget, false, found)
+        const stop = Math.min(end < 0 ? stickyEnd(/[^;&|\n]*/y, source, i) : Math.max(end, i + 1), to)
+        subs.push(...found)
+        if (stop - i > 2 && /['"]/.test(source[i]!) && source[stop - 1] === source[i]) fedText.push([i + 1, stop - 1])
+        const written = source.slice(i, stop)
+        const word = wordValue(written)
+        // A group opens and closes where a command starts; `done` as an argument is a word.
+        if (!words.length && !target) depth = /^(?:\{|do|then)$/.test(written) ? depth + 1 : /^(?:\}|done|fi)$/.test(written) ? Math.max(0, depth - 1) : depth
+        if (target === "input") inputs.push(word)
+        else if (!target && !(/[<>]/.test(source[stop] ?? "") && /^\d+$/.test(word))) {
+          if (words.length && !word.startsWith("-")) operand ??= i
+          words.push(word)
+        }
+        target = undefined
+        afterPipe = false
+        i = stop
+      }
+    }
+    if (budget.left <= 0 || prints()) return true
+    endStatement(to)
+  }
+  return false
 }
 
 /** One examination of a command across the levels of its `-c` codes: `reads` left; `held`, what the rules lifted inside a code. */

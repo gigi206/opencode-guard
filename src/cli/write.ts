@@ -10,7 +10,7 @@ import { closeSync, constants, fchmodSync, fsyncSync, lstatSync, openSync, renam
 import { dirname, join, resolve } from "node:path"
 import { GUARD_RULES, parseConfig, RELAX_SWITCHES, REDACTION_OFF, ruleIdOf, rulesOption, type GuardFile, type Version } from "../config.ts"
 import { GUARD_FILE, guardIdentity, guardPaths, MAX_GUARD_FILE_BYTES, readGuardFiles } from "../guard-file.ts"
-import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
+import { OFF_BY_DEFAULT_RULES, RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { hasParentComponent } from "../rules/sensitive-paths.ts"
 import { INTERNAL_ERROR_RULE } from "../rules/types.ts"
 import { CliError, projectDirectory, readSources, realOrUndefined, resolution, type CliIo, type Sources } from "./context.ts"
@@ -194,6 +194,7 @@ export function resetRule(io: CliIo, rule: string, target: Target): void {
   const after = resolution(io, sources, target.project, [{ label: "global guard.json", global: true, data }])
   const still = inForce(after, target, rule)
   if (still) io.out(`ruleOverrides.${rule} is still "${still.value}" there, set by ${still.origin}`)
+  else if (OFF_BY_DEFAULT_RULES.has(rule)) io.out(`${rule} is off by default: it does not apply there without a setting`)
   else {
     // Without a setting, a rule of a group applies only if its group's switch is on there (profile included).
     const group = RULE_FEATURES.get(rule)

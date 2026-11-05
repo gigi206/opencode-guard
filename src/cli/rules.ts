@@ -1,13 +1,13 @@
 // `guard rules`: the built-in rules in the registry order (`rules/features.ts`), with their group, their own verdict
 // (before any setting) and what they check: the same text as the table of docs/rules.md (a test compares them); then the
 // user's own rules (`rules` option, then the global guard.json's), read and set aside exactly as the plugin does.
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { parseConfig, type GuardFile } from "../config.ts"
-import { GUARD_FILE, readGuardFiles } from "../guard-file.ts"
+import { GUARD_FILE, guardPaths, readGuardFiles } from "../guard-file.ts"
 import { RULE_DETAILS, ruleSettings } from "../rules/details.ts"
-import { RULE_FEATURES, type RuleFeature } from "../rules/features.ts"
+import { OFF_BY_DEFAULT_RULES, RULE_FEATURES, ruleEnabled, type RuleFeature } from "../rules/features.ts"
 import type { CustomRule } from "../rules/types.ts"
-import { CliError, mayKeepNote, readSources, resolution, type CliIo, type Pretty, type Sources } from "./context.ts"
+import { CliError, mayKeepNote, readSources, realOrUndefined, resolution, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import { type Segment } from "./style.ts"
 
@@ -28,6 +28,8 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
       ["secret-variable-network", "ask", "a variable named like a secret in a network command"],
       ["env-dump-network", "deny", "an environment dump sent over the network"],
       ["env-dump-network-word", "ask", "an environment dump next to the name of a network tool that is not run"],
+      ["opaque-document", "ask", "reading a document the plugin cannot see inside (PDF, Word, Excel, PowerPoint, OpenDocument, RTF), by read or by a program that prints it raw"],
+      ["opaque-image", "ask", "off by default: reading an image the plugin cannot see inside (PNG, JPEG, GIF, WebP, BMP, TIFF), by read or by a program that prints it raw"],
       ["rm", "ask", "rm -r or rm -f"],
       ["rm-critical", "deny", "recursive deletion of /, the home directory or a system directory"],
       ["file-delete", "ask", "rm, unlink or shred run on a file"],
@@ -81,9 +83,27 @@ export const RULE_SUMMARIES: ReadonlyMap<string, { readonly verdict: "deny" | "a
   ).map(([rule, verdict, description]) => [rule, { verdict, description }]),
 )
 
-/** One line per rule, columns aligned. */
-export function ruleLines(): string[] {
-  const rows = [...RULE_FEATURES].map(([rule, group]) => [rule, group, RULE_SUMMARIES.get(rule)?.verdict ?? "-", RULE_SUMMARIES.get(rule)?.description ?? ""])
+/** Is a rule that is off by default on in the current directory? From the plugin's own resolution of the same files. */
+export function stateHere(io: CliIo, rule: string): string {
+  try {
+    const sources = readSources(io)
+    const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
+    const files = readGuardFiles(guardPaths(directory, sources.globalDir, io.systemDir))
+    return ruleEnabled(rule, resolution(io, sources, directory, files).base.policy) ? "on" : "off"
+  } catch {
+    return "off unless set"
+  }
+}
+
+/** A rule's description, after its state when it is off by default. */
+const described = (rule: string, state: (rule: string) => string) => {
+  const description = RULE_SUMMARIES.get(rule)?.description ?? ""
+  return OFF_BY_DEFAULT_RULES.has(rule) ? `${state(rule)}  ${description}` : description
+}
+
+/** One line per rule, columns aligned; `state`: that of the rules off by default, in the current directory for `guard rules`. */
+export function ruleLines(state: (rule: string) => string = () => "off"): string[] {
+  const rows = [...RULE_FEATURES].map(([rule, group]) => [rule, group, RULE_SUMMARIES.get(rule)?.verdict ?? "-", described(rule, state)])
   const width = (column: number) => Math.max(...rows.map((row) => row[column]!.length))
   const [rule, group, verdict] = [width(0), width(1), width(2)]
   return rows.map((row) => `${row[0]!.padEnd(rule)}  ${row[1]!.padEnd(group)}  ${row[2]!.padEnd(verdict)}  ${row[3]}`)
@@ -102,7 +122,7 @@ export function explainRule(io: CliIo, rule: string): void {
   if (!group || !summary) throw new CliError(`${rule} is not a built-in rule`)
   if (!detail) throw new CliError(`no explanation is available for the built-in rule ${rule}`)
   const reason = detail.reason ?? summary.description
-  const settings = ruleSettings(rule, group)
+  const settings = `${ruleSettings(rule, group)}${OFF_BY_DEFAULT_RULES.has(rule) ? ` State here: ${stateHere(io, rule)}.` : ""}`
   if (io.pretty) {
     const pretty = io.pretty
     title(pretty, `Rule ${pretty.clean(rule)}`, `${groupLabel(group)}, own verdict ${summary.verdict}`, "builtins")
@@ -230,8 +250,8 @@ const verdictStyle = (verdict: string) => (verdict === "deny" ? "deny" : "ask")
 const count = (n: number) => `${n} ${n === 1 ? "rule" : "rules"}`
 
 /** The built-in rules for a terminal: by group (the option that turns it off), aligned, descriptions wrapped. */
-export function prettyBuiltins(pretty: Pretty): void {
-  const rules = [...RULE_FEATURES].map(([rule, group]) => ({ rule: pretty.clean(rule), group, verdict: RULE_SUMMARIES.get(rule)?.verdict ?? "-", description: pretty.clean(RULE_SUMMARIES.get(rule)?.description ?? "") }))
+export function prettyBuiltins(io: CliIo, pretty: Pretty): void {
+  const rules = [...RULE_FEATURES].map(([rule, group]) => ({ rule: pretty.clean(rule), group, verdict: RULE_SUMMARIES.get(rule)?.verdict ?? "-", description: pretty.clean(described(rule, (name) => stateHere(io, name))) }))
   const id = Math.max(...rules.map((row) => row.rule.length))
   const column = 4 + id + 2 + 4 + 2
   title(pretty, "Built-in rules", count(rules.length), "builtins")

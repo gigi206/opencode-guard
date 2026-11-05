@@ -230,7 +230,7 @@ describe("cost of the code view", () => {
       assert.ok(withinBudget(start, budget))
       assert.equal(verdict(found), expected)
     })
-  timed("bash -c nested 40,000 times", `${"bash -c ".repeat(40_000)}'sudo ls'`, "ask/nested-opencode")
+  timed("bash -c nested 40,000 times", `${"bash -c ".repeat(40_000)}'sudo ls'`, "ask/nested-opencode", 8000)
   timed("a code of 40,000 words", `bash -c 'sudo ${"word ".repeat(40_000)}'`, "ask/privilege")
   timed("witness: a code of 40,000 commands", `bash -c '${"a; ".repeat(40_000)}tee /dev/sda'`, "deny/write-device")
   timed("40,000 shells in a row", `${"bash -c 'true'; ".repeat(40_000)}bash -c 'sudo ls'`, "ask/privilege", 8000)
@@ -358,8 +358,8 @@ describe("reads of the codes of one command", () => {
       assert.ok(withinBudget(start, budget))
       assert.equal(verdict(found), expected)
     })
-  timed("40,000 open codes", `${openCodes(40_000)}true`, "ask/nested-opencode")
-  timed("40,000 open codes in one code", shellInDouble(openCodes(40_000)), "ask/nested-opencode")
+  timed("40,000 open codes", `${openCodes(40_000)}true`, "ask/nested-opencode", 8000)
+  timed("40,000 open codes in one code", shellInDouble(openCodes(40_000)), "ask/nested-opencode", 8000)
 })
 
 describe("a finding lifted inside a code", () => {

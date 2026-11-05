@@ -196,7 +196,7 @@ describe("VIS-2: in the request's action, the most of the rule, reason, opinion 
 
   it("VIS-2: every short reason belongs to a reason the plugin really gives, word for word (otherwise it never applies)", async () => {
     const { RULE_DETAILS } = await import("../src/rules/details.ts")
-    const sources = ["rules/shell.ts", "rules/tools.ts", "rules/sensitive-paths.ts", "rules/code-network.ts", "decide.ts"]
+    const sources = ["rules/shell.ts", "rules/tools.ts", "rules/sensitive-paths.ts", "rules/code-network.ts", "rules/opaque.ts", "decide.ts"]
     const code = sources.map((file) => readFileSync(join(import.meta.dirname, "../src", file), "utf8")).join("\n")
     for (const [rule, detail] of RULE_DETAILS)
       if (detail.prompt) assert.ok(code.includes(JSON.stringify(detail.reason)), `${rule}: ${detail.reason}`)

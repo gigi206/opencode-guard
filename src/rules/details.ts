@@ -2,7 +2,7 @@
 // and the reason a finding usually carries. Never the rule's pattern or an internal expression: the shell rules are
 // functions, not one regular expression, and the explanations stay at the level of docs/rules.md.
 
-import { DENY_ONLY_RULES, TARGETED_RULES, USER_ONLY_RULES } from "./features.ts"
+import { DENY_ONLY_RULES, OFF_BY_DEFAULT_RULES, TARGETED_RULES, UNSEEN_CONTENT_RULES, USER_ONLY_RULES } from "./features.ts"
 
 export interface RuleDetail {
   /** What the rule looks at, in words (no pattern or internal expression). */
@@ -302,6 +302,22 @@ export const RULE_DETAILS: ReadonlyMap<string, RuleDetail> = new Map<string, Rul
     ),
   ],
   [
+    "opaque-document",
+    detail(
+      "A file named .pdf, .doc, .docx, .docm, .xls, .xlsx, .xlsm, .ppt, .pptx, .pptm, .odt, .ods, .odp or .rtf (any case; the last extension counts), or that starts like a PDF for read. It asks before OpenCode's read tool opens one, and before cat, base64, xxd, hexdump, od, strings, head or tail print one, as an operand or on their input, also inside bash -c, in what a shell gets on its input and in words written in pieces. The plugin redacts text and checks text: inside such a file it sees nothing, or only a part, so a yes lets the content through unchecked. Tools that turn the file into text (pdftotext, pandoc, unzip -p) do not ask: their text output is redacted and checked.",
+      "the guard plugin cannot see inside this document: answering yes lets it through unchecked",
+      "yes lets this document through unchecked",
+    ),
+  ],
+  [
+    "opaque-image",
+    detail(
+      "The same reading as opaque-document for a file named .png, .jpg, .jpeg, .gif, .webp, .bmp, .tif or .tiff, or that starts like a PNG, JPEG, GIF or WebP for read, off by default. It is also the only rule that reaches the second step of an extraction: pdfimages, or unzip on a .docx, followed by a read of the image.",
+      "the guard plugin cannot see inside this image: answering yes lets it through unchecked",
+      "yes lets this image through unchecked",
+    ),
+  ],
+  [
     "script-unverifiable",
     detail(
       "A script written by the agent whose content can no longer be checked (for example, it was modified outside the plugin); the rule asks before the script runs.",
@@ -327,6 +343,10 @@ export function ruleSettings(id: string, group: "always" | "sensitiveFiles" | "d
     return `${common} The group cannot be turned off.`
   }
   const switchName = group === "sensitiveFiles" ? "sensitiveFiles" : "dangerousCommands"
+  if (OFF_BY_DEFAULT_RULES.has(id))
+    return `Off by default, whatever the ${group} group's switch: ruleOverrides.${id} "ask" or "deny" turns it on, for everyone, one agent or one project, and a project can do so without being trusted, since that only hardens. "model" turns it on too and asks like "ask", with a warning: the decision model cannot see the image, and localAsks does not reach it. "off" turns it off again; in a project, that counts only if the global configuration sets it too, unless the project is trusted. Set in the plugin options of opencode.json, it falls with them when a project replaces these options; guard rules writes guard.json, which has no such weakness.`
+  if (UNSEEN_CONTENT_RULES.has(id))
+    return `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off", "ask", "deny" or "model". "model" asks like "ask", with a warning: the decision model gets only the file's name, never its content, so it has nothing to judge, and localAsks does not reach it either. "off" must also be declared in the global configuration, unless the project is trusted.`
   const common = `Part of the ${group} group: "${switchName}": false turns it off. ruleOverrides.${id} accepts "off", "ask", "deny" or "model"; "model" leaves its confirmations to the decision model, and so does localAsks: "model" when the rule has no setting. A value that relaxes the rule must also be declared in the global configuration, unless the project is trusted.`
   // Its findings name their files: the only rule an exception or the memory of confirmations reaches.
   if (!TARGETED_RULES.has(id)) return common

@@ -56,6 +56,9 @@ export const RULE_FEATURES: ReadonlyMap<string, RuleFeature> = new Map<string, R
   ["secret-variable-network", "sensitiveFiles"],
   ["env-dump-network", "sensitiveFiles"],
   ["env-dump-network-word", "sensitiveFiles"],
+  // Files whose inside the plugin cannot read: what may leave with them is a secret, not a dangerous action.
+  ["opaque-document", "sensitiveFiles"],
+  ["opaque-image", "sensitiveFiles"],
   // Dangerous actions: destruction, system, execution of downloads, network, persistence writes.
   ...[
     "rm",
@@ -123,6 +126,15 @@ export const USER_ONLY_RULES: ReadonlyMap<string, string> = new Map([
 /** Always-active rules that only deny: `model` has no ask to leave to the decision model there (ignored with a warning). */
 export const DENY_ONLY_RULES: ReadonlySet<string> = new Set(["placeholder"])
 
+/**
+ * Rules about a file the plugin cannot read: the decision model would get only its name, never its content, so it never
+ * decides them. `model` and `localAsks` leave the ask with the user (`entrusted`); `model` is kept with a warning.
+ */
+export const UNSEEN_CONTENT_RULES: ReadonlySet<string> = new Set(["opaque-document", "opaque-image"])
+
+/** Rules that apply only once a setting turns them on (`ask`, `deny`, `model`), whatever their group's switch. */
+export const OFF_BY_DEFAULT_RULES: ReadonlySet<string> = new Set(["opaque-image"])
+
 /** Settings with the rules set to `ask` turned off. */
 const loweredOff = (overrides: ReadonlyMap<string, RuleOverride>) =>
   new Map([...overrides].map(([rule, value]) => [rule, value === "ask" ? "off" : value] as const))
@@ -177,9 +189,11 @@ export function overrideOf(rule: string, active?: ActiveRules): RuleOverride | u
 
 /**
  * Is the rule active? User rules (`rules`, absent from the registry) are always active; otherwise its setting
- * (`off`, or `ask`/`deny`/`model`, which turn it on in a disabled group), then its group switch.
+ * (`off`, or `ask`/`deny`/`model`, which turn it on in a disabled group), then its group switch; a rule of
+ * `OFF_BY_DEFAULT_RULES` only by its setting.
  */
 export function ruleEnabled(rule: string, active?: ActiveRules): boolean {
+  if (OFF_BY_DEFAULT_RULES.has(rule)) return (overrideOf(rule, active) ?? "off") !== "off"
   if (!active) return true
   const feature = RULE_FEATURES.get(rule)
   if (feature === undefined || feature === "always") return true
@@ -197,7 +211,7 @@ export function ruleEnabled(rule: string, active?: ActiveRules): boolean {
 export function entrusted<F extends Finding | undefined>(finding: F, active?: ActiveRules): F | Finding {
   if (finding?.verdict !== "ask" || finding.dataOnly || finding.modelDecides !== undefined) return finding
   const feature = RULE_FEATURES.get(finding.rule)
-  if (feature === undefined || USER_ONLY_RULES.has(finding.rule)) return finding
+  if (feature === undefined || USER_ONLY_RULES.has(finding.rule) || UNSEEN_CONTENT_RULES.has(finding.rule)) return finding
   const override = overrideOf(finding.rule, active)
   if (override === "model") return { ...finding, modelDecides: BY_RULE_SETTING }
   if (override === undefined && active?.localAsksByModel && (feature !== "always" || active.selfProtectionByModel)) return { ...finding, modelDecides: BY_LOCAL_ASKS }

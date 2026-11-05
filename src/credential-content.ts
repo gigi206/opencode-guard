@@ -86,6 +86,13 @@ export function hasPrivateKeyHeader(head: string): boolean {
   return false
 }
 
+/** What OpenCode's `read` sends as an attachment, from the first bytes as it does (read in OpenCode 2.2.5), whatever the name. */
+export function attachedKind(head: string): "document" | "image" | undefined {
+  if (head.startsWith("%PDF-")) return "document"
+  const webp = head.startsWith("RIFF") && head.startsWith("WEBP", 8)
+  return head.startsWith("\x89PNG\r\n\x1a\n") || head.startsWith("\xff\xd8\xff") || head.startsWith("GIF8") || webp ? "image" : undefined
+}
+
 export interface CredentialContentOptions {
   /** Directories from which relative paths start (`shellDirectories` for the shell, the session directory otherwise). */
   readonly directories: readonly string[]
@@ -135,5 +142,34 @@ export function createCredentialContent(options: CredentialContentOptions): (tok
     }
     seen.set(token, found)
     return found
+  }
+}
+
+/**
+ * Kind of attachment of the regular file `read` names, from each directory, within the bounds of `createCredentialContent`;
+ * past them, or for a longer path, `undefined`: the name alone decides.
+ */
+export function createAttachmentKind(options: CredentialContentOptions): (path: string) => "document" | "image" | undefined {
+  const io = options.io ?? nodeIo
+  let lookups = 0
+  let opened = 0
+  return (path) => {
+    if (path.length > 1024) return undefined
+    for (const directory of path.startsWith("/") ? ["/"] : options.directories) {
+      const absolute = resolveLike(directory, path, options.home)
+      if (!absolute || /^\/(?:dev|proc|sys)(?:\/|$)/.test(absolute)) continue
+      if (lookups >= MAX_LOOKUPS || opened >= MAX_OPENED) return undefined
+      lookups++
+      try {
+        if (!io.stat(absolute).isFile()) continue
+      } catch {
+        continue
+      }
+      opened++
+      const head = readHead(absolute, io)
+      const kind = head === undefined ? undefined : attachedKind(head)
+      if (kind) return kind
+    }
+    return undefined
   }
 }

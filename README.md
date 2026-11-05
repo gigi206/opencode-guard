@@ -35,10 +35,13 @@ A local `deny` is final, and the decision model can only make a decision **stric
 | Destructive commands | `rm -rf /`, `mkfs`, `dd of=/dev/sda`, fork bombs, writes to a device | `deny` |
 | Destructive git and system changes | `git reset --hard`, force-push, `sudo`, shutdown, package installs, `kubectl delete` | `ask` |
 | Credential files | reading `.env`, `~/.ssh/`, `~/.aws/`, cloud keys, other agents' credential stores | `ask` |
+| Files the plugin cannot read | `read` or a raw print (`cat`, `base64`…) of a PDF or an Office document: a yes lets it through unchecked; the same for images once `opaque-image` is turned on | `ask` |
 | Secrets leaving the machine | a credential file or a detected secret in a network command, web request, MCP call or CodeMode code | `deny` |
 | Protected locations | recognized writes to the plugin directory, `opencode.json(c)`, `.opencode/`, shell startup files, `/etc`, git hooks | `ask` |
 | Redaction placeholder | writing a placeholder back into a file would destroy the real secret | `deny` |
 | Secrets in prompts and results | API keys, tokens, passwords in code or configuration (`DB_PASSWORD=…`), private keys, base64 and hex dumps; with the decision model, passwords written in plain words in the prompt and in tool outputs | redacted |
+
+A yes to a document or an image checks nothing: the plugin sees only its name, and for `read` its first bytes, so a file renamed and printed by `cat` does not ask, a file attached to the prompt is not a tool call, and a scanned page holds no text to mask (see [Known limitations](docs/operations.md#known-limitations)).
 
 The exact patterns, exceptions and false positives are listed in [Rules and redaction](docs/rules.md).
 
