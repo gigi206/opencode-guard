@@ -7,7 +7,7 @@ import { join } from "node:path"
 import { displayURL, parseConfig } from "../config.ts"
 import { createModelClient, ModelError, type ModelClient } from "../model/client.ts"
 import { QUESTIONS, STATE_NOTE } from "../model/questions.ts"
-import { PLUGIN_DIR, readSources, type CliIo } from "./context.ts"
+import { CliError, PLUGIN_DIR, readSources, type CliIo } from "./context.ts"
 import { localTime, logLines, TAIL_BYTES } from "./last.ts"
 import { heading, title } from "./pretty.ts"
 import type { Segment, Style } from "./style.ts"
@@ -103,8 +103,18 @@ const when = (time: string, env: Record<string, string | undefined>) => {
   return local ? `${local.day} ${local.time} ${local.offset}` : time
 }
 
+/** The log's lines, or what stands for them: a log that cannot be read is a state to report, not a failure of the command. */
+function readLog(io: CliIo): ReturnType<typeof logLines> {
+  try {
+    return logLines(io)
+  } catch (error) {
+    if (error instanceof CliError) return { message: `state unknown: ${error.message}` }
+    throw error
+  }
+}
+
 export async function status(io: CliIo, options: { readonly offline: boolean }, client?: ModelClient): Promise<void> {
-  const log = logLines(io)
+  const log = readLog(io)
   const state = "message" in log ? undefined : logState(log.lines)
   const stale = state?.starts.length ? pluginFilesChanged() > Date.parse(state.starts.at(-1)!.time) : false
   const probe = options.offline ? undefined : await probeModel(io, client)

@@ -4,6 +4,11 @@
 set -eu
 bin_dir=${GUARD_BIN_DIR:-$HOME/.local/bin}
 target=$bin_dir/guard
+# A directory, or a link to one: `mv` would put the launcher inside it.
+if [ -d "$target" ]; then
+  echo "guard: $target is a directory: nothing installed" >&2
+  exit 1
+fi
 mkdir -p "$bin_dir"
 tmp=$(mktemp "$bin_dir/.guard.XXXXXX")
 trap 'rm -f "$tmp"' EXIT

@@ -4,7 +4,7 @@
 // ever printed.
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { parseConfig, type Version } from "../config.ts"
+import { parseConfig, type GuardConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { PLUGIN_DIR, readSources, realOrUndefined, resolution, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
@@ -193,6 +193,19 @@ function relaxationRows(version: Version, agent: string | undefined) {
       row("models", relaxed.models ? relaxed.models.join(", ") || "none" : "any model"),
     ]
   })
+}
+
+/**
+ * Names of what relaxes this agent besides the switches of its section (`Version.relaxations`): the policy settings in
+ * force for it, wherever they are set, the exceptions, the global redaction switches and formats, `unprotectedAgent`.
+ */
+export function stillRelaxed(version: Version, config: GuardConfig, agent: string): string[] {
+  return [
+    ...(version.settings?.(agent) ?? []).filter((row) => row.key.startsWith(EXCEPTIONS) || relaxes(row.key, String(row.value))).map((row) => row.key),
+    ...(version.redactionOff ?? []).map((type) => `redactionOff.${type}`),
+    ...(["redactOutputs", "redactPrompt", "redactWire"] as const).filter((key) => !config.features[key]),
+    ...(config.unprotectedAgent === agent ? ["unprotectedAgent"] : []),
+  ]
 }
 
 /**

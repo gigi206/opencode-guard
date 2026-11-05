@@ -14,6 +14,7 @@ import { RULE_FEATURES, TARGETED_RULES } from "../rules/features.ts"
 import { hasParentComponent } from "../rules/sensitive-paths.ts"
 import { INTERNAL_ERROR_RULE } from "../rules/types.ts"
 import { CliError, projectDirectory, readSources, realOrUndefined, resolution, type CliIo, type Sources } from "./context.ts"
+import { stillRelaxed } from "./show.ts"
 
 type Json = Record<string, unknown>
 const isObject = (value: unknown): value is Json => value !== null && typeof value === "object" && !Array.isArray(value)
@@ -472,11 +473,18 @@ export function writeAgent(io: CliIo, agent: string, changes: Readonly<Record<st
   if (refused.length) throw new CliError(`refused, nothing written: ${[...new Set(refused)].join("; ")}`)
   prune(data, target, "")
   write(guard, data)
-  const relaxed = resolution(io, sources, undefined, [{ label: "global guard.json", global: true, data }]).relaxations?.get(agent)
-  io.out(`agent ${agent}: ${relaxed ? (relaxed.guardOff ? "guard off" : [...relaxed.off].map((key) => `${key} off`).join(", ")) : "fully protected"}${relaxed ? ` on ${relaxed.models?.join(", ") || "any model"}` : ""}, in ${guard.path}`)
+  const files = [{ label: "global guard.json", global: true, data }]
+  const version = resolution(io, sources, undefined, files)
+  const relaxed = version.relaxations?.get(agent)
+  const { config } = parseConfig(sources.options, io.env, () => sources.declarations)
+  // A `projects` section of this file can hold a section of the agent too.
+  const projects = isObject(data.projects) ? Object.entries(data.projects).flatMap(([dir, entry]) => (isObject(entry) && isObject(entry.agents) && Object.hasOwn(entry.agents, agent) ? [dir] : [])) : []
+  const left = [...new Set([version, ...projects.map((dir) => resolution(io, sources, realOrUndefined(dir) ?? dir, files))].flatMap((each) => stillRelaxed(each, config, agent)))]
+  const state = [...(relaxed ? [`${relaxed.guardOff ? "guard off" : [...relaxed.off].map((key) => `${key} off`).join(", ")} on ${relaxed.models?.join(", ") || "any model"}`] : []), ...(left.length ? [`still relaxed: ${left.join(", ")}`] : [])]
+  io.out(`agent ${agent}: ${state.join("; ") || "fully protected"}, in ${guard.path}`)
 }
 
-/** `guard agent on`: every relaxation of the agent removed; its policy settings stay. */
+/** `guard agent on`: every relaxation of the agent's section removed; its policy settings stay, and are named if they relax. */
 export const agentOn = (io: CliIo, agent: string) => writeAgent(io, agent, Object.fromEntries(AGENT_ALL.map((key) => [key, undefined])))
 
 export function agentSwitch(io: CliIo, agent: string, key: string, raw: string): void {

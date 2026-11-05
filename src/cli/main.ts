@@ -190,6 +190,7 @@ function agentCommand(args: readonly string[], io: CliIo): void {
     }
     default:
       if (!rest.length) throw new UsageError("models needs at least one provider/model")
+      if (rest.some((model) => model.startsWith("-"))) throw new UsageError("a provider/model cannot start with -")
       return writeAgent(io, agent, { models: rest })
   }
 }

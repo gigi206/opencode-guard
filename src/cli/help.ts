@@ -54,7 +54,7 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "redaction off|on <format>", text: "turn a built-in redaction format off, or back on (top level only)" },
       { usage: "agent off <agent>", text: "no checks and no redaction for this agent, as selected by you, on the model it runs" },
       { usage: "  --model <provider/model>", text: "agent off only: limit it to this model (repeat for several)" },
-      { usage: "agent on <agent>", text: "take back everything relaxed for this agent" },
+      { usage: "agent on <agent>", text: "take back what guard agent relaxed for this agent, and name what else still relaxes it" },
       { usage: "agent set <agent> <key> <value>", text: "true or false for one protection of this agent: redactOutputs, redactPrompt, redactWire, outputCheck, promptCheck" },
       { usage: "agent unset <agent> <key>", text: "remove that key, or guard, or models" },
       { usage: "agent models <agent> <model>…", text: "limit what is relaxed for this agent to these provider/model" },

@@ -1,6 +1,6 @@
 // `guard last [N]`: the latest asks and denials of the plugin's log, with their time, rule and reason as logged. Same
 // file as the plugin (`logFile` included, checked the same way); read from the end, at most `TAIL_BYTES` of the current
-// file, then of its previous copy (`.1`) if it holds fewer.
+// file, then of its previous copy (`.1`) if it holds fewer. A previous copy the checks refuse is left out.
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs"
 import { defaultLogFile, parseConfig } from "../config.ts"
 import { checkedLogFile } from "../index.ts"
@@ -16,11 +16,11 @@ export const TAIL_BYTES = 2 * 1024 * 1024
 /** Decision line of the plugin: `<time> <LEVEL> <tool> → ask|deny (<source>[, rule <id>]…): <reason>`. */
 const DECISION = /^(\S+) [A-Z]+ (.*?) → (ask|deny) \(([^)]*)\): (.*)$/
 
-/** Lines of the end of the file; absent: `undefined`. */
+/** Lines of the end of the file; absent: `undefined`. Never through a final symbolic link, like the plugin's writes. */
 function tail(path: string): string[] | undefined {
   let fd: number
   try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0))
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0))
   } catch (error) {
     if ((error as { code?: unknown } | undefined)?.code === "ENOENT") return undefined
     throw new CliError(`${path} cannot be read`)
@@ -102,14 +102,26 @@ export function logLines(io: CliIo): { file: string; lines: string[]; previous: 
   const { config } = parseConfig(sources.options, io.env)
   const fallback = defaultLogFile(io.env)
   const protectedDirs = [PLUGIN_DIR, realOrUndefined(PLUGIN_DIR), sources.globalDir, sources.globalDir && realOrUndefined(sources.globalDir)].filter((dir): dir is string => !!dir)
-  const file = checkedLogFile(config.logFile, fallback, io.env.HOME, [...new Set(protectedDirs)], [], io.cwd)
+  const checked = (path: string | undefined, other: string | undefined) => checkedLogFile(path, other, io.env.HOME, [...new Set(protectedDirs)], [], io.cwd)
+  const file = checked(config.logFile, fallback)
   if (file === undefined) {
     if (config.logFile === undefined && fallback !== undefined) return { message: "The plugin writes no log file (logFile: false)." }
     throw new CliError("the plugin's log file is unknown: neither XDG_DATA_HOME nor HOME is set")
   }
   const lines = tail(file)
   if (lines === undefined) return { message: `No log file yet: ${file}` }
-  return { file, lines, previous: () => tail(`${file}.1`) ?? [] }
+  const previous = () => {
+    const copy = `${file}.1`
+    // The copy of the default log is the default for this check, as that log is; refused, the result is another path.
+    if (checked(copy, fallback && `${fallback}.1`) !== copy) return []
+    try {
+      return tail(copy) ?? []
+    } catch (error) {
+      if (error instanceof CliError) return []
+      throw error
+    }
+  }
+  return { file, lines, previous }
 }
 
 export function last(io: CliIo, count: number): void {

@@ -1,7 +1,7 @@
 // Plugin installed by OpenCode from a Git specifier: declaration, self-protection of the whole cache entry.
 import { strict as assert } from "node:assert"
 import { execFileSync, spawnSync } from "node:child_process"
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { after, describe, it } from "node:test"
@@ -95,5 +95,47 @@ describe("plugin installed from a Git specifier", () => {
     const run = spawnSync("sh", [target, "show"], { env: { ...process.env, OPENCODE_CONFIG_DIR: config }, encoding: "utf8" })
     assert.equal(run.status, 1)
     assert.match(run.stderr, /no Git specifier/)
+  })
+
+  const install = (bin: string) => spawnSync("sh", [join(import.meta.dirname, "..", "tools", "install-cli.sh")], { env: { ...process.env, GUARD_BIN_DIR: bin }, encoding: "utf8" })
+
+  it("refuses a target that is a directory: code 1, why, and nothing left", () => {
+    const bin = mkdtempSync(join(root, "bin-"))
+    mkdirSync(join(bin, "guard"))
+    const run = install(bin)
+    assert.equal(run.status, 1)
+  })
+
+  it("names the directory it refuses, and does not claim the install", () => {
+    const bin = mkdtempSync(join(root, "bin-"))
+    mkdirSync(join(bin, "guard"))
+    const run = install(bin)
+    assert.match(run.stderr, /guard is a directory: nothing installed/)
+  })
+
+  it("leaves no temporary file in a target that is a directory", () => {
+    const bin = mkdtempSync(join(root, "bin-"))
+    mkdirSync(join(bin, "guard"))
+    install(bin)
+    assert.deepEqual([readdirSync(bin), readdirSync(join(bin, "guard"))], [["guard"], []])
+  })
+
+  it("refuses a link to a directory: code 1", () => {
+    const bin = mkdtempSync(join(root, "bin-"))
+    symlinkSync(mkdtempSync(join(root, "dir-")), join(bin, "guard"))
+    assert.equal(install(bin).status, 1)
+  })
+
+  it("writes nothing through a link to a directory", () => {
+    const [bin, dir] = [mkdtempSync(join(root, "bin-")), mkdtempSync(join(root, "dir-"))]
+    symlinkSync(dir, join(bin, "guard"))
+    install(bin)
+    assert.deepEqual([readdirSync(dir), lstatSync(join(bin, "guard")).isSymbolicLink()], [[], true])
+  })
+
+  it("witness: a target that does not exist yet installs, its directory created", () => {
+    const bin = join(mkdtempSync(join(root, "bin-")), "new", "dir")
+    assert.equal(install(bin).status, 0)
+    assert.ok(lstatSync(join(bin, "guard")).isFile())
   })
 })
