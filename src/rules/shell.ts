@@ -5428,7 +5428,11 @@ function bareWord(text: string, i: number, stop: number, subs: ReadonlyArray<rea
 const ENV_WORD = /(?<![\w.$-])env["']?(?=\s)/g
 /** `-S`, in a group of letters that take no value, or `--split-string` possibly abbreviated; a string attached to it follows. */
 const SPLIT_OPTION = /^(?:-[iv0]*S|--s[a-z-]*(?:=|$))/
-const SPLIT_HINT = /-[iv0]*S|--s/
+/**
+ * Text that may hold such an option, in any writing of the shell: quotes, a `\` or a `$` between its characters (`-""Srm`,
+ * `--""split-string=`, `-i\S`), or a `$'…'` with an escape, which can spell any of them (`$'\x2dSrm'`).
+ */
+const SPLIT_HINT = /-[iv0"'\\$]*S|-["'\\$]*-["'\\$]*s|\$'[^']*\\/
 const BLANKS = /\s*/y
 /** Redirection between `env` and its options: the shell takes it away (`env 2>/dev/null -S…`). */
 const REDIRECTION_OPERATOR = /\d*(?:&>>?|[<>]{1,3}[&|]?)/y

@@ -303,6 +303,102 @@ describe("pieces of words that must stay what they are", () => {
   cases("none", [`tee '~/.b'ashrc`, `echo 'a|sudo'""`, `cat "(a)".e""nv`, `echo 'x;sudo'""`, `echo 'x&sudo'""`], "witness: quoted, not expanded nor an operator: ")
 })
 
+describe("the option of env -S in pieces reads as the plain word", () => {
+  /** The word cut at `at`, by a separator. */
+  const cut = (word: string, at: number, separator: string) => `${word.slice(0, at)}${separator}${word.slice(at)}`
+  const SEPARATORS = [`""`, `''`, `\\`]
+  /** Option word, places that were not read, places already read: the rest of the command follows it. */
+  const WORDS: ReadonlyArray<readonly [string, readonly number[], readonly number[]]> = [
+    ["-Srm", [1], [2]],
+    ["--split-string=rm", [1, 2], [3]],
+    ["--s=rm", [1, 2], [3]],
+    ["-iSrm", [1, 2], [3]],
+    ["-vSrm", [1, 2], [3]],
+  ]
+  for (const [word, unread, read] of WORDS)
+    for (const separator of SEPARATORS) {
+      cases("deny/rm-critical", unread.map((at) => `env ${cut(word, at, separator)} -rf /`))
+      cases("deny/rm-critical", read.map((at) => `env ${cut(word, at, separator)} -rf /`), "witness: already read: ")
+    }
+  cases("deny/rm-critical", [`env -""S rm -rf /`, `env --""split-string rm -rf /`, `env --""s rm -rf /`, `env -S"rm" -rf /`, `env -S""rm -rf /`, `env "-Srm" -rf /`, `env -'S'rm -rf /`, `env -"S"rm -rf /`], "witness: already read: ")
+
+  const option = `-""Srm -rf /`
+  cases("deny/rm-critical", [
+    `/usr/bin/env ${option}`,
+    `A=1 env ${option}`,
+    `timeout 5 env ${option}`,
+    `command env ${option}`,
+    `nohup env ${option}`,
+    `sudo env ${option}`,
+    `xargs env ${option}`,
+    `find . -exec env ${option} \;`,
+    `e""nv ${option}`,
+    `e\\nv ${option}`,
+    `"env" ${option}`,
+    `env -i ${option}`,
+    `env -u X ${option}`,
+    `env -C /tmp ${option}`,
+    `env -- ${option}`,
+    `env 2>/dev/null ${option}`,
+    `env -i 2>&1 ${option}`,
+    `echo ok; env ${option}`,
+    `echo $(env ${option})`,
+    `bash -c 'env ${option}'`,
+    `bash -c "env -\\"\\"Srm -rf /"`,
+    `bash -c 'env -\\Srm -rf /'`,
+    `bash -c 'env --\\split-string=rm -rf /'`,
+  ], "behind what leads to it: ")
+
+  cases("deny/rm-critical", [`env -\\Srm -rf /`, `env -i\\Srm -rf /`, `env -$''Srm -rf /`, `env -$""Srm -rf /`, `env -i$'v'Srm -rf /`, `env -0""Srm -rf /`, `env \\-\\-split-string=rm -rf /`], "the other writings: ")
+  cases("deny/rm-critical", [`env $'\\x2dSrm' -rf /`, `env $'\\055Srm' -rf /`, `env $'\\u002dSrm' -rf /`, `env $'-\\x2dsplit-string=rm' -rf /`], "spelled by the escapes of $'…': ")
+  cases("deny/dd-device", [`env -""Sdd of=/dev/sda`])
+  cases("ask/privilege", [`env -""Ssudo ls`, `env 2>/dev/null -""Ssudo ls`])
+  cases("ask/nested-opencode", [`env -""Sopencode serve`])
+  cases("ask/guard-cli", [`env -""Sguard off`])
+  cases("ask/protected-write", [`env -""Scp /tmp/x /etc/y`], "witness: the net of the protected places already asks: ")
+  cases("ask/secret-file-read", [`env -""Scat /w/.e""nv`], "witness: both in pieces, the file already read: ")
+
+  describe("a string not read to its end still asks", () => {
+    cases("ask/nested-opencode", [`env -""S"a \\"b\\" c"`, `env -""Senv -""Senv -""Senv -""S true`])
+    cases("ask/nested-opencode", [`env -S"a \\"b\\" c"`, `env -Senv -Senv -Senv -S true`], "witness: as the plain word: ")
+    cases("deny/rm-critical", [`env -""Senv -""Senv -""Srm -rf /`], "three levels, in pieces: ")
+    const spent = `${"env $(".repeat(31)}x${")".repeat(31)}`
+    cases("ask/nested-opencode", [`${spent}; env -""Srm -rf /`, `${spent}; env -""Ssudo ls`], "past the budget: ")
+    cases("deny/rm-critical", [`${spent}; env --""split-string=rm -rf /`], "past the budget, as the plain word: ")
+    cases("ask/nested-opencode", [`${spent}; env -Srm -rf /`], "witness: past the budget, the plain word: ")
+    cases("none", [`${spent}; echo x`], "witness: past the budget, nothing like an option: ")
+    it("the same reason as the plain word, never left to the model", () => {
+      const active: ActiveRules = { dangerousCommands: true, sensitiveFiles: true, localAsksByModel: true, selfProtectionByModel: true }
+      for (const [pieces, word] of [
+        [`env -""S"a \\"b\\" c"`, `env -S"a \\"b\\" c"`],
+        [`env -""Senv -""Senv -""Senv -""S true`, `env -Senv -Senv -Senv -S true`],
+      ] as const) {
+        const context = { ...plain, active }
+        const found = shellFinding(pieces, context)
+        assert.equal(found?.rule, "nested-opencode")
+        assert.equal(found?.reason, shellFinding(word, context)?.reason)
+        assert.equal(found?.modelDecides, undefined)
+      }
+    })
+  })
+
+  describe("an option of something else stays what it is", () => {
+    for (const [pieces, word] of [
+      [`echo -""Sx`, `echo -Sx`],
+      [`grep -""S x f`, `grep -S x f`],
+      [`ls -""S`, `ls -S`],
+      [`env -""u X y`, `env -u X y`],
+      [`sort -""S 1M f`, `sort -S 1M f`],
+      [`git log -""S foo`, `git log -S foo`],
+      [`env -""i ls`, `env -i ls`],
+      [`env -""v ls`, `env -v ls`],
+    ] as const) {
+      cases("none", [pieces, word], "witness: ")
+    }
+    cases("none", [`env ""`, `echo $'a\\n'; env ls`, `printf $'a\\n' -S`, `echo -$S`, `echo -"$S"`, `env A=1 -""Srm -rf /`, `env A=1 -Srm -rf /`], "witness: ")
+  })
+})
+
 describe("the reading stays linear", () => {
   const time = (command: string) => {
     const start = performance.now()
@@ -315,6 +411,13 @@ describe("the reading stays linear", () => {
     shellFinding(command, plain)
     assert.ok(withinBudget(start, 5000))
     assert.ok(time(`echo ${'a""b '.repeat(5_000)}`) < 5000)
+  })
+  it("witness: 40 000 options of env -S in pieces stay within the budget", () => {
+    for (const unit of [`env -""Sx `, `env -""S"a b" `, `-""`, `$'\\`, `env $'\\x2dSx' `]) {
+      const start = performance.now()
+      shellFinding(unit.repeat(40_000), plain)
+      assert.ok(withinBudget(start, 5000), unit)
+    }
   })
   it("witness: nested substitutions stay within the budget", () => {
     const command = `echo ${"$(echo ".repeat(40)}a""b${")".repeat(40)} `.repeat(500)
