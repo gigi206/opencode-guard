@@ -1,7 +1,7 @@
 import { closeSync, constants, existsSync, mkdirSync, openSync, renameSync, statSync, writeSync } from "node:fs"
 import { dirname } from "node:path"
 
-// Structural subset of `Plugin.Context` (@opencode/plugin 2.0.29) used by the plugin.
+// Structural subset of `Plugin.Context` (@opencode/plugin) used by the plugin.
 // The real context is assignable to it (verified by `tsc`), and tests can simulate it.
 
 export type Effect = "allow" | "ask" | "deny"
