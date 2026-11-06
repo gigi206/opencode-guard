@@ -76,7 +76,7 @@ echo "OPENAI_API_KEY=sk-proj-$(head -c 40 /dev/urandom | base64 | tr -dc A-Za-z0
   - OpenCode's direct generation (`Generate.text`, and in OpenCode 2.2 the text, image and decision generation of the server API and the `image_generate` tool, whose prompt the model writes), which has no hook and sends only what its caller provides (a secret in a tool's arguments is still refused before the call);
   - with OpenCode 2.2's "Claude Agent" provider, everything sent to it: it runs the local `claude` program instead of HTTP requests, so the wire safety net does not see its requests (what is redacted at the source, tool outputs and the prompt, stays redacted); Claude Code also keeps its own copy of the conversation; the plugin says in its log when this provider is connected;
   - images and most PDFs and Office documents (see “Files the plugin cannot read” below);
-  - encrypted contents and signed reasoning blocks;
+  - encrypted contents and signed reasoning blocks: a secret in a signed block leaves as it is, with a warning in the log (see “Signed blocks” in [the rules](rules.md));
   - voice calls: what a client sends to start a voice call or, in OpenCode 2.1, to change its instructions is relayed by the OpenCode server to the voice provider, outside the hooks;
   - raw files under OpenCode's `tool-output` data directory (full outputs of truncated tool results, shell command output files, binary contents returned by MCP tools), which are not sent unless read again;
   - in OpenCode 2.2, the raw output of a scheduled task's condition kept in its state, and the files of artifacts under OpenCode's data directory.

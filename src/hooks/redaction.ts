@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto"
 import * as zlib from "node:zlib"
-import { isSignedBlock, isToolArguments, PLACEHOLDER_KEYWORD, type Redactor } from "../secrets/redact.ts"
+import { isSignedBlock, isToolArguments, PLACEHOLDER_KEYWORD, signedContent, type Redactor } from "../secrets/redact.ts"
 import { redactToolError } from "../secrets/errors.ts"
 import { PROMPT_NOTE } from "../secrets/prompt.ts"
 import { CODEMODE_TOOL } from "../rules/tools.ts"
@@ -157,6 +158,51 @@ function replaceTexts<T>(value: T, masked: ReadonlyMap<string, string>, depth = 
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, replaceTexts(item, masked, depth + 1)])) as T
 }
 
+/** Blocks and secrets remembered by `signedBlockCheck`, oldest dropped first: about 1 MB at most. */
+const SIGNED_SEEN_MAX = 8192
+
+/**
+ * Signed blocks leave as they are: a secret in one is reported in the log, by type and number only. These blocks come back
+ * in every request of a session: a block already looked at costs its hash, and a secret is reported once per session. The
+ * returned function never throws and changes nothing in the request.
+ */
+function signedBlockCheck(redactor: Redactor, log: Logger) {
+  const seen = new Set<string>()
+  const isNew = (sessionID: string | undefined, text: string) => {
+    const mark = createHash("sha256").update(`${sessionID ?? ""}\u0000`).update(text).digest("base64")
+    const known = seen.delete(mark)
+    seen.add(mark)
+    if (seen.size > SIGNED_SEEN_MAX) seen.delete(seen.values().next().value!)
+    return !known
+  }
+  return (blocks: ReadonlySet<Record<string, unknown>>, sessionID: string | undefined, hook: string) => {
+    try {
+      const found = new Map<string, number>()
+      try {
+        for (const block of blocks) {
+          const content = signedContent(block)
+          if (!isNew(sessionID, JSON.stringify(content))) continue
+          redactor.redactDeep(content, {
+            onSecret: (type, value) => {
+              if (isNew(sessionID, value)) found.set(type, (found.get(type) ?? 0) + 1)
+            },
+          })
+        }
+      } finally {
+        // Also after an error: these blocks and secrets are marked, nothing would report them later.
+        if (found.size) {
+          const total = [...found.values()].reduce((sum, count) => sum + count, 0)
+          log.warn(`${hook}: ${total} secret(s) in signed blocks sent unmasked (${[...found].map(([type, count]) => `${type} x${count}`).join(", ")})`)
+        }
+      }
+    } catch (error) {
+      try {
+        log.error(`internal error in ${hook}: signed blocks not checked`, error)
+      } catch {}
+    }
+  }
+}
+
 export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps): Promise<void> {
   const { redactor, log } = deps
 
@@ -263,6 +309,17 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
     warned.add(`${hook}\u0000${cause}`)
     log.warn(`${hook}: ${cause}: ${hook === "http.request" ? "request body" : "frame"} not inspected, secrets NOT redacted`)
   }
+  const checkSigned = signedBlockCheck(redactor, log)
+  /** Technical redaction of a body; the signed blocks it left out go to `checkSigned` once the request is cleared to leave. */
+  const redactBody = (json: unknown) => {
+    const signed = new Set<Record<string, unknown>>()
+    const skip = (node: Record<string, unknown>) => {
+      if (!isSignedBlock(node)) return false
+      signed.add(node)
+      return true
+    }
+    return { redacted: redactor.redactDeep(json, { skip, unskippable: isToolArguments }), signed }
+  }
   /**
    * `!` command texts of a technically redacted body checked by the decision model; `undefined` when nothing changes. A
    * model failure blocks the request (`UserShellUncheckedError`), the user's choice: nothing unchecked leaves.
@@ -323,8 +380,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
         notInspected(codec ? `${encoding} body could not be decoded` : "body is not valid JSON")
         return
       }
-      const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+      const { redacted, signed } = redactBody(json)
       const checked = await userShell(redacted.value, "http.request", relaxed)
+      checkSigned(signed, event.sessionID, "http.request")
       const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
       if (!result.count) return
       const headers = new Headers(request.headers)
@@ -352,8 +410,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
           notInspected("frame is not valid JSON", "experimental.ws.send")
           return
         }
-        const redacted = redactor.redactDeep(json, { skip: isSignedBlock, unskippable: isToolArguments })
+        const { redacted, signed } = redactBody(json)
         const checked = await userShell(redacted.value, "experimental.ws.send", relaxed)
+        checkSigned(signed, event.sessionID, "experimental.ws.send")
         const result = checked ? { value: checked.value, count: redacted.count + checked.count } : redacted
         if (!result.count) return
         event.frame = JSON.stringify(result.value)

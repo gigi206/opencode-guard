@@ -25,6 +25,11 @@ export interface RedactDeepOptions {
   readonly skip?: (node: Record<string, unknown>) => boolean
   /** Children (key of a non-skipped object) under which `skip` no longer applies, e.g. tool call arguments. */
   readonly unskippable?: (parent: Record<string, unknown>, key: string) => boolean
+  /**
+   * Look at a value that stays as it is (a signed block): each secret found is reported here, its real type and value even
+   * inside base64 or a hexadecimal dump, and nothing is learned, so that later redactions do not change.
+   */
+  readonly onSecret?: (type: string, value: string) => void
 }
 
 export interface Redactor {
@@ -341,6 +346,8 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
   const learned = new Map<string, string>()
   let runtime: readonly NamedSecret[] = []
   let known = buildKnown()
+  /** `onSecret` of the running `redactDeep`: synchronous, and nested calls put it back. */
+  let report: RedactDeepOptions["onSecret"]
 
   function buildKnown(): KnownValues {
     const values = new Set<string>()
@@ -368,6 +375,7 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
       if (!present.has(item)) continue
       out = out.replace(item.regex, () => {
         count++
+        report?.(item.type, item.value)
         return placeholder(item.type)
       })
     }
@@ -389,8 +397,15 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
   }
 
   function redactString(text: string): RedactResult<string> {
-    refresh()
-    return redactText(text, 0)
+    // Called during a look too: a log line written while `refresh` reads the service files, redacted as any other.
+    const outer = report
+    report = undefined
+    try {
+      refresh()
+      return redactText(text, 0)
+    } finally {
+      report = outer
+    }
   }
 
   /**
@@ -463,6 +478,7 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
             const secret = pattern.trim ? pattern.trim(fragment) : fragment
             if (secret.length < 3 || allow.has(secret) || (pattern.accept && !pattern.accept(secret, groups))) return fragment
             count++
+            report?.(pattern.type, secret)
             // Trimmed value at the start of the fragment (after a possible opener): not a repetition further on.
             const at = fragment.indexOf(secret)
             return fragment.slice(0, at) + placeholder(pattern.type) + fragment.slice(at + secret.length)
@@ -475,7 +491,8 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
         if (!secret || allow.has(secret)) return match
         if (pattern.accept && !pattern.accept(secret, groups)) return match
         count++
-        if (pattern.learn && !learned.has(secret) && learned.size < MAX_LEARNED) fresh.push([secret, pattern.type])
+        report?.(pattern.type, secret)
+        if (!report && pattern.learn && !learned.has(secret) && learned.size < MAX_LEARNED) fresh.push([secret, pattern.type])
         // Position in the capture (last occurrence in the match: the capture is at the end of the pattern, followed by
         // at most one closing quote): the trimmed value is at its start, after a possible opener (`trimBrackets`); a
         // search in the whole match would find a repetition further on.
@@ -542,6 +559,16 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
   }
 
   function redactDeep<T>(value: T, deepOptions: RedactDeepOptions = {}): RedactResult<T> {
+    const outer = report
+    report = deepOptions.onSecret
+    try {
+      return redactTree(value, deepOptions)
+    } finally {
+      report = outer
+    }
+  }
+
+  function redactTree<T>(value: T, deepOptions: RedactDeepOptions): RedactResult<T> {
     // Copy memoized per object and per skip state: a shared reference (`{a: X, b: X}`) receives the same
     // redacted copy everywhere, and not the original at its second occurrence.
     refresh()
@@ -637,6 +664,15 @@ export function isSignedBlock(node: Record<string, unknown>): boolean {
   // Google Interactions marks an unsigned call with the same sentinel as Gemini (OpenCode 2.2.5): not a signature.
   if ("signature" in node && node.signature !== GEMINI_NO_SIGNATURE) return true
   return "thoughtSignature" in node && node.thoughtSignature !== GEMINI_NO_SIGNATURE
+}
+
+/**
+ * What can be read in a signed block: without its signature and encrypted content, random text that nothing reads and
+ * where a format matches by accident (url-safe base64 of 20 KB: at most a few strings in 1,000, the measurements differ).
+ */
+export function signedContent(node: Record<string, unknown>): Record<string, unknown> {
+  const opaque = (key: string) => key === "signature" || key === "thoughtSignature" || key === "encrypted_content" || (key === "data" && node.type === "redacted_thinking")
+  return Object.fromEntries(Object.entries(node).filter(([key, item]) => !(typeof item === "string" && opaque(key))))
 }
 
 /**
