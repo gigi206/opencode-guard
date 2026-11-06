@@ -1,6 +1,6 @@
 {
   "name": "opencode-guard",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "OpenCode V2 plugin: blocks or asks for confirmation before dangerous agent actions (local rules + a System One decision model) and redacts secrets sent to the LLM",
   "type": "module",
