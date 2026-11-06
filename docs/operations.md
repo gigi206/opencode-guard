@@ -166,7 +166,7 @@ echo "OPENAI_API_KEY=sk-proj-$(head -c 40 /dev/urandom | base64 | tr -dc A-Za-z0
 
 ```sh
 npm test            # node --test (Node ≥ 22.18, native TypeScript stripping)
-npm run test:bun    # same tests with the Bun embedded in opencode (BUN_BE_BUN=1 opencode test)
+npm run test:bun    # same tests with the Bun embedded in opencode (BUN_BE_BUN=1 opencode test --timeout 120000)
 npm install         # dev dependencies only (types and compiler); nothing is needed at runtime
 npm run typecheck   # tsc --noEmit
 ```
