@@ -166,7 +166,7 @@ describe("batch 43: OpenCode service secrets (values read from its files)", () =
     assert.ok(values.some((secret) => secret.value === main))
   })
 
-  it("repeated reads: no file descriptor left open", async () => {
+  it("repeated reads: no file descriptor left open", { skip: process.platform !== "linux" }, async () => {
     const home = serviceHome()
     const source = serviceSecretSource(serviceDirectories(home.env))
     const open = () => readdirSync("/proc/self/fd").length

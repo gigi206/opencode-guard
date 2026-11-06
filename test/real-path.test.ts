@@ -69,7 +69,7 @@ describe("batch 24: link resolution, component by component", () => {
     assert.equal(real(`/${"x".repeat(5000)}`), LIMIT_REACHED)
   })
 
-  it("/proc/self: caller and server directories for cwd, root for root, unknown otherwise", () => {
+  it("/proc/self: caller and server directories for cwd, root for root, unknown otherwise", { skip: process.platform !== "linux" }, () => {
     const { plugin, work } = workspace()
     const real = (directories: string[]) => createRealPath({ directories, processDirectory: work })
     assert.deepEqual(real([join(work, "abs")])("/proc/self/cwd/f"), [join(plugin, "f"), join(work, "f")])
@@ -166,7 +166,7 @@ describe("batch 24: decider and subcommands, depending on the option", () => {
     assert.equal(viaScript.rule, "self-protection")
   })
 
-  it("write tool via /proc/self/cwd: server directory, where the plugin is imported", async () => {
+  it("write tool via /proc/self/cwd: server directory, where the plugin is imported", { skip: process.platform !== "linux" }, async () => {
     const { plugin, work } = workspace()
     const { config } = parseConfig({})
     const linked = createDecider({ config, redactor: createRedactor(), protectedDirs: [plugin], resolveLinks: true })

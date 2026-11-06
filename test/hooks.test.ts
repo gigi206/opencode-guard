@@ -1251,7 +1251,7 @@ describe("lot 27: log, logFile, internal gate tables", () => {
     const { checkedLogFile } = await import("../src/index.ts")
     const home = "/home/u"
     const plugin = "/opt/guard-plugin"
-    const check = (file: string, fallback = "/home/u/.local/share/opencode/log/guard.log", cwd = "/tmp") => {
+    const check = (file: string, fallback = "/home/u/.local/share/opencode/log/guard.log", cwd = "/srv/app") => {
       const warnings: string[] = []
       return { result: checkedLogFile(file, fallback, home, [plugin], warnings, cwd), warnings }
     }
@@ -1274,7 +1274,8 @@ describe("lot 27: log, logFile, internal gate tables", () => {
       warnings: ["logFile refused (it is a protected location): logging to the default log file"],
     })
     assert.deepEqual(check("logs/guard.log").warnings, [])
-    assert.equal(check("/var/log/guard/guard.log").result, "/var/log/guard/guard.log")
+    // `/var` is a link on macOS, refused for its own reason.
+    if (process.platform === "linux") assert.equal(check("/var/log/guard/guard.log").result, "/var/log/guard/guard.log")
     // Default accepted even if it falls in a protected location (otherwise the fallback would loop on itself).
     assert.deepEqual(check("/etc/guard/guard.log", "/etc/guard/guard.log"), { result: "/etc/guard/guard.log", warnings: [] })
     assert.deepEqual(check("/etc/guard/./guard.log", "/etc/guard/guard.log").warnings, [])
