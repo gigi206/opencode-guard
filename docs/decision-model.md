@@ -158,6 +158,7 @@ The [prompt check](#prompt-check-promptcheck) and the [output check](#output-che
 |---|---|---|---|---|
 | `nox-4b` | the defaults (`threshold` 0.2, `verify` 0.6, `askScore` 0.6, `partChars` 2000, `candidates` 1) | 5 to 6 %, 2 to 8 % | `threshold` 0.2: 13 of 235 secrets missed, 1 real output in 127 flagged | the defaults; whole output chain at these settings: 19 of 195 secrets missed, no real output masked whole |
 | `d3-mini` | `{ "threshold": 0.5, "verify": 0.9, "askScore": 0.5, "partChars": 1500, "candidates": 2 }` | 1 to 1.5 %, 0 to 1.2 % | `threshold` 0.1 to 0.3: 4 to 7 missed, 0 to 1 real output flagged | separates passwords from ordinary words much better than `nox-4b`, about ten times more slowly |
+| `d3-ultra` | `{ "threshold": 0.5, "askScore": 0.5, "partChars": 1500 }` | 0 %, 0 % | — | synthetic prompts only, no real prompt run; 180 of 426 secrets end in a confirmation rather than masked |
 | `d3-flash` | — | — | `threshold` 0.2: 4 missed, no real output flagged | |
 | `d3-nano` | — | — | `threshold` 0.1 (parts of 1,000): 18 missed, 23 real outputs in 263 flagged | below `nox-4b` |
 | `d3-lite`, `d3-edge` | — | — | over 70 missed, or hundreds of outputs flagged | not usable for the checks |
