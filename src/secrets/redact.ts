@@ -1,6 +1,6 @@
 import { constants as zlibConstants, gunzipSync, inflateRawSync } from "node:zlib"
 import { type NamedSecret, OPENCODE_PATTERNS } from "./opencode-service.ts"
-import { BUILTIN_PATTERNS, envSecretValues, MIN_KNOWN_SECRET, type SecretPattern } from "./patterns.ts"
+import { BUILTIN_PATTERNS, envSecretValues, MIN_KNOWN_SECRET, type SecretPattern, VALUE_ENDS } from "./patterns.ts"
 
 // Type bounded to 256 characters: without the bound, every unclosed marker in a long text scanned everything that followed it.
 // `placeholder` always produces a recognized type (at most 200 characters, without `]`); those of existing sessions are
@@ -463,7 +463,10 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
     const fresh: Array<[string, string]> = []
     for (const pattern of patterns) {
       if (pattern.hint && !pattern.hint.test(out)) continue
-      out = out.replace(pattern.regex, (...args: unknown[]) => {
+      // What a pattern took past a value cut short may hold a neighbor (`f(password=X,token=Y)`): read again in pieces, one
+      // per possible end of a value (`VALUE_ENDS`), which keeps the reading linear, unlike a read of the whole rest.
+      const reread = (rest: string): string => rest && rest.split(VALUE_ENDS).map(scan).join("")
+      const scan = (part: string): string => part.replace(pattern.regex, (...args: unknown[]) => {
         const match = args[0] as string
         const last = args[args.length - 1]
         const groups = (typeof last === "object" && last !== null ? last : undefined) as
@@ -476,29 +479,31 @@ export function createRedactor(options: RedactorOptions = {}): AdjustableRedacto
           const rebuilt = captured.replace(PLACEHOLDER_FRAGMENTS, (fragment: string) => {
             if (PLACEHOLDER_RE.test(fragment)) return fragment
             const secret = pattern.trim ? pattern.trim(fragment) : fragment
-            if (secret.length < 3 || allow.has(secret) || (pattern.accept && !pattern.accept(secret, groups))) return fragment
-            count++
-            report?.(pattern.type, secret)
             // Trimmed value at the start of the fragment (after a possible opener): not a repetition further on.
             const at = fragment.indexOf(secret)
-            return fragment.slice(0, at) + placeholder(pattern.type) + fragment.slice(at + secret.length)
+            const rest = reread(fragment.slice(at + secret.length))
+            if (secret.length < 3 || allow.has(secret) || (pattern.accept && !pattern.accept(secret, groups))) return fragment.slice(0, at + secret.length) + rest
+            count++
+            report?.(pattern.type, secret)
+            return fragment.slice(0, at) + placeholder(pattern.type) + rest
           })
           if (rebuilt === captured) return match
           const at = match.lastIndexOf(captured)
           return match.slice(0, at) + rebuilt + match.slice(at + captured.length)
         }
         const secret = pattern.trim ? pattern.trim(captured) : captured
-        if (!secret || allow.has(secret)) return match
-        if (pattern.accept && !pattern.accept(secret, groups)) return match
-        count++
-        report?.(pattern.type, secret)
-        if (!report && pattern.learn && !learned.has(secret) && learned.size < MAX_LEARNED) fresh.push([secret, pattern.type])
         // Position in the capture (last occurrence in the match: the capture is at the end of the pattern, followed by
         // at most one closing quote): the trimmed value is at its start, after a possible opener (`trimBrackets`); a
         // search in the whole match would find a repetition further on.
         const at = match.lastIndexOf(captured) + captured.indexOf(secret)
-        return match.slice(0, at) + placeholder(pattern.type) + match.slice(at + secret.length)
+        const rest = reread(match.slice(at + secret.length))
+        if (!secret || allow.has(secret) || (pattern.accept && !pattern.accept(secret, groups))) return match.slice(0, at + secret.length) + rest
+        count++
+        report?.(pattern.type, secret)
+        if (!report && pattern.learn && !learned.has(secret) && learned.size < MAX_LEARNED) fresh.push([secret, pattern.type])
+        return match.slice(0, at) + placeholder(pattern.type) + rest
       })
+      out = scan(out)
     }
     // Learned value: also redacted where it appears alone in the same text, then everywhere afterwards.
     if (fresh.length) {

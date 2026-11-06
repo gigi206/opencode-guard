@@ -88,6 +88,9 @@ export function isWordLike(value: string): boolean {
   return /^[A-Za-z]+$/.test(value) && !/[A-Z](?![a-z]{2})/.test(value) && /^(?:[a-z]{2}|[A-Z][a-z]{2})/.test(value)
 }
 
+/** Where a keyword starts, the .NET `PublicKeyToken` and its value, 16 hexadecimal digits: it names a public key, no other value does. */
+const NOT_DOTNET_PUBLIC_KEY = `(?!(?<=public[_.-]?key[_.-]?)token["']?\\s*[:=]\\s*["']?[0-9a-f]{16}(?![^\\s"'\`;,)\\]<]))`
+
 /** Keywords of a secret name. */
 const SECRET_WORDS = "api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|passphrase|pwd|credential|auth[_-]?key|private[_-]?key"
 
@@ -97,7 +100,7 @@ const SECRET_WORDS = "api[_-]?key|access[_-]?key|secret|token|passw(?:or)?d|pass
  * scan at every word start of a long run without whitespace (`a-a-a-…`: 4.6 s for 50 KB under Bun; `token-token-…`:
  * 40 s for 12.5 KB).
  */
-const SECRET_NAME = `(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,128}`
+const SECRET_NAME = `${NOT_DOTNET_PUBLIC_KEY}(?:${SECRET_WORDS})[A-Za-z0-9_.-]{0,128}`
 
 /** The tags that HTML writes without a closing tag, or that end a value in a page written by hand. */
 const HTML_TAG = /<(?:br|hr|td|tr|th|li|p|div|span|b|i|a|ul|ol|table|code|pre)>/
@@ -134,6 +137,12 @@ export function trimAssignedValue(value: string): string {
     ),
   )
 }
+
+/**
+ * Every point where `trimAssignedValue` or `beforeMarkup` may cut a value, any `<` counting as a tag, `]]>` after it so that
+ * it does not split a marker: the rest is read again from there. One left out makes that reading quadratic.
+ */
+export const VALUE_ENDS = /(?=,[A-Za-z_][\w.-]*\s*[:=]|\\[nrt]|<)|(?<=\]\]>)/
 
 /**
  * Names ending in `key` whose value is not a secret (database, cache and storage keys, public keys, the WebSocket handshake

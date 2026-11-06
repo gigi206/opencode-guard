@@ -272,8 +272,9 @@ export async function registerRedaction(ctx: GuardContext, deps: RedactionDeps):
         let count = result.count
         if (count) event.prompt.text = text
         if (deps.promptCheck && !relaxed?.has("promptCheck")) {
-          // Words in plain language (`mon mot de passe est soleil42`), any language: the decision model. It never sees
-          // a known secret, even when the agent's own model may: then it only decides whether the prompt leaves.
+          // Words in plain language (`mon mot de passe est soleil42`), any language: the decision model. With `redactPrompt` on,
+          // it sees no known secret, even when a relaxation lets the agent's own model see one: then it only decides whether
+          // the prompt leaves. With `redactPrompt: false` in the configuration, it reads the prompt as typed.
           const clear = relaxed?.has("redactPrompt")
           const checked = await deps.promptCheck.check(event, clear ? redactor.redactString(text).value : text)
           if (!clear) {
