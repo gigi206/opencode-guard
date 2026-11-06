@@ -60,6 +60,7 @@ ${values}
         if [[ $COMP_CWORD -eq 2 ]]; then words=$settings
         elif [[ " ${words(AGENT_KEYS)} " == *" $sub "* ]]; then words="--project"
         else words="--agent --project"; fi ;;
+      agent) [[ $COMP_CWORD -eq 2 ]] && words="off on set unset models" ;;
       show) words="--agent --offline" ;;
       settings) words="--agent --explain" ;;
       status) words="--offline" ;;

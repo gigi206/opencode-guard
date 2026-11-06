@@ -8,7 +8,7 @@ import { parseConfig, RELAX_SWITCHES, type GuardConfig, type Version } from "../
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { declaredOutputCheck } from "../output-check.ts"
 import { UNSEEN_CONTENT_RULES } from "../rules/features.ts"
-import { PLUGIN_DIR, readSources, realOrUndefined, resolution, serverEnv, type CliIo, type Pretty, type Sources } from "./context.ts"
+import { PLUGIN_DIR, readSources, realOrUndefined, resolution, resolved, serverEnv, type CliIo, type Pretty, type Sources } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment, Style } from "./style.ts"
 import { pluginVersion, runGit } from "./version.ts"
@@ -53,7 +53,9 @@ function showSettings(io: CliIo, agent: string | undefined, offline: boolean): v
   // Exceptions apart: a path would widen every column of the settings.
   const settings = [...rows.filter((row) => !row.key.startsWith(EXCEPTIONS)), ...patterns.rows, ...formatsOff]
   const exceptions = rows.filter((row) => row.key.startsWith(EXCEPTIONS)).map((row) => ({ rule: row.key.slice(EXCEPTIONS.length), path: String(row.value), origin: row.origin }))
-  const warnings = [...version.warnings, ...patterns.warnings]
+  // Read with the server's environment, as `guard settings` counts them: each warning it announces is listed here.
+  const served = { ...io, env: serverEnv(io.env, sources.globalDir) }
+  const warnings = [...new Set([...version.warnings, ...resolved(served, readSources(served), directory, files).warnings, ...patterns.warnings])]
   if (io.pretty)
     return prettyShow(io.pretty, {
       title: `${directory}${agent === undefined ? "" : `, main agent ${agent}`}`,
@@ -83,19 +85,24 @@ function showSettings(io: CliIo, agent: string | undefined, offline: boolean): v
 
 const READ_AT_START: readonly string[] = RELAX_SWITCHES
 
+/** Why a check that is on finds no model it may use (undefined: it runs). */
+export function checkIdle(io: CliIo, sources: Sources, version: Version) {
+  const env = serverEnv(io.env, sources.globalDir)
+  const served = readSources({ ...io, env })
+  const { config } = parseConfig(served.options, env, () => served.declarations)
+  return (option: "outputCheck" | "promptCheck") => {
+    const enabledBySection = version.sectionChecks?.includes(option) ?? false
+    const state = version.base.decisionModel && config.decision ? declaredOutputCheck({ option, enabledBySection, pluginDir: PLUGIN_DIR, effectiveBaseURL: config.decision.baseURL, globalDir: sources.globalDir, systemDir: io.systemDir, env }) : { active: false, reason: "no decision model" }
+    return state.active ? undefined : state.reason
+  }
+}
+
 /**
  * The settings, with what the files alone cannot say. The switches read at start say so (the running plugin may hold
  * another value: its state is not known here). A check that is on but finds no model it may use does not show as on.
  */
 function startRows(io: CliIo, sources: Sources, version: Version, agent: string | undefined) {
-  const env = serverEnv(io.env, sources.globalDir)
-  const served = readSources({ ...io, env })
-  const { config } = parseConfig(served.options, env, () => served.declarations)
-  const idle = (option: "outputCheck" | "promptCheck") => {
-    const enabledBySection = version.sectionChecks?.includes(option) ?? false
-    const state = version.base.decisionModel && config.decision ? declaredOutputCheck({ option, enabledBySection, pluginDir: PLUGIN_DIR, effectiveBaseURL: config.decision.baseURL, globalDir: sources.globalDir, systemDir: io.systemDir, env }) : { active: false, reason: "no decision model" }
-    return state.active ? undefined : state.reason
-  }
+  const idle = checkIdle(io, sources, version)
   return (version.settings?.(agent) ?? []).map((row) => {
     if (!READ_AT_START.includes(row.key)) return row
     const reason = row.value === true && (row.key === "outputCheck" || row.key === "promptCheck") ? idle(row.key) : undefined

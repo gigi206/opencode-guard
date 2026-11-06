@@ -3,9 +3,8 @@
 // file, then of its previous copy (`.1`) if it holds fewer. A previous copy the checks refuse is left out.
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs"
 import { defaultLogFile, parseConfig } from "../config.ts"
-import { checkedLogFile } from "../index.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
-import { CliError, PLUGIN_DIR, readSources, realOrUndefined, type CliIo, type Pretty } from "./context.ts"
+import { checkedLog, CliError, readSources, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
 import type { Segment } from "./style.ts"
 
@@ -101,8 +100,7 @@ export function logLines(io: CliIo): { file: string; lines: string[]; previous: 
   const sources = readSources(io)
   const { config } = parseConfig(sources.options, io.env)
   const fallback = defaultLogFile(io.env)
-  const protectedDirs = [PLUGIN_DIR, realOrUndefined(PLUGIN_DIR), sources.globalDir, sources.globalDir && realOrUndefined(sources.globalDir)].filter((dir): dir is string => !!dir)
-  const checked = (path: string | undefined, other: string | undefined) => checkedLogFile(path, other, io.env.HOME, [...new Set(protectedDirs)], [], io.cwd)
+  const checked = (path: string | undefined, other: string | undefined) => checkedLog(io, sources, path, other)
   const file = checked(config.logFile, fallback)
   if (file === undefined) {
     if (config.logFile === undefined && fallback !== undefined) return { message: "The plugin writes no log file (logFile: false)." }

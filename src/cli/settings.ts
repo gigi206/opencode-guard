@@ -5,13 +5,22 @@
 // such an entry has a `shown` that gives only its state. Options merged from a project's opencode.json are not seen.
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { DEFAULT_DECISION, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_CHECK, DEFAULT_PROMPT_TUNING, parseConfig, resolveVersion, type GuardConfig } from "../config.ts"
+import { DEFAULT_DECISION, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_CHECK, DEFAULT_PROMPT_TUNING, defaultLogFile, parseConfig, resolveVersion, type GuardConfig, type Version } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { isRegularFile } from "../real-path.ts"
-import { CliError, readSources, realOrUndefined, serverEnv, type CliIo, type Pretty } from "./context.ts"
+import { checkedLog, CliError, readSources, realOrUndefined, resolved, serverEnv, type CliIo, type Pretty } from "./context.ts"
 import { heading, rowLines, title } from "./pretty.ts"
-import { configurationFile } from "./show.ts"
+import { checkIdle, configurationFile } from "./show.ts"
 import type { Style } from "./style.ts"
+
+/** What only the resolved reading knows; absent when an entry reads the defaults. */
+interface InForce {
+  readonly version: Version
+  /** Rules set for the agent asked. */
+  readonly ruleOverrides: readonly string[]
+  /** As the plugin keeps it: a refused path gives way to the default log. */
+  readonly logFile: string | undefined
+}
 
 export interface SettingEntry {
   readonly name: string
@@ -24,7 +33,7 @@ export interface SettingEntry {
   readonly where: string
   /** When a value that loosens a protection counts. */
   readonly relaxing?: string
-  readonly read: (config: GuardConfig) => unknown
+  readonly read: (config: GuardConfig, inForce?: InForce) => unknown
   /** Instead of the value: a secret, or a list too long for a row. */
   readonly shown?: (value: unknown) => string
 }
@@ -35,6 +44,9 @@ const POLICY = "plugin options, guard.json, or an agent or project section of it
 const SWITCH_RELAX = "false counts only if the global or system configuration sets it too, or a matching projects section of a global source; a project may only set it to true"
 const POLICY_SWITCH_RELAX = `${SWITCH_RELAX}, unless it is trusted`
 const CHECK_RELAX = "false counts only if the global or system configuration sets it too, or a matching projects section of a global source; a project's true turns it back on only where a global source leaves it on"
+const TRUSTED = "or in a trusted project"
+const MODEL_RELAX = `a project's value counts only if the global side sets no decision model, ${TRUSTED}`
+const JUDGED_RELAX = `less strict, a project's value counts only if the global side sets neither it nor a decision model, ${TRUSTED}`
 const SAME_VALUE = "kept only if the global or system configuration sets the same value; otherwise the default"
 const count = (noun: string) => (value: unknown) => {
   const size = Array.isArray(value) ? value.length : value instanceof Map ? value.size : value !== null && typeof value === "object" ? Object.keys(value).length : 0
@@ -59,6 +71,7 @@ const threshold = (name: keyof GuardConfig["thresholds"], max: number, what: str
   range: [0, max],
   what,
   where: PLUGIN,
+  relaxing: JUDGED_RELAX,
   read: (config) => config.thresholds[name],
 })
 
@@ -86,13 +99,13 @@ const tuning = (check: "outputCheck" | "promptCheck", keys: readonly string[]): 
   }))
 
 export const SETTING_ENTRIES: readonly SettingEntry[] = [
-  { name: "askAs", type: "string", values: [["ask", "confirmations are asked"], ["deny", "every confirmation becomes a refusal (unattended mode)"]], what: "What a confirmation request becomes. Case does not matter; empty means ask.", where: PLUGIN, read: (config) => config.askAs },
-  { name: "decision.baseURL", type: "string (URL)", what: "Versioned address of the decision model, without the final path. Missing or invalid: the model is disabled, only the local rules apply.", where: PLUGIN, read: (config) => config.decision?.baseURL },
-  { name: "decision.protocol", type: "string", values: [["chat", "OpenAI-compatible gateway"], ["systemone", "direct System One API"]], what: "Protocol of the decision model.", where: PLUGIN, read: (config) => config.decision?.protocol },
-  { name: "decision.model", type: "string", what: "Model name. Missing or empty: the decision model is disabled.", where: PLUGIN, read: (config) => config.decision?.model },
-  { name: "decision.apiKey", type: "string", what: "Key sent as a Bearer header, normally a reference such as {env:NAME}. Never printed.", where: PLUGIN, read: (config) => config.decision?.apiKey, shown: isSet },
-  { name: "decision.timeoutMs", type: "integer", range: [100, 60_000], what: "Timeout per call, in ms. A call that times out is retried once.", where: PLUGIN, read: (config) => config.decision?.timeoutMs },
-  { name: "decision.headers", type: "object", what: "Extra HTTP headers. Values are never printed.", where: PLUGIN, read: (config) => config.decision?.headers, shown: count("header") },
+  { name: "askAs", type: "string", values: [["ask", "confirmations are asked"], ["deny", "every confirmation becomes a refusal (unattended mode)"]], what: "What a confirmation request becomes. Case does not matter; empty means ask.", where: PLUGIN, relaxing: "a project's ask over a global deny counts only in a trusted project", read: (config) => config.askAs },
+  { name: "decision.baseURL", type: "string (URL)", what: "Versioned address of the decision model, without the final path. Missing or invalid: the model is disabled, only the local rules apply.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.baseURL },
+  { name: "decision.protocol", type: "string", values: [["chat", "OpenAI-compatible gateway"], ["systemone", "direct System One API"]], what: "Protocol of the decision model.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.protocol },
+  { name: "decision.model", type: "string", what: "Model name. Missing or empty: the decision model is disabled.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.model },
+  { name: "decision.apiKey", type: "string", what: "Key sent as a Bearer header, normally a reference such as {env:NAME}. Never printed.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.apiKey, shown: isSet },
+  { name: "decision.timeoutMs", type: "integer", range: [100, 60_000], what: "Timeout per call, in ms. A call that times out is retried once.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.timeoutMs },
+  { name: "decision.headers", type: "object", what: "Extra HTTP headers. Values are never printed.", where: PLUGIN, relaxing: MODEL_RELAX, read: (config) => config.decision?.headers, shown: count("header") },
   threshold("denyNoul", 1, "Deny when a probability reaches this."),
   threshold("askNoul", 1, "Ask when a probability reaches this."),
   threshold("askExfiltration", 1, "Ask when the exfiltration probability reaches this; never below askNoul."),
@@ -106,25 +119,25 @@ export const SETTING_ENTRIES: readonly SettingEntry[] = [
   feature("redactOutputs", "Redaction of tool results and errors at the source.", false),
   feature("redactWire", "The safety net on model requests.", false),
   { name: "redactPrompt", type: "boolean", what: "Redaction of the typed prompt; the redacted text is what gets stored.", where: SWITCH_WHERE, relaxing: SWITCH_RELAX, read: (config) => config.redactPrompt },
-  { name: "profile", type: "string", values: [["standard", "every feature on"], ["credentials-only", "dangerousCommands, decisionModel and scripts default to false"]], what: "A set of defaults for the feature switches.", where: POLICY, relaxing: "credentials-only counts only if the global or system configuration sets it too", read: (config) => config.profile },
-  { name: "ruleOverrides", type: "object: rule → off | ask | deny | model", what: "One built-in rule set by its identifier (guard rules lists them); each one set appears on its own row.", where: POLICY, relaxing: "off, ask and model count only if the global or system configuration sets them too; deny counts from anywhere", read: (config) => config.policy.overrides, shown: count("rule") },
+  { name: "profile", type: "string", values: [["standard", "every feature on"], ["credentials-only", "dangerousCommands, decisionModel and scripts default to false"]], what: "A set of defaults for the feature switches.", where: POLICY, relaxing: `credentials-only counts only if the global or system configuration sets it too, ${TRUSTED}`, read: (config) => config.profile },
+  { name: "ruleOverrides", type: "object: rule → off | ask | deny | model", what: "One built-in rule set by its identifier (guard rules lists them); each one set appears on its own row.", where: POLICY, relaxing: `off, ask and model count only if the global or system configuration sets them too, ${TRUSTED}; deny counts from anywhere`, read: (config, inForce) => inForce?.ruleOverrides ?? config.policy.overrides, shown: count("rule") },
   { name: "exceptions", type: "object: rule → array of absolute paths", what: "Files whose confirmation by a rule is not asked, only for secret-file-read.", where: POLICY, relaxing: "a path counts only if a global source lists it, or in a trusted project", read: () => undefined, shown: () => "see rows below" },
-  { name: "rememberConfirmations", type: "integer (minutes), 0 is off", range: [0, 60], what: "A set of credential files you confirmed is not asked again in the session during this delay.", where: POLICY, relaxing: "counts only from a global source, or in a trusted project", read: () => undefined },
-  { name: "localAsks", type: "string", values: [["ask", "the confirmations of built-in rules stay with you"], ["model", "the decision model decides those without a setting"]], what: "Who decides the confirmations of built-in rules.", where: POLICY, relaxing: "model counts only if the global or system configuration sets it too", read: () => undefined },
-  { name: "selfProtectionByModel", type: "boolean", what: "localAsks model and model in ruleOverrides also reach self-protection, except a change of the plugin's settings.", where: POLICY, relaxing: "true counts only if the global or system configuration sets it too", read: () => undefined },
+  { name: "rememberConfirmations", type: "integer (minutes), 0 is off", range: [0, 60], what: "A set of credential files you confirmed is not asked again in the session during this delay.", where: POLICY, relaxing: "a delay longer than the one in place counts only from a global source, or in a trusted project", read: () => undefined },
+  { name: "localAsks", type: "string", values: [["ask", "the confirmations of built-in rules stay with you"], ["model", "the decision model decides those without a setting"]], what: "Who decides the confirmations of built-in rules.", where: POLICY, relaxing: `model counts only if the global or system configuration sets it too, ${TRUSTED}`, read: () => undefined },
+  { name: "selfProtectionByModel", type: "boolean", what: "localAsks model and model in ruleOverrides also reach self-protection, except a change of the plugin's settings.", where: POLICY, relaxing: `true counts only if the global or system configuration sets it too, ${TRUSTED}`, read: () => undefined },
   { name: "agents", type: "object: agent → settings", what: "Settings for one agent; guard agent writes them.", where: "plugin options or guard.json", relaxing: "only a global source relaxes an agent; a project only hardens", read: () => undefined, shown: count("agent") },
   { name: "projects", type: "object: directory → settings", what: "Settings for a project directory.", where: "global or system configuration, global guard.json", read: () => undefined, shown: count("project") },
-  { name: "trustedProjects", type: "array of strings", what: "Projects whose own settings may relax.", where: "global or system configuration, global guard.json", read: () => undefined, shown: count("project") },
+  { name: "trustedProjects", type: "array of strings", what: "Projects whose own settings may relax.", where: "global or system configuration, global guard.json", read: (_, inForce) => inForce?.version.listed, shown: count("project") },
   { name: "debug", type: "boolean", what: "Also log allowed actions and redaction counts.", where: PLUGIN, read: (config) => config.debug },
-  { name: "logFile", type: "string, or false for stderr only", what: "Plugin log file. A credential file or a protected location is refused.", where: PLUGIN, read: (config) => config.logFile },
-  { name: "maxStateChars", type: "integer", range: [200, 100_000], what: "Maximum size of the redacted input sent to the decision model.", where: PLUGIN, read: (config) => config.maxStateChars },
+  { name: "logFile", type: "string, or false for stderr only", what: "Plugin log file. A credential file or a protected location is refused.", where: PLUGIN, read: (config, inForce) => (inForce ? inForce.logFile : config.logFile) },
+  { name: "maxStateChars", type: "integer", range: [200, 100_000], what: "Maximum size of the redacted input sent to the decision model.", where: PLUGIN, relaxing: `a project's value counts only if the global side sets neither it nor a decision model, ${TRUSTED}`, read: (config) => config.maxStateChars },
   { name: "cacheTtlMs", type: "integer", range: [0, 3_600_000], what: "How long a verdict is cached, in ms.", where: PLUGIN, read: (config) => config.cacheTtlMs },
   { name: "cacheMax", type: "integer", range: [0, 10_000], what: "Maximum number of cached verdicts.", where: PLUGIN, read: (config) => config.cacheMax },
   { name: "unprotectedAgent", type: "string", what: "Agent for which the plugin does nothing (no rules, no model, no redaction). Built-in agents are refused.", where: "plugin options of the global or system configuration", read: (config) => config.unprotectedAgent },
-  { name: "rules", type: "array of objects", what: "Extra local rules; guard rules prints them.", where: "plugin options or global guard.json", read: (config) => config.rules, shown: count("rule") },
+  { name: "rules", type: "array of objects", what: "Extra local rules; guard rules prints them.", where: "plugin options or global guard.json", read: (config, inForce) => inForce?.version.rules ?? config.rules, shown: count("rule") },
   { name: "secretPatterns", type: "array of objects or strings", what: "Extra secret patterns; guard redaction prints them.", where: PLUGIN, read: (config) => config.secretPatterns, shown: count("pattern") },
-  { name: "redactionOff", type: "array of strings", what: "Built-in redaction formats turned off, by name.", where: "global or system configuration, global guard.json", read: (config) => config.disabledPatterns },
-  { name: "allowlist", type: "array of strings", what: "Strings that are never redacted. Never printed.", where: PLUGIN, relaxing: "each entry counts only if a global source lists it", read: (config) => config.allowlist, shown: count("entry") },
+  { name: "redactionOff", type: "array of strings", what: "Built-in redaction formats turned off, by name.", where: "global or system configuration, global guard.json", read: (config, inForce) => [...new Set([...config.disabledPatterns, ...(inForce?.version.redactionOff ?? [])])] },
+  { name: "allowlist", type: "array of strings", what: "Strings that are never redacted. Never printed.", where: PLUGIN, relaxing: `each entry counts only if a global source lists it, ${TRUSTED}`, read: (config) => config.allowlist, shown: count("entry") },
   { name: "outputCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Tool outputs checked by the decision model.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.outputCheck !== undefined },
   { name: "outputCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.outputCheck !== undefined },
   { name: "outputCheck.threshold", type: "number", range: [0, 1], what: "Stage 1: probability from which a part holds a secret.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.threshold },
@@ -163,6 +176,12 @@ const printed = (value: unknown): string => {
 const at = (options: Readonly<Record<string, unknown>>, name: string): unknown =>
   name.split(".").reduce<unknown>((node, key) => (node !== null && typeof node === "object" ? (node as Record<string, unknown>)[key] : undefined), options)
 
+/** A warning says this setting's value was refused: the setting itself, or the object it belongs to. */
+const refusedBy = (warnings: readonly string[], name: string) => {
+  const names = [`${name} `, `${name},`, `${name.split(".")[0]} `]
+  return warnings.some((line) => /\b(?:invalid|ignored|refused|cannot)\b/.test(line) && names.some((item) => line.includes(item)))
+}
+
 /** An origin named by its file. */
 const fileOf = (origin: string) => origin.replace(/^(global|system) configuration/, "$1 opencode.json")
 
@@ -173,15 +192,8 @@ export function settingRows(terminal: CliIo, agent: string | undefined) {
   const sources = readSources(io)
   const directory = realOrUndefined(io.cwd) ?? resolve(io.cwd)
   const files = readGuardFiles(guardPaths(directory, sources.globalDir, io.systemDir))
-  const parsed = parseConfig(sources.options, io.env, () => sources.declarations, {
-    files,
-    project: directory,
-    realPath: realOrUndefined,
-    regularFile: isRegularFile,
-    ...(sources.origin ? { origin: sources.origin } : {}),
-  })
+  const { config, version, warnings } = resolved(io, sources, directory, files)
   const defaults = parseConfig({}, io.env, () => []).config
-  const version = resolveVersion(parsed.config.layers!, files)
   const policy = new Map((version.settings?.(agent) ?? []).map((row) => [row.key, row]))
   const defaultPolicy = new Map((resolveVersion(parseConfig({}, io.env, () => [], { files: [], realPath: realOrUndefined, regularFile: isRegularFile }).config.layers!, []).settings?.(agent) ?? []).map((row) => [row.key, row]))
   let raw = ""
@@ -191,25 +203,38 @@ export function settingRows(terminal: CliIo, agent: string | undefined) {
     // No raw file: no reference shown.
   }
   const section = (name: string) => files.find((file) => file.global)?.data?.[name]
+  const ruleRows = [...policy.values()].filter((row) => row.key.startsWith("ruleOverrides."))
+  const inForce = { version, ruleOverrides: ruleRows.map((row) => row.key), logFile: checkedLog(io, sources, config.logFile, defaultLogFile(io.env)) }
+  const idle = checkIdle(io, sources, version)
   const rows: SettingRow[] = []
   for (const entry of SETTING_ENTRIES) {
-    const written = at(sources.options, entry.name) ?? section(entry.name)
+    const [given, filed] = [at(sources.options, entry.name), section(entry.name)]
+    // Sections of both files add up.
+    const written = given && filed && typeof given === "object" && typeof filed === "object" ? { ...given, ...filed } : (given ?? filed)
     const row = policy.get(entry.name)
-    const held = row ? row.value : entry.read(parsed.config)
+    const held = row ? row.value : entry.read(config, inForce)
     const leaf = entry.name.split(".").pop()!
+    const check = entry.name.replace(/\.enabled$/, "")
+    const reason = held === true && (check === "outputCheck" || check === "promptCheck") ? idle(check) : undefined
     // Without a decision model, its defaults are not in the configuration read.
     const standard = row ? defaultPolicy.get(entry.name)?.value : (entry.read(defaults) ?? (entry.name.startsWith("decision.") ? (DEFAULT_DECISION as Record<string, unknown>)[leaf] : undefined))
-    const origin = row ? fileOf(row.origin) : written === undefined ? "default" : `${sources.origin ? "system" : "global"} opencode.json`
-    const rejected = !row && !entry.shown && written !== undefined && typeof written !== "object" && written !== "" && printed(written) !== printed(held)
-    const same = printed(held) === printed(standard)
-    const reference = new RegExp(`"${leaf}"\\s*:\\s*"(\\{env:[^}"]+\\})"`).exec(raw)?.[1]
+    const named = [given !== undefined ? `${sources.origin ? "system" : "global"} opencode.json` : "", filed !== undefined ? "global guard.json" : ""].filter(Boolean)
+    const ruleOrigins = entry.name === "ruleOverrides" ? [...new Set(ruleRows.map((rule) => fileOf(rule.origin)))] : []
+    const origin = row ? fileOf(row.origin) : ruleOrigins.length ? ruleOrigins.join(", ") : named.length ? named.join(" and ") : "default"
+    // The text may differ from what was retained (case, `~`, `0,3`): refused only if the reading says so, or left nothing.
+    const rejected = !row && !entry.shown && written !== undefined && typeof written !== "object" && written !== "" && printed(written) !== printed(held) && (refusedBy(warnings, entry.name) || (held === undefined && entry.name !== "logFile") || (typeof written !== "string" && typeof held === "string"))
+    const value = reason !== undefined ? "inactive" : entry.shown ? entry.shown(held ?? (typeof written === "string" || typeof written === "object" ? written : undefined)) : printed(held)
+    const fallback = entry.shown ? entry.shown(standard) : printed(standard)
+    // Nested: looked up inside its parent (or not at all past deeper objects), a key of the same name elsewhere is another setting.
+    const parent = entry.name.includes(".") ? `"${entry.name.split(".")[0]}"\\s*:\\s*\\{(?:[^{}]|\\{[^{}]*\\})*` : ""
+    const reference = new RegExp(`${parent}"${leaf}"\\s*:\\s*"(\\{env:[^}"]+\\})"`).exec(raw)?.[1]
     rows.push({
       entry,
       name: entry.name,
-      value: entry.shown ? entry.shown(held ?? written) : printed(held),
-      fallback: entry.shown ? entry.shown(standard) : printed(standard),
-      origin,
-      state: rejected ? "ignored" : origin === "default" ? "default" : same ? "same as default" : "overridden",
+      value,
+      fallback,
+      origin: reason === undefined ? origin : `${origin}: ${reason}`,
+      state: rejected ? "ignored" : origin === "default" ? "default" : value === fallback ? "same as default" : "overridden",
       ...(rejected ? { written: printed(written) } : {}),
       ...(reference ? { reference } : {}),
     })
@@ -218,7 +243,7 @@ export function settingRows(terminal: CliIo, agent: string | undefined) {
     if (key.startsWith("ruleOverrides.") || key.startsWith("exceptions."))
       rows.push({ name: key, value: String(row.value), fallback: "none", origin: fileOf(row.origin), state: "overridden" })
   rows.sort((a, b) => a.name.localeCompare(b.name, "en"))
-  return { rows, warnings: [...parsed.warnings, ...version.warnings] }
+  return { rows, warnings }
 }
 
 const STYLES: Readonly<Record<State, Style>> = { default: "dim", "same as default": "dim", overridden: "good", ignored: "warn" }

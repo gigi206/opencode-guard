@@ -7,8 +7,8 @@ import type { Git } from "./version.ts"
 import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { parseConfig, resolveVersion, type GuardFile, type PluginDeclaration, type Version } from "../config.ts"
-import { knownSecrets } from "../index.ts"
+import { defaultLogFile, parseConfig, resolveVersion, type GuardConfig, type GuardFile, type PluginDeclaration, type Version } from "../config.ts"
+import { checkedLogFile, knownSecrets } from "../index.ts"
 import { declaredPluginOptions, globalConfigDirectory } from "../output-check.ts"
 import { isRegularFile } from "../real-path.ts"
 import { createRedactor, type Redactor } from "../secrets/redact.ts"
@@ -94,16 +94,30 @@ export function outputRedactor(terminal: CliIo): Redactor {
   }
 }
 
-/** Settings resolved like the plugin for a session directory (real path; absent: no project) and these guard.json files. */
-export function resolution(io: CliIo, sources: Sources, project: string | undefined, files: readonly GuardFile[]): Version {
-  const { config } = parseConfig(sources.options, io.env, () => sources.declarations, {
+/** The log file as the plugin keeps it: `checkedLogFile` with the directories the command line knows. */
+export function checkedLog(io: CliIo, sources: Sources, file: string | undefined, fallback: string | undefined, warnings: string[] = []): string | undefined {
+  const dirs = [PLUGIN_DIR, realOrUndefined(PLUGIN_DIR), sources.globalDir, sources.globalDir && realOrUndefined(sources.globalDir)].filter((dir): dir is string => !!dir)
+  return checkedLogFile(file, fallback, io.env.HOME, [...new Set(dirs)], warnings, io.cwd)
+}
+
+/** The configuration read like the plugin for a session directory, its version, and each warning once (the version's are also in the reading's). */
+export function resolved(io: CliIo, sources: Sources, project: string | undefined, files: readonly GuardFile[]): { config: GuardConfig; version: Version; warnings: string[] } {
+  const { config, warnings } = parseConfig(sources.options, io.env, () => sources.declarations, {
     files,
     ...(project ? { project } : {}),
     realPath: realOrUndefined,
     regularFile: isRegularFile,
     ...(sources.origin ? { origin: sources.origin } : {}),
   })
-  return resolveVersion(config.layers!, files)
+  const version = resolveVersion(config.layers!, files)
+  const refused: string[] = []
+  checkedLog(io, sources, config.logFile, defaultLogFile(io.env), refused)
+  return { config, version, warnings: [...new Set([...warnings, ...version.warnings, ...refused])] }
+}
+
+/** Settings resolved like the plugin for a session directory (real path; absent: no project) and these guard.json files. */
+export function resolution(io: CliIo, sources: Sources, project: string | undefined, files: readonly GuardFile[]): Version {
+  return resolved(io, sources, project, files).version
 }
 
 /**

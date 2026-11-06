@@ -96,6 +96,8 @@ export interface GuardConfig {
   readonly modelGrants: boolean
   /** Why it may not (in words, never a value); absent when it may. */
   readonly modelWithheld?: string
+  /** Address of `decision` as written in the options in force, usable or not; absent: they have none. */
+  readonly decisionAddress?: unknown
 }
 
 export interface OutputCheckConfig {
@@ -1432,6 +1434,7 @@ export function parseConfig(
       ...(version ? { version } : {}),
       modelGrants,
       ...(modelWithheld === undefined ? {} : { modelWithheld }),
+      decisionAddress: declaredDecision(options)?.baseURL,
     },
     warnings,
   }
@@ -1756,8 +1759,8 @@ function outcomes(state: PolicyState): number[] {
 /** Rules, then `localAsks` and `selfProtectionByModel`, then the switches, `decisionModel` last (it may hand asks to the model). */
 const rank = (key: string) => (key.startsWith("rule:") ? 0 : key === "localAsks" ? 1 : key === "selfProtectionByModel" ? 2 : 3 + POLICY_SWITCHES.indexOf(key as PolicySwitch))
 
-/** An exception or a memory delay that is not 0: a relaxation `outcomes` does not see (neither paths nor delay). */
-const waives = (op: Op) => op.key.startsWith(EXCEPTION_KEY) || (op.key === "rememberConfirmations" && op.value !== "0")
+/** An exception, or a memory delay longer than the one in place: a relaxation `outcomes` does not see (neither paths nor delay). */
+const waives = (op: Op, state: PolicyState) => op.key.startsWith(EXCEPTION_KEY) || (op.key === "rememberConfirmations" && Number(op.value) > state.rememberMinutes)
 
 /** Project layer laid over `state`: its last value of each key; unless trusted or certified, a key that relaxes is dropped. */
 function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => void): PolicyState {
@@ -1770,7 +1773,7 @@ function laid(state: PolicyState, ops: readonly Op[], warn?: (line: string) => v
   for (const op of [...last.values()].sort((a, b) => rank(a.key) - rank(b.key))) {
     const candidate = applied(state, op.key, op.value, op.label ?? PLUGIN_OPTIONS)
     const after = outcomes(candidate)
-    const why = op.trusted || (!waives(op) && after.every((value, index) => value >= before[index]!)) ? undefined : op.certify ? op.certify() : "project"
+    const why = op.trusted || (!waives(op, state) && after.every((value, index) => value >= before[index]!)) ? undefined : op.certify ? op.certify() : "project"
     if (why === undefined) {
       state = candidate
       before = after

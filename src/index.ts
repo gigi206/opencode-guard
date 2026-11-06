@@ -6,7 +6,7 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
-import { declaredDecision, DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
+import { DEFAULT_PROMPT_CHECK, defaultLogFile, displayURL, FEATURE_NAMES, parseConfig, type Features, type GuardConfig, type GuardFile } from "./config.ts"
 import { createDecider } from "./decide.ts"
 import { guardIdentity, guardPaths, readGuardFiles } from "./guard-file.ts"
 import { registerMainAgents, type MainAgents } from "./hooks/agents.ts"
@@ -419,7 +419,7 @@ export async function setupGuard(
   const cutNames = cut.flatMap(([label, option, state]) => {
     const settings = config[option]
     if (!settings || settings.explicit || state?.active) return []
-    const input = { option, enabledBySection: config.version?.sectionChecks?.includes(option) ?? false, pluginDir: protectedDirs[0]!, effectiveBaseURL: declaredDecision(ctx.options)?.baseURL, globalDir, systemDir, env }
+    const input = { option, enabledBySection: config.version?.sectionChecks?.includes(option) ?? false, pluginDir: protectedDirs[0]!, effectiveBaseURL: config.decisionAddress, globalDir, systemDir, env }
     return checkCutByModel(input) ? [label] : []
   })
   if (cutNames.length) log.warn(`${cutNames.join(" and ")} not running: the decision model in use is not the one the global configuration declares (a project's opencode.json can replace or remove it)`)
