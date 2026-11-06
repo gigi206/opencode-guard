@@ -77,7 +77,7 @@ OpenCode applies a project's `opencode.json` (and `.opencode/opencode.json`) **a
 
 - remove the plugin: `"plugins": ["-guard"]` (by plugin id) or `"plugins": ["-*"]`. An entry with the path, `"-/path/to/plugin_opencode"`, has no effect;
 - replace its options, by declaring the same `package` with its own `options` or none: OpenCode hands the plugin those instead of yours. The plugin reads yours back, so what you set stays and a project can only harden it: see [What a project keeps from your configuration](#what-a-project-keeps-from-your-configuration);
-- block it with a policy: `"policies": [{ "action": "integration.use", "resource": "plugin:*", "effect": "deny" }]`.
+- block it with a policy: `"policies": [{ "action": "plugin.use", "resource": "*", "effect": "deny" }]`.
 
 The environment variables `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT` can do the same for a process started with them; the agent cannot set them for a nested OpenCode without confirmation (see [Local rules](rules.md#local-rules)).
 
@@ -87,11 +87,11 @@ To check what applies in a given project, run `opencode plugin list` in its dire
 
 ```jsonc
 "policies": [
-  { "action": "integration.use", "resource": "plugin:/path/to/plugin_opencode", "effect": "allow" }
+  { "action": "plugin.use", "resource": "/path/to/plugin_opencode", "effect": "allow" }
 ]
 ```
 
-This stops a project from blocking the plugin with a policy (with a project policy denying `plugin:*`, `opencode plugin list` still shows `guard`). It needs no restart and no duplicated setting, but removal (`"-guard"`) and replaced options remain possible.
+This stops a project from blocking the plugin with a policy (with a project policy denying `*`, `opencode plugin list` still shows `guard`). It needs no restart and no duplicated setting, but removal (`"-guard"`) and replaced options remain possible.
 
 **Full protection** needs a configuration layer loaded after the projects. Two ways, each with a cost:
 

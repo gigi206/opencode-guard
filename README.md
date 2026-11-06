@@ -114,7 +114,7 @@ Recommended: keep a global policy so a project cannot block the plugin by policy
 
 ```jsonc
 "policies": [
-  { "action": "integration.use", "resource": "plugin:/path/to/plugin_opencode", "effect": "allow" }
+  { "action": "plugin.use", "resource": "/path/to/plugin_opencode", "effect": "allow" }
 ]
 ```
 
