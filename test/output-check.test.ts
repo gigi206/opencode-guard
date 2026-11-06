@@ -37,8 +37,8 @@ describe("batch 32: outputCheck option", () => {
     const kept = parseConfig({ outputCheck: value }, {}, declared).config.outputCheck!
     assert.deepEqual([kept.threshold, kept.timeoutMs, kept.tuning.partChars, kept.skip, kept.questions.secret.criteria?.true, kept.questions.word.instructions, kept.questions.word.none, kept.custom], [0.8, 1500, 1000, ["read"], "T", "W?", DEFAULT_OUTPUT_CHECK.questions.word.none, true])
     const weak = parseConfig({ outputCheck: { timeoutMs: 100 } }, {}, declared)
-    assert.equal(weak.config.outputCheck?.timeoutMs, DEFAULT_OUTPUT_CHECK.timeoutMs)
-    assert.match(weak.warnings.join("\n"), /outputCheck settings ignored, defaults used/)
+    assert.equal(weak.config.outputCheck?.timeoutMs, 1500)
+    assert.match(weak.warnings.join("\n"), /outputCheck settings ignored, the global configuration's stay/)
   })
   it("default values measured for nox-4b (2026-10-31): threshold 0.2, parts of 2,000 at line ends, timeout 5 s, writes and the task list skipped", () => {
     assert.deepEqual([DEFAULT_OUTPUT_CHECK.threshold, DEFAULT_OUTPUT_CHECK.timeoutMs, DEFAULT_OUTPUT_CHECK.tuning.partChars, DEFAULT_OUTPUT_CHECK.explicit, DEFAULT_OUTPUT_CHECK.custom], [0.2, 5000, 2000, false, false])

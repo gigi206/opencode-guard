@@ -89,8 +89,21 @@ describe("quality batch, configuration and command line", () => {
     const value = ["C:", "Users", "qc", "key"].join("\\")
     const declarations = () => declaredPluginOptions({ pluginDir: PLUGIN_DIR, globalDir, systemDir, env: { QC_DECISION_KEY: value } })
     assert.equal(parseConfig({ decision: { ...DECISION, apiKey: value } }, {}, declarations as Declared).config.modelGrants, true)
-    // A different value is still told apart.
-    assert.equal(parseConfig({ decision: { ...DECISION, apiKey: `${value}x` } }, {}, declarations as Declared).config.modelGrants, false)
+    // A different value is still told apart: it is not the model the global configuration declares, which stays, key exact.
+    const other = parseConfig({ decision: { ...DECISION, apiKey: `${value}x` } }, {}, declarations as Declared)
+    assert.equal(other.config.decision?.apiKey, value)
+    assert.equal(other.config.modelGrants, true)
+    assert.match(other.warnings.join("\n"), /decision ignored: /)
+    // Left out by the project: the same value, and the model it allows with.
+    const kept = parseConfig({}, {}, declarations as Declared).config
+    assert.equal(kept.decision?.apiKey, value)
+    assert.equal(kept.modelGrants, true)
+    // With a {file:…} reference too, the value resolved as OpenCode does, whichever of the two reads of the text it takes.
+    writeFileSync(join(globalDir, "route.txt"), ` ${["a", 'b"c'].join("\\")}\n`)
+    writeFileSync(join(globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: { decision: { ...DECISION, apiKey: "{env:QC_DECISION_KEY}", headers: { "X-Route": "{file:route.txt}" } } } }] }))
+    const filed = parseConfig({}, {}, declarations as Declared).config.decision
+    assert.equal(filed?.apiKey, value)
+    assert.deepEqual(filed?.headers, { "X-Route": ["a", 'b"c'].join("\\") })
   })
 
   it("QC-2: allowlist: the global one unchanged, a trusted project's applied, an ignored entry never quoted", async () => {

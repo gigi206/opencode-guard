@@ -3,6 +3,7 @@
 // options (project configuration loaded after the global one): it cannot thereby enable sending outputs or prompts to
 // its own server. At the slightest doubt, the option stays inactive.
 import { readFileSync, realpathSync } from "node:fs"
+import { homedir } from "node:os"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 import { checkRequested, declaredDecision, modelSwitchedOn, normalizedURL, type PluginDeclaration } from "./config.ts"
 
@@ -15,6 +16,9 @@ export function globalConfigDirectory(env: Record<string, string | undefined>): 
   const config = env.XDG_CONFIG_HOME || (env.HOME ? join(env.HOME, ".config") : undefined)
   return config ? join(config, "opencode") : undefined
 }
+
+/** The plugin's identifier, which `plugins` entries select it by (`Plugin.define`): not its package name. */
+export const PLUGIN_ID = "guard"
 
 export type OutputCheckState = { readonly active: true } | { readonly active: false; readonly reason: string }
 
@@ -60,15 +64,44 @@ export function declaresPlugin(target: string, pluginDir: string): boolean {
 }
 
 /**
+ * `{file:path}` of a configuration text, replaced as OpenCode does (`core/src/config/variable.ts`, v2.2.5): skipped on a
+ * line comment, `~/` expanded, a relative path taken from the configuration file's directory, a missing or unreadable
+ * file empty, the content trimmed and escaped for a JSON string.
+ */
+function substituteFiles(text: string, dir: string, env: Record<string, string | undefined>): string {
+  return text.replace(/\{file:[^}]+\}/g, (token, index: number) => {
+    if (text.slice(text.lastIndexOf("\n", index - 1) + 1, index).trimStart().startsWith("//")) return token
+    try {
+      const path = token.slice("{file:".length, -1)
+      const expanded = path.startsWith("~/") ? join(env.HOME || homedir(), path.slice(2)) : path
+      return JSON.stringify(readFileSync(isAbsolute(expanded) ? expanded : resolve(dir, expanded), "utf8").trim()).slice(1, -1)
+    } catch {
+      return ""
+    }
+  })
+}
+
+/** Text outside the strings: a comment, or a trailing comma, which `jsonc-parser` accepts only after a value. */
+const JSONC_COMMENT = /("(?:[^"\\]|\\[\s\S])*")|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g
+const TRAILING_COMMA = /("(?:[^"\\]|\\[\s\S])*")|([[{,]\s*)?,(\s*[}\]])/g
+
+/**
+ * JSONC as OpenCode reads it (`jsonc-parser` 3.3.1, `allowTrailingComma`): comments and trailing commas removed outside
+ * the strings, what it rejects rejected here. A value in a string is applied as written: a pattern's `{8,}` stays one.
+ */
+function parseJsonc(text: string): unknown {
+  const uncommented = text.replace(JSONC_COMMENT, (_, string?: string) => string ?? " ")
+  return JSON.parse(uncommented.replace(TRAILING_COMMA, (match, string?: string, before?: string, after?: string) => string ?? (before === undefined ? after! : match)))
+}
+
+/**
  * Configuration text as OpenCode reads it (`core/src/config/variable.ts`, v2.2.0): `{env:NAME}` replaced by the
  * server environment value, or an empty string, as is; escaped for JSON only when the raw text does not parse;
- * JSONC comments and trailing commas removed.
+ * then read as JSONC. `{file:…}` stay as written unless `files` replaces them.
  */
-function parseConfigText(text: string, env: Record<string, string | undefined>): unknown {
+function parseConfigText(text: string, env: Record<string, string | undefined>, files: (text: string) => string = (same) => same): unknown {
   const parse = (escape: boolean) => {
-    const substituted = text.replace(/\{env:([^}]+)\}/g, (_, name: string) => (escape ? JSON.stringify(env[name] || "").slice(1, -1) : env[name] || ""))
-    const stripped = substituted.replace(/("(?:[^"\\]|\\.)*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_, s) => s ?? "")
-    return JSON.parse(stripped.replace(/,(\s*[}\]])/g, "$1")) as unknown
+    return parseJsonc(files(text.replace(/\{env:([^}]+)\}/g, (_, name: string) => (escape ? JSON.stringify(env[name] || "").slice(1, -1) : env[name] || ""))))
   }
   try {
     return parse(false)
@@ -77,16 +110,39 @@ function parseConfigText(text: string, env: Record<string, string | undefined>):
   }
 }
 
-type FileResult = { readonly options?: Record<string, unknown>; readonly reason?: string }
+type FileResult = Pick<PluginDeclaration, "options" | "reason" | "resolved" | "unreadable">
 
-/** Options of the plugin entry in a configuration directory (same detection as `enforcedBySystemConfig`). */
+/**
+ * What an entry of `plugins` does to this plugin, as OpenCode applies them in order (`parse`, `core/src/config/plugin/source.ts`,
+ * and `resolve`, `plugin/supervisor.ts`, v2.2.5): `add` replaces the options, whole (a text entry has none); `remove` takes
+ * it out, by identifier (a path has no effect); `select` puts it back as it was loaded.
+ */
+function operationOn(entry: unknown, pluginDir: string): "add" | "remove" | "select" | undefined {
+  if (typeof entry === "string" && entry.startsWith("-")) return entry === "-*" || entry === `-${PLUGIN_ID}` ? "remove" : undefined
+  const target = typeof entry === "string" ? entry : isRecord(entry) ? entry.package : undefined
+  if (typeof target !== "string") return undefined
+  if (target === "*" || target === PLUGIN_ID) return "select"
+  return declaresPlugin(target, pluginDir) ? "add" : undefined
+}
+
+/**
+ * Options of the plugin entry in force in a configuration directory, read in OpenCode's order (`loadDirectory`:
+ * `opencode.json`, then `opencode.jsonc`; last entry wins; a byte order mark dropped, as its text decoder does). A malformed
+ * file counts for nothing in OpenCode: reported only when no entry is found. Same detection as `enforcedBySystemConfig`.
+ */
 function pluginOptions(dir: string, pluginDir: string, env: Record<string, string | undefined>): FileResult {
   let found = false
+  let unreadable = false
+  let invalid = false
+  let entry: { readonly options: Record<string, unknown>; readonly text: string; readonly index: number } | undefined
+  let removed = false
   for (const name of ["opencode.json", "opencode.jsonc"]) {
     let text: string
     try {
-      text = readFileSync(join(dir, name), "utf8")
-    } catch {
+      text = readFileSync(join(dir, name), "utf8").replace(/^\uFEFF/, "")
+    } catch (error) {
+      const code = (error as { code?: unknown } | undefined)?.code
+      unreadable ||= code !== "ENOENT" && code !== "ENOTDIR"
       continue
     }
     found = true
@@ -94,17 +150,33 @@ function pluginOptions(dir: string, pluginDir: string, env: Record<string, strin
     try {
       config = parseConfigText(text, env)
     } catch {
-      return { reason: "it is not valid JSON" }
+      invalid = true
+      continue
     }
     const plugins = isRecord(config) ? config.plugins : undefined
     if (!Array.isArray(plugins)) continue
-    for (const entry of plugins) {
-      const target = typeof entry === "string" ? entry : isRecord(entry) ? entry.package : undefined
-      if (typeof target !== "string" || !declaresPlugin(target, pluginDir)) continue
-      return { options: isRecord(entry) && isRecord(entry.options) ? entry.options : {} }
+    for (const [index, item] of plugins.entries()) {
+      const operation = operationOn(item, pluginDir)
+      if (operation === "add") entry = { options: isRecord(item) && isRecord(item.options) ? item.options : {}, text, index }
+      if (operation) removed = operation === "remove"
     }
   }
-  return { reason: found ? "it does not declare this plugin" : "it is missing or unreadable" }
+  if (!entry && invalid) return { reason: "it is not valid JSON" }
+  if (!entry || removed) return { reason: found ? "it does not declare this plugin" : "it is missing or unreadable", ...(unreadable ? { unreadable } : {}) }
+  const { options, text, index } = entry
+  // The referenced files are read only for a value kept over a project's options, and only when the entry has one.
+  let read: Record<string, unknown> | undefined
+  const resolved = () => {
+    if (!JSON.stringify(options).includes("{file:")) return options
+    return (read ??= optionsAt(parseConfigText(text, env, (substituted) => substituteFiles(substituted, dir, env)), index))
+  }
+  return { options, resolved }
+}
+
+/** Options of one entry of `plugins`, by its place in the file. */
+function optionsAt(config: unknown, index: number): Record<string, unknown> | undefined {
+  const entry = isRecord(config) && Array.isArray(config.plugins) ? (config.plugins[index] as unknown) : undefined
+  return isRecord(entry) && isRecord(entry.options) ? entry.options : undefined
 }
 
 /**
@@ -181,7 +253,7 @@ export function declaredOutputCheck(input: {
       continue
     }
     const options = file.options
-    // Values read from another file: never followed (the plugin reads no referenced file).
+    // A value read from another file is not one this check compares: never certified.
     if (JSON.stringify([options[option], options.decision]).includes("{file:")) {
       reasons.push(`${label} configuration: it uses a {file:…} reference`)
       continue

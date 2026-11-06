@@ -76,11 +76,12 @@ async function withModel<T>(score: number, run: () => Promise<T>): Promise<T> {
 }
 
 /** Plugin set up as OpenCode does (global opencode.json, effective options): its log after startup. */
-async function startLog(options: Json, global: Json): Promise<string> {
+async function startLog(options: Json, global: Json, system?: Json): Promise<string> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "guard-cg-")))
   const [globalDir, systemDir, project] = [join(root, "global"), join(root, "system"), join(root, "work", "app")]
   for (const dir of [globalDir, systemDir, project]) mkdirSync(dir, { recursive: true })
   writeFileSync(join(globalDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: global }] }))
+  if (system) writeFileSync(join(systemDir, "opencode.json"), JSON.stringify({ plugins: [{ package: PLUGIN_DIR, options: system }] }))
   const logFile = join(root, "guard.log")
   const fake = fakeContext({ logFile, ...options })
   ;(fake.ctx.location as { directory: string }).directory = project
@@ -145,21 +146,31 @@ describe("lot 48 step G", () => {
     assert.equal(await heredoc({ effective: { decision: DECISION, thresholds: { askRisk: 1 } }, global: { ...global, thresholds: { askRisk: 1 } } }), "allow")
     const headers = { ...DECISION, headers: { "X-Route": "a" } }
     assert.equal(await heredoc({ effective: { decision: headers }, global: { decision: { ...DECISION, headers: { "x-route": "a" } } } }), "allow")
-    // Another value for any of them: the ask stays with the user.
-    for (const effective of [
-      { decision: DECISION, thresholds: { askRisk: 3, denyRisk: 3 } },
-      { decision: DECISION, maxStateChars: 3000 },
+    // Another value for any of them: the ask stays with the user. With a decision model of the global configuration in
+    // force, a project sets neither the model's own settings nor what it is judged by: here, over a system entry that
+    // declares none.
+    const judged = [{ decision: DECISION, thresholds: { askRisk: 3, denyRisk: 3 } }, { decision: DECISION, maxStateChars: 3000 }]
+    const model = [
       { decision: { ...DECISION, protocol: "systemone" } },
       { decision: { ...DECISION, timeoutMs: 9000 } },
       { decision: { ...DECISION, apiKey: "k".repeat(12) } },
       { decision: headers },
-    ])
-      assert.equal(await heredoc({ effective, global }), "ask", JSON.stringify(Object.keys(effective)))
+    ]
+    for (const effective of [...judged, ...model]) assert.equal(await heredoc({ effective, global, system: {} }), "ask", JSON.stringify(effective))
+    // Over the decision model in force, they are ignored: it stays, and allows.
+    for (const effective of judged) {
+      assert.equal(await heredoc({ effective, global }), "allow", JSON.stringify(Object.keys(effective)))
+      assert.match(parseConfig(effective, {}, entries(global) as Declared).warnings.join("\n"), /(thresholds denyRisk, askRisk|maxStateChars) ignored/)
+    }
+    for (const effective of model) {
+      assert.equal(await heredoc({ effective, global }), "allow", JSON.stringify(effective))
+      assert.match(parseConfig(effective, {}, entries(global) as Declared).warnings.join("\n"), /decision ignored: /)
+    }
     // The effective thresholds may still deny.
     assert.equal(await heredoc({ effective: { decision: DECISION, thresholds: { askRisk: 0.5, denyRisk: 1 } }, global, score: 1.5 }), "deny")
     // Startup warning naming the setting, never its value.
     await withModel(0.1, async () => {
-      const log = await startLog({ decision: DECISION, thresholds: { askRisk: 2.71, denyRisk: 2.83 } }, global)
+      const log = await startLog({ decision: DECISION, thresholds: { askRisk: 2.71, denyRisk: 2.83 } }, global, {})
       const line = log.split("\n").find((item) => item.includes("WARN decision model not declared by the global configuration")) ?? ""
       const warning = line.slice(line.indexOf("WARN"))
       assert.match(warning, /global configuration: other values for thresholds;/)

@@ -370,11 +370,14 @@ describe("opaque-image: who can turn it on", () => {
     assert.equal(config.policy.overrides?.get("opaque-image"), "ask")
   })
   it("off refused on a rule that stays off anyway is not said to be ignored", () => {
-    for (const declared of [{ ruleOverrides: { "opaque-image": "ask" } }, {}]) {
-      const { config, warnings } = parseConfig({ ruleOverrides: { "opaque-image": "off" } }, {}, declaring(declared))
-      assert.equal(config.policy.overrides?.has("opaque-image") ?? false, false)
-      assert.deepEqual(warnings.filter((line) => /opaque-image.*ignored/.test(line)), [])
-    }
+    const { config, warnings } = parseConfig({ ruleOverrides: { "opaque-image": "off" } }, {}, declaring({}))
+    assert.equal(config.policy.overrides?.has("opaque-image") ?? false, false)
+    assert.deepEqual(warnings.filter((line) => /opaque-image.*ignored/.test(line)), [])
+  })
+  it("off over a rule the global configuration turned on: its setting stays, and the off is said to be ignored", () => {
+    const { config, warnings } = parseConfig({ ruleOverrides: { "opaque-image": "off" } }, {}, declaring({ ruleOverrides: { "opaque-image": "ask" } }))
+    assert.equal(config.policy.overrides?.get("opaque-image"), "ask")
+    assert.equal(warnings.filter((line) => /opaque-image.*ignored/.test(line)).length, 1, warnings.join("\n"))
   })
   it("witness: those options still do not turn off opaque-document", () => {
     const { config, warnings } = parseConfig({ ruleOverrides: { "opaque-document": "off" } }, {}, declaring({}))

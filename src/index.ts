@@ -18,7 +18,7 @@ import { registerRedaction } from "./hooks/redaction.ts"
 import { PROTECTED, registerUnprotected, withAgentSections, type UnprotectedGate } from "./hooks/unprotected.ts"
 import { createModelClient } from "./model/client.ts"
 import { isRegularFile } from "./real-path.ts"
-import { checkCutByModel, declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, type OutputCheckState } from "./output-check.ts"
+import { checkCutByModel, declaredOutputCheck, declaredPluginOptions, declaresPlugin, globalConfigDirectory, packageInstall, PLUGIN_ID, type OutputCheckState } from "./output-check.ts"
 import { RULE_FEATURES, waiverSummary } from "./rules/features.ts"
 import { createScopes } from "./scopes.ts"
 import { isSecretFile, protectedWriteKind } from "./rules/sensitive-paths.ts"
@@ -457,7 +457,7 @@ const FEATURE_OFF: Record<keyof Features, string> = {
 }
 
 const GuardPlugin = {
-  id: "guard",
+  id: PLUGIN_ID,
   setup: (ctx) => setupGuard(ctx),
 } satisfies Plugin.Plugin
 

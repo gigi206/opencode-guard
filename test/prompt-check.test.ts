@@ -102,8 +102,8 @@ describe("promptCheck option", () => {
     assert.equal(kept.questions.word.none, "aucun")
     assert.equal(kept.questions.secret.instructions, DEFAULT_PROMPT_CHECK.questions.secret.instructions)
     assert.equal(kept.custom, true)
-    // Different value in the global configuration: defaults.
-    assert.equal(parse({ threshold: 0.9 }, { threshold: 0.5 }).config.promptCheck?.threshold, DEFAULT_PROMPT_CHECK.threshold)
+    // Different value in the global configuration: the global one stays.
+    assert.equal(parse({ threshold: 0.9 }, { threshold: 0.5 }).config.promptCheck?.threshold, 0.5)
   })
   it("every setting is bounded; question texts are non-empty and bounded; criteria come as a pair", () => {
     const bad = { partChars: 10, rounds: 2.5, verify: 3, questions: { secret: { instructions: "", criteria: { true: "x" } }, word: { none: "y".repeat(3000) }, extra: 1 } }

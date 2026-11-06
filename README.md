@@ -118,7 +118,7 @@ Recommended: keep a global policy so a project cannot block the plugin by policy
 ]
 ```
 
-A project can still remove the plugin or replace its options. See [Protecting the plugin from project configuration](docs/configuration.md#protecting-the-plugin-from-project-configuration) for the full protection.
+A project can still remove the plugin; if it replaces its options, the plugin keeps what you set and the project can only harden it, `logFile`, `debug` and the cache settings apart. See [Protecting the plugin from project configuration](docs/configuration.md#protecting-the-plugin-from-project-configuration) for the full protection.
 
 ## Useful parameters
 

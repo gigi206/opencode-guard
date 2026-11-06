@@ -43,10 +43,11 @@ describe("a project cannot unprotect an agent", () => {
     assert.match(parsed.warnings.join("\n"), /unprotectedAgent ignored: a relaxation counts only if the global or system configuration sets it too/)
     assert.equal((await plugin({}, { unprotectedAgent: AGENT })).checked, true)
   })
-  it("PU-2: another value than the declared one is ignored too", () => {
+  it("PU-2: another value than the declared one is ignored too: the declared one stays, as without a project", async () => {
     const parsed = parseConfig({ unprotectedAgent: "other" }, {}, declaring({ unprotectedAgent: AGENT }), inputs())
-    assert.equal(parsed.config.unprotectedAgent, undefined)
+    assert.equal(parsed.config.unprotectedAgent, AGENT)
     assert.match(parsed.warnings.join("\n"), /unprotectedAgent ignored/)
+    assert.equal((await plugin({ unprotectedAgent: AGENT }, { unprotectedAgent: "other" })).checked, false)
   })
   it("PU-3: the warning stays when a guard.json file or a section resolves the settings", () => {
     const file = { label: "project guard.json (/w/app/.opencode/guard.json)", global: false, dir: "/w/app", data: {} }

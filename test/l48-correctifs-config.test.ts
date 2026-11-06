@@ -119,22 +119,32 @@ async function world(global?: Json, system?: Json) {
 }
 
 describe("lot 48 step F2: the decision model allows an ask only with the global configuration", () => {
-  it("CF2-1: a project that replaces the model's address: heredoc data, CodeMode's fetch, asks left to it by a setting stay asks", async () => {
-    const heredoc = await shell({ decision: ELSEWHERE }, { decision: DECISION }, HEREDOC)
+  it("CF2-1: a model of a project's own, the global configuration declaring none: heredoc data, CodeMode's fetch, asks left to it by a setting stay asks", async () => {
+    const heredoc = await shell({ decision: ELSEWHERE }, {}, HEREDOC)
     assert.equal(heredoc.verdict, "ask")
     assert.match(heredoc.reason, /opinion: allow/)
-    assert.equal((await decide({ decision: ELSEWHERE }, { decision: DECISION }, "execute", FETCH)).verdict, "ask")
+    assert.equal((await decide({ decision: ELSEWHERE }, {}, "execute", FETCH)).verdict, "ask")
     const relaxed = { localAsks: "model" }
-    assert.equal((await shell({ ...relaxed, decision: ELSEWHERE }, { ...relaxed, decision: DECISION }, "git reset --hard")).verdict, "ask")
+    assert.equal((await shell({ ...relaxed, decision: ELSEWHERE }, relaxed, "git reset --hard")).verdict, "ask")
     const byRule = { ruleOverrides: { "git-reset-hard": "model" } }
-    assert.equal((await shell({ ...byRule, decision: ELSEWHERE }, { ...byRule, decision: DECISION }, "git reset --hard")).verdict, "ask")
+    assert.equal((await shell({ ...byRule, decision: ELSEWHERE }, byRule, "git reset --hard")).verdict, "ask")
     const self = { localAsks: "model", selfProtectionByModel: true }
     const agentFile = "echo x > ~/.config/opencode/agent/a.md"
     assert.equal((await shell({ ...self, decision: DECISION }, { ...self, decision: DECISION }, agentFile)).verdict, "allow")
-    assert.equal((await shell({ ...self, decision: ELSEWHERE }, { ...self, decision: DECISION }, agentFile)).verdict, "ask")
-    // Another model at the same address, or no declaration at all.
-    assert.equal((await shell({ decision: { ...DECISION, model: "other-model" } }, { decision: DECISION }, HEREDOC)).verdict, "ask")
+    assert.equal((await shell({ ...self, decision: ELSEWHERE }, self, agentFile)).verdict, "ask")
+    // No declaration at all.
     assert.equal((await shell({ decision: DECISION }, undefined, HEREDOC)).verdict, "ask")
+    // The source in force declares none, the other another model: not the one declared either.
+    const entries = () => [{ label: "global", options: { decision: DECISION } }, { label: "system", options: {} }]
+    assert.match(parseConfig({ decision: ELSEWHERE }, {}, entries).config.modelWithheld ?? "", /global configuration: another decision model address or model/)
+    // Another address or model over the global configuration's: it stays, and it is the one that allows, with one warning.
+    for (const decision of [ELSEWHERE, { ...DECISION, model: "other-model" }]) {
+      const { config, warnings } = parseConfig({ decision }, {}, () => [{ label: "global", options: { decision: DECISION } }])
+      assert.deepEqual([config.decision?.baseURL, config.decision?.model], [DECISION.baseURL, DECISION.model])
+      assert.equal(warnings.filter((line) => line.startsWith("decision ignored: ")).length, 1)
+      assert.equal((await shell({ decision }, { decision: DECISION }, HEREDOC)).verdict, "allow")
+    }
+    assert.equal((await decide({ decision: ELSEWHERE }, { decision: DECISION }, "execute", FETCH)).verdict, "allow")
   })
 
   it("CF2-2 (guard): the global configuration's model allows as before; any model may still deny; calls without a rule unchanged", async () => {
@@ -156,12 +166,17 @@ describe("lot 48 step F2: the decision model allows an ask only with the global 
     assert.equal((await shell({ decision: DECISION, profile: "standard" }, { decision: DECISION, profile: "credentials-only" }, HEREDOC)).verdict, "ask")
   })
 
-  it("CF2-4: as OpenCode sets it up: a project's opencode.json replacing the address → ask and a startup warning; trusted project or same model → allowed", async () => {
+  it("CF2-4: as OpenCode sets it up: a project's opencode.json replacing the address → the global model stays, with a startup warning; no global model → ask and a startup warning; trusted project or same model → allowed", async () => {
     await withModel(0.1, async () => {
       const replaced = await plugin({ options: { decision: ELSEWHERE }, global: { decision: DECISION } })
-      assert.equal(await replaced.verdict(HEREDOC), "ask")
-      assert.match(replaced.log(), /WARN decision model not declared by the global configuration \(global configuration: another decision model address or model; system configuration: [^)]*\): it may deny, but never allows an ask left to it/)
-      const warning = replaced.log().split("\n").find((line) => line.includes("not declared by the global configuration"))
+      assert.equal(await replaced.verdict(HEREDOC), "allow")
+      assert.match(replaced.log(), /WARN decision ignored: a project does not choose its decision model, the global configuration's stays/)
+      assert.doesNotMatch(replaced.log(), /not declared by the global configuration/)
+      assert.ok(!replaced.log().includes("decision.example.org"), "address of the project in the log")
+      const undeclared = await plugin({ options: { decision: ELSEWHERE }, global: {} })
+      assert.equal(await undeclared.verdict(HEREDOC), "ask")
+      assert.match(undeclared.log(), /WARN decision model not declared by the global configuration \(global configuration: no decision model; system configuration: [^)]*\): it may deny, but never allows an ask left to it/)
+      const warning = undeclared.log().split("\n").find((line) => line.includes("not declared by the global configuration"))
       assert.ok(warning && !warning.includes("decision.example.org"), "address quoted in the warning")
       const same = await plugin({ options: { decision: DECISION }, global: { decision: DECISION } })
       assert.equal(await same.verdict(HEREDOC), "allow")

@@ -35,8 +35,13 @@ const CREDENTIALS_ONLY_OFF: ReadonlySet<string> = new Set(["dangerousCommands", 
 /** Plugin entry re-read from the global or system configuration (`output-check.ts`): its options, or why there are none. */
 export interface PluginDeclaration {
   readonly label: string
+  /** As written, but for `{env:…}`: a `{file:…}` reference stays visible, and such a value is never certified. */
   readonly options?: Readonly<Record<string, unknown>>
   readonly reason?: string
+  /** The same options as OpenCode hands them, `{file:…}` replaced; absent: `options`; `undefined` or a throw: not known. */
+  readonly resolved?: () => Readonly<Record<string, unknown>> | undefined
+  /** A configuration file exists but could not be read: unlike a missing one, it may set what is not found here. */
+  readonly unreadable?: boolean
 }
 
 export interface GuardConfig {
@@ -498,18 +503,21 @@ function maxStateCharsOption(value: unknown, warnings: string[]): number {
   return chars
 }
 
+const thresholdValue = (key: keyof Thresholds, value: unknown, warnings: string[]) =>
+  num(value, DEFAULT_THRESHOLDS[key], `thresholds.${key}`, warnings, 0, key === "denyRisk" || key === "askRisk" ? 3 : 1)
+
 function thresholdsOption(value: unknown, warnings: string[]): Thresholds {
   if (value !== undefined && !isRecord(value)) warnings.push("invalid value for thresholds (object expected), using defaults")
   const t = isRecord(value) ? value : {}
   warnUnknown(t, THRESHOLD_KEYS, "thresholds.", warnings)
-  const threshold = (key: keyof Thresholds, max: number) => num(t[key], DEFAULT_THRESHOLDS[key], `thresholds.${key}`, warnings, 0, max)
+  const threshold = (key: keyof Thresholds) => thresholdValue(key, t[key], warnings)
   const thresholds: Thresholds = {
-    denyNoul: threshold("denyNoul", 1),
-    askNoul: threshold("askNoul", 1),
-    askExfiltration: threshold("askExfiltration", 1),
-    denyRisk: threshold("denyRisk", 3),
-    askRisk: threshold("askRisk", 3),
-    minConfidence: threshold("minConfidence", 1),
+    denyNoul: threshold("denyNoul"),
+    askNoul: threshold("askNoul"),
+    askExfiltration: threshold("askExfiltration"),
+    denyRisk: threshold("denyRisk"),
+    askRisk: threshold("askRisk"),
+    minConfidence: threshold("minConfidence"),
   }
   if (thresholds.askNoul > thresholds.denyNoul || thresholds.askExfiltration > thresholds.denyNoul || thresholds.askRisk > thresholds.denyRisk)
     warnings.push("inconsistent thresholds: an \"ask\" threshold is above the matching \"deny\" threshold (it will never trigger)")
@@ -563,7 +571,7 @@ export const OPTION_KEYS = [
   "rememberConfirmations",
 ]
 export const DECISION_KEYS = ["baseURL", "protocol", "model", "apiKey", "timeoutMs", "headers"]
-export const THRESHOLD_KEYS = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk", "minConfidence"]
+export const THRESHOLD_KEYS: readonly (keyof Thresholds)[] = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk", "minConfidence"]
 
 /** A misspelled option would otherwise be silently ignored. */
 function warnUnknown(value: Record<string, unknown>, known: readonly string[], prefix: string, warnings: string[]) {
@@ -986,42 +994,219 @@ export function rulesOption(value: unknown, warnings: string[], source: RuleSour
   return rules
 }
 
+/** The global or system declaration keeps this delay, or a longer one: a project's shorter delay only hardens. */
+const remembersAtLeast = (minutes: number) => (declaration: Readonly<Record<string, unknown>>) => (rememberOption(declaration.rememberConfirmations, []) ?? 0) >= minutes
+
+/** `after` on this rule makes a finding of it less severe than `before`, from the real policy functions. */
+const weakens = (rule: string, before: RuleOverride, after: RuleOverride) => {
+  const [was, is] = [before, after].map((setting) => outcomes(applied(DEFAULT_STATE, `rule:${rule}`, setting)))
+  return is!.some((value, index) => value < was![index]!)
+}
+
+/** Settings of the decision model as the client uses them. */
+const judge = (config: ModelConfig | undefined) =>
+  config && JSON.stringify([normalizedURL(config.baseURL), config.model, config.protocol, config.timeoutMs, config.apiKey, Object.entries(config.headers ?? {}).map(([name, value]) => [name.toLowerCase(), value]).sort()])
+
+/** A higher value of these lets more through; a higher `minConfidence` asks more (`interpret`, model/questions.ts). */
+const RISING_THRESHOLDS: readonly (keyof Thresholds)[] = ["denyNoul", "askNoul", "askExfiltration", "denyRisk", "askRisk"]
+const weakerThreshold = (key: keyof Thresholds, project: number, global: number) => (RISING_THRESHOLDS.includes(key) ? project > global : project < global)
+
+/** Way to relax one of these for one project: they have no `guard set` and no `projects` section. */
+const BY_TRUST = "for this project: trustedProjects, in the global configuration"
+/** Read from the global sources by `scopeLayers` and `resolveVersion`, whatever the options hold. */
+const LAYERED_KEYS = ["agents", "projects", "trustedProjects"]
+
+/**
+ * What the plugin gets without a project's options: the system entry's when it declares the plugin (loaded last by OpenCode,
+ * nothing replaces it), else the global one's, `{file:…}` replaced. `undefined`: nothing declared, or not readable.
+ */
+function heldOptions(declarations: readonly PluginDeclaration[] | string, failed: boolean, warnings: string[]): { readonly resolved: Options; readonly written: Options } | undefined {
+  const unread = "settings of the global configuration not kept: it could not be read"
+  if (typeof declarations === "string") {
+    if (failed) warnings.push(unread)
+    return undefined
+  }
+  const source = declarations.find((entry) => entry.label === "system" && entry.options) ?? declarations.find((entry) => entry.label === "global" && entry.options)
+  if (!source) {
+    if (declarations.some((entry) => entry.unreadable || entry.reason === "it is not valid JSON")) warnings.push(unread)
+    return undefined
+  }
+  const written = source.options!
+  try {
+    const resolved = source.resolved ? source.resolved() : written
+    if (resolved) return { resolved, written }
+  } catch {}
+  warnings.push(unread)
+  return undefined
+}
+
+/**
+ * The options that count: a key the project leaves out keeps the global side's value, `rules`, `secretPatterns` and the
+ * entries of `ruleOverrides` and `thresholds` add up, and what the project may not choose stays the global side's. A value
+ * equal to the global side's changes nothing: without a project, the options are returned as they came. With a `decision`
+ * on the global side, a threshold or `maxStateChars` it leaves out is compared with its default: that default is what its
+ * model is judged by. Relaxations with a check of their own (`profile`, `localAsks`, `selfProtectionByModel`, switches, `exceptions`, `allowlist`, `redactionOff`,
+ * `unprotectedAgent`, `rememberConfirmations`, the checks' settings) are refused by it, with one warning.
+ */
+function laidOverHeld(given: Options, { resolved: held, written }: { readonly resolved: Options; readonly written: Options }, globalFiles: readonly GuardFile[], trusted: () => boolean, warnings: string[]): Options {
+  const options: Record<string, unknown> = { ...given }
+  /** Set by the project: not left out, and not the global side's value (the CLI reads it as written). */
+  const posed = (key: string) => !isEmpty(given[key]) && ![held, written].some((source) => JSON.stringify(given[key]) === JSON.stringify(source[key]))
+  for (const key of OPTION_KEYS) if (!LAYERED_KEYS.includes(key) && isEmpty(given[key]) && held[key] !== undefined) options[key] = held[key]
+  if (posed("ruleOverrides") && isRecord(held.ruleOverrides)) {
+    if (isRecord(given.ruleOverrides)) options.ruleOverrides = laidOverrides(given.ruleOverrides, held.ruleOverrides, warnings)
+    else {
+      warnings.push("ruleOverrides must be an object, ignored: the global configuration's stay")
+      options.ruleOverrides = held.ruleOverrides
+    }
+  }
+  if (posed("rules") && (Array.isArray(held.rules) || Array.isArray(given.rules))) options.rules = addedRules(given.rules, held, globalFiles, warnings)
+  if (posed("secretPatterns") && Array.isArray(held.secretPatterns)) options.secretPatterns = addedPatterns(given.secretPatterns, held.secretPatterns, warnings)
+  const judged = parseDecision(held.decision, "decision", []) !== undefined
+  if (posed("thresholds") && (isRecord(held.thresholds) || judged)) options.thresholds = laidThresholds(given.thresholds, held, judged, trusted, warnings)
+  if (trusted()) return options
+  if (posed("decision") && held.decision !== undefined && judge(parseDecision(given.decision, "decision", [])) !== judge(parseDecision(held.decision, "decision", []))) {
+    warnings.push(`decision ignored: a project does not choose its decision model, the global configuration's stays; ${BY_TRUST}`)
+    options.decision = held.decision
+  }
+  if (posed("askAs") && askAsOption(given.askAs, []) === "ask" && askAsOption(held.askAs, []) === "deny") {
+    warnings.push(`askAs "ask" ignored: the global configuration asks for "deny"; ${BY_TRUST}`)
+    options.askAs = held.askAs
+  }
+  // Both ways change the verdict: cut shorter, the model no longer reads the end of an input; longer, it is less accurate
+  // and a script no longer gets the local reading.
+  if (posed("maxStateChars") && (held.maxStateChars !== undefined || judged) && maxStateCharsOption(given.maxStateChars, []) !== maxStateCharsOption(held.maxStateChars, [])) {
+    warnings.push(`maxStateChars ignored: a project does not choose what the decision model reads, the global configuration's value stays; ${BY_TRUST}`)
+    options.maxStateChars = held.maxStateChars
+  }
+  return options
+}
+
+/** The project's settings of rules over the global side's: one that would not apply leaves the global side's in place. */
+function laidOverrides(given: Readonly<Record<string, unknown>>, held: Readonly<Record<string, unknown>>, warnings: string[]): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...held }
+  for (const [rule, value] of Object.entries(given)) {
+    const check: string[] = []
+    if (!Object.hasOwn(held, rule) || ruleOverridesOption({ [rule]: value }, [], check).has(rule)) merged[rule] = value
+    else warnings.push(...check.map((line) => `${line}: the global configuration's setting stays`))
+  }
+  return merged
+}
+
+/**
+ * The project's thresholds over the global side's: one at least as strict counts, a weaker one stays the global side's, an
+ * empty or invalid one does not take its place. With a `decision` there, a threshold it leaves out counts as its default.
+ */
+function laidThresholds(given: unknown, held: Options, judged: boolean, trusted: () => boolean, warnings: string[]): unknown {
+  if (!isRecord(given)) {
+    warnings.push("invalid value for thresholds (object expected): the global configuration's stay")
+    return held.thresholds
+  }
+  const values = isRecord(held.thresholds) ? held.thresholds : {}
+  const merged: Record<string, unknown> = { ...values, ...given }
+  const restore = (key: string) => {
+    if (Object.hasOwn(values, key)) merged[key] = values[key]
+    else delete merged[key]
+  }
+  const unusable = THRESHOLD_KEYS.filter((key) => {
+    const check: string[] = []
+    thresholdValue(key, given[key], check)
+    return Object.hasOwn(values, key) && Object.hasOwn(given, key) && (isEmpty(given[key]) || check.length > 0)
+  })
+  unusable.forEach(restore)
+  if (unusable.length) warnings.push(`thresholds ${unusable.join(", ")} ignored: empty or invalid, the global configuration's stay`)
+  if (trusted()) return merged
+  const [global, project] = [thresholdsOption(values, []), thresholdsOption(merged, [])]
+  const weaker = THRESHOLD_KEYS.filter((key) => (judged || Object.hasOwn(values, key)) && weakerThreshold(key, project[key], global[key]))
+  weaker.forEach(restore)
+  if (weaker.length) warnings.push(`thresholds ${weaker.join(", ")} ignored: less strict than the global configuration; ${BY_TRUST}`)
+  return merged
+}
+
+const WAIVED_BY_RULE = ["ruleOverrides", "exceptions"]
+
+/** Rules named by a `ruleOverrides` or `exceptions` anywhere in these options: at the top, or in a section. */
+function settingIds(value: unknown): string[] {
+  if (!isRecord(value)) return []
+  return Object.entries(value).flatMap(([key, item]) => (WAIVED_BY_RULE.includes(key) && isRecord(item) ? Object.keys(item) : settingIds(item)))
+}
+
+/**
+ * The global side's rules, then the project's: a rule of the project never replaces one of the same identifier, nor takes
+ * the identifier of a built-in rule the global side sets, in its entry or a global guard.json, at the top or in a section
+ * (its setting would no longer apply). Written without an identifier, a rule gets one from its place in this list, so it
+ * collides with none.
+ */
+function addedRules(given: unknown, held: Options, globalFiles: readonly GuardFile[], warnings: string[]): unknown[] {
+  const global: readonly unknown[] = Array.isArray(held.rules) ? held.rules : []
+  if (!Array.isArray(given)) {
+    warnings.push("rules must be an array, ignored: the global configuration's stay")
+    return [...global]
+  }
+  const ids = new Set(global.flatMap((item, index) => (isRecord(item) ? [ruleIdOf(item, index)] : [])))
+  const settings = [held, ...globalFiles.map((file) => file.data)].flatMap(settingIds)
+  const written = new Set(global.map((item) => JSON.stringify(item)))
+  const ignored: string[] = []
+  const added = given.filter((item) => {
+    if (written.has(JSON.stringify(item))) return false
+    const id = isRecord(item) && typeof item.id === "string" ? item.id : undefined
+    if (id === undefined || (!ids.has(id) && !settings.includes(id))) return true
+    ignored.push(JSON.stringify(id))
+    return false
+  })
+  if (ignored.length) warnings.push(`rules ${[...new Set(ignored)].join(", ")} ignored: the global configuration uses the identifier, and its setting stays; rename the rule in the project`)
+  return [...global, ...added]
+}
+
+/** The global side's patterns, then the project's new ones: a project adds, and never sets one aside. */
+function addedPatterns(given: unknown, held: readonly unknown[], warnings: string[]): unknown[] {
+  if (!Array.isArray(given)) {
+    warnings.push("secretPatterns must be an array, ignored: the global configuration's stay")
+    return [...held]
+  }
+  const key = (item: unknown) => {
+    const entry = isRecord(item) ? item : { pattern: item }
+    return JSON.stringify([typeof entry.type === "string" ? entry.type : "custom", entry.pattern])
+  }
+  const active = new Set(held.filter((item) => !isRecord(item) || item.enabled !== false).map(key))
+  const added = new Set<string>()
+  let aside = false
+  const fresh = given.filter((item) => {
+    const name = key(item)
+    if (active.has(name)) {
+      aside ||= isRecord(item) && item.enabled === false
+      return false
+    }
+    if (added.has(name)) return false
+    added.add(name)
+    return true
+  })
+  if (aside) warnings.push("secretPatterns: an entry of the global configuration set aside by the project ignored: it stays active; only the global configuration changes it")
+  return [...held, ...fresh]
+}
+
 /**
  * `env` is only used for the default log path: configuration comes solely from `options`. `declared`: plugin entries
  * of the global and system configurations, read only if a relaxation is requested (absent or failing: relaxations
  * ignored).
  */
 export function parseConfig(
-  options: Options,
+  given: Options,
   env: Record<string, string | undefined> = {},
   declared?: () => readonly PluginDeclaration[],
   inputs?: ScopeInputs,
 ): { config: GuardConfig; warnings: string[] } {
   const warnings: string[] = []
-  warnUnknown(options, OPTION_KEYS, "", warnings)
-  const thresholds = thresholdsOption(options.thresholds, warnings)
-
-  const secretPatterns = secretPatternsOption(options.secretPatterns, warnings)
-  const requestedOff = [...new Set(redactionOffOption(options[REDACTION_OFF], "", warnings))]
-
-  const rules = rulesOption(options.rules, warnings)
-
-  // Relaxations (`profile`, rules set to `off`, `ask` or `model`, `localAsks: "model"`, `selfProtectionByModel`, a switch
-  // at `false`): a project's opencode.json can replace the plugin's options, so each one is kept only if the global or system
-  // configuration declares the plugin with the same value (`deny`: from anywhere). Files read once, only if one is
-  // requested; at the slightest doubt, the relaxation is ignored.
-  const overrides = ruleOverridesOption(options.ruleOverrides, rules, warnings)
-  const remember = rememberOption(options.rememberConfirmations, warnings)
-  const wanted = profileValue(options.profile)
-  if (wanted === null) warnings.push(`invalid value for profile (${shown(options.profile)}), using "standard"`)
-  let profile: Profile = wanted ?? "standard"
+  warnUnknown(given, OPTION_KEYS, "", warnings)
   let declarations: readonly PluginDeclaration[] | string | undefined
+  let failed = false
   const loaded = () => {
     if (declarations === undefined)
       try {
         declarations = declared?.() ?? "the global configuration was not checked"
       } catch {
         declarations = "the global and system configurations could not be read"
+        failed = true
       }
     return declarations
   }
@@ -1032,22 +1217,50 @@ export function parseConfig(
     const found = declarations.map((entry) => `${entry.label} configuration: ${entry.options ? "it does not set this value" : entry.reason}`)
     return `a relaxation counts only if the global or system configuration sets it too (${found.join("; ")})`
   }
+  let trustedAtStart: boolean | undefined
+  const trusted = () => (trustedAtStart ??= inputs !== undefined && trustedProject(loaded(), inputs))
+  // OpenCode hands one entry's options, whole: a project's entry replaces the global one's. What the global side sets is
+  // read back here: `held` is what the plugin gets without a project, `options` what counts with this one.
+  const global = heldOptions(loaded(), failed, warnings)
+  const options = global ? laidOverHeld(given, global, inputs?.files.filter((file) => file.global) ?? [], trusted, warnings) : given
+  const held = global?.resolved
+  const thresholds = thresholdsOption(options.thresholds, warnings)
+
+  const secretPatterns = secretPatternsOption(options.secretPatterns, warnings)
+  const requestedOff = [...new Set(redactionOffOption(options[REDACTION_OFF], "", warnings))]
+
+  const rules = rulesOption(options.rules, warnings)
+
+  // Relaxations (`profile`, rules set to `off`, `ask` or `model`, `localAsks: "model"`, `selfProtectionByModel`, a switch
+  // at `false`): a project's opencode.json can replace the plugin's options, so each one is kept only if the global or system
+  // configuration declares the plugin with the same value (`deny`: from anywhere). At the slightest doubt, the relaxation
+  // is ignored, and what the global side sets stays.
+  const overrides = ruleOverridesOption(options.ruleOverrides, rules, warnings)
+  const remember = rememberOption(options.rememberConfirmations, warnings)
+  const wanted = profileValue(options.profile)
+  if (wanted === null) warnings.push(`invalid value for profile (${shown(options.profile)}), using "standard"`)
+  let profile: Profile = wanted ?? "standard"
   // Settings and questions of the output and prompt checks: a project's opencode.json could weaken a check without it
   // showing (a threshold of 1, a question rewritten): kept only when the global or system configuration sets the same
-  // value; otherwise the defaults, with the check still on.
-  const guardedCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", parsed: T | undefined, defaults: T): T | undefined => {
-    if (!parsed?.custom) return parsed
+  // value; otherwise the defaults, with the check still on. A check switched on without settings, or kept on over a
+  // refused `false`, has the global side's.
+  const heldCheck = <T extends { custom: boolean }>(name: "outputCheck" | "promptCheck", read: (value: unknown, warnings: string[]) => T | undefined, defaults: T): T => {
+    // A value read from another file is not certified: not even the global side's own options keep it.
+    if (!global || JSON.stringify(global.written[name] ?? null).includes("{file:")) return defaults
+    const settings = read(global.resolved[name], [])
+    return settings?.custom ? settings : defaults
+  }
+  const guardedCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", parsed: T | undefined, kept: T): T | undefined => {
+    if (!parsed?.custom) return parsed && kept.custom ? { ...kept, explicit: parsed.explicit } : parsed
     const why = refusal((declared) => JSON.stringify(declared[name]) === JSON.stringify(options[name]))
     if (why === undefined) return parsed
-    warnings.push(`${name} settings ignored, defaults used: ${why.replace("a relaxation counts", "they count")}`)
-    return { ...defaults, explicit: parsed.explicit }
+    warnings.push(`${name} settings ignored, ${kept.custom ? "the global configuration's stay" : "defaults used"}: ${why.replace("a relaxation counts", "they count")}`)
+    return { ...kept, explicit: parsed.explicit }
   }
   // Exceptions and memory of confirmations: relaxations too, each exception on its own (rule, real path). A project's
   // opencode.json may replace the options: outside a project trusted at startup, a path is resolved only when a global or
   // system declaration lists it as written (the paths a repository chose are not consulted otherwise).
-  let trustedAtStart: boolean | undefined
-  const unretained = (rule: string, path: string) =>
-    (trustedAtStart ??= inputs !== undefined && trustedProject(loaded(), inputs)) ? undefined : refusal((declaration) => listsPath(declaration, rule, path))
+  const unretained = (rule: string, path: string) => (trusted() ? undefined : refusal((declaration) => listsPath(declaration, rule, path)))
   const exceptions = exceptionsOption(options.exceptions, rules, inputs, warnings, unretained)
   // Settings by agent and by project: inputs read once (global and system files read now); when a guard.json file,
   // `agents`, `projects` or `trustedProjects` exists, the layered resolution replaces the checks below, whose warnings
@@ -1069,14 +1282,14 @@ export function parseConfig(
     const why = refusal((declared) => unprotectedAgentOption(declared.unprotectedAgent, []) === unprotectedAgent)
     if (why) {
       warnings.push(`unprotectedAgent ignored: ${why}`)
-      unprotectedAgent = undefined
+      unprotectedAgent = unprotectedAgentOption(held?.unprotectedAgent, [])
     }
   }
   // Strings never redacted: a relaxation of every rule on secrets and of what the model and the log see, kept in a project
   // trusted at startup, otherwise each only when a global or system declaration lists it too (never quoted).
   const requestedAllowlist = allowlistOption(options.allowlist, warnings)
   const allowlist = requestedAllowlist.filter(
-    (item) => (trustedAtStart ??= inputs !== undefined && trustedProject(loaded(), inputs)) || !refusal((declaration) => allowlistOption(declaration.allowlist, []).includes(item)),
+    (item) => trusted() || !refusal((declaration) => allowlistOption(declaration.allowlist, []).includes(item)),
   )
   if (allowlist.length < requestedAllowlist.length) {
     const dropped = requestedAllowlist.length - allowlist.length
@@ -1119,26 +1332,32 @@ export function parseConfig(
   }
   let rememberMinutes = remember ?? 0
   if (rememberMinutes > 0) {
-    const why = refusal((declaration) => rememberOption(declaration.rememberConfirmations, []) === rememberMinutes)
+    const why = refusal(remembersAtLeast(rememberMinutes))
     if (why) {
-      certification.push(`rememberConfirmations ${rememberMinutes} ignored: ${why}`)
-      rememberMinutes = 0
+      certification.push(`rememberConfirmations ${rememberMinutes} ignored: ${why}${forProject(inputs?.project, `guard set rememberConfirmations ${rememberMinutes}`)}`)
+      rememberMinutes = rememberOption(held?.rememberConfirmations, []) ?? 0
     }
   }
+  // What the global side sets and the rule accepts: a value it refused itself is no reference.
+  const heldOverrides = ruleOverridesOption(held?.ruleOverrides, rules, [])
   for (const [rule, setting] of overrides) {
+    const kept = heldOverrides.get(rule)
     if (setting === "model" && RULE_FEATURES.get(rule) === "always" && !selfProtectionByModel) {
       certification.push(`ruleOverrides.${rule} "model" ignored: this rule is always active ("model" needs selfProtectionByModel)`)
-      overrides.delete(rule)
+      if (kept === "deny") overrides.set(rule, kept)
+      else overrides.delete(rule)
       continue
     }
-    // Turning on a rule that is off by default only hardens.
-    if (setting === "deny" || (OFF_BY_DEFAULT_RULES.has(rule) && setting !== "off")) continue
+    // Turning on a rule that is off by default only hardens, unless the global side already sets it; at least as strict as
+    // what the global side sets for this rule, too.
+    if (setting === "deny" || (kept ? !weakens(rule, kept, setting) : OFF_BY_DEFAULT_RULES.has(rule) && setting !== "off")) continue
     const why = refusal((declaration) => isRecord(declaration.ruleOverrides) && overrideValue(declaration.ruleOverrides[rule]) === setting)
     if (why) {
       // `off` refused on a rule that stays off anyway: nothing was ignored.
-      if (!OFF_BY_DEFAULT_RULES.has(rule) || ruleEnabled(rule, version?.base.policy))
+      if (kept || !OFF_BY_DEFAULT_RULES.has(rule) || ruleEnabled(rule, version?.base.policy))
         certification.push(`ruleOverrides.${rule} "${overrideValue((options.ruleOverrides as Record<string, unknown>)[rule])}" ignored: ${why}`)
-      overrides.delete(rule)
+      if (kept) overrides.set(rule, kept)
+      else overrides.delete(rule)
     }
   }
 
@@ -1150,13 +1369,15 @@ export function parseConfig(
     FEATURE_NAMES.map((name) => [name, bool(name === "decisionModel" && misplaced ? undefined : options[name], defaultOf(name), name, warnings)]),
   ) as unknown as Record<(typeof FEATURE_NAMES)[number], boolean>
   // Without layers, a protection switched off by the options is a relaxation like the others; a default of the profile
-  // retained is not. With layers, `resolveVersion` decides, and also reads the `projects` sections.
+  // retained is not, unless the global side turns on what its profile leaves off. With layers, `resolveVersion` decides,
+  // and also reads the `projects` sections.
   const keptOff = (name: string) => {
     const why = switchRefusal(refusal, name, false, inputs?.project)
     if (why) certification.push(`${name} false ignored: ${why}`)
     return !why
   }
-  if (!version) for (const name of FEATURE_NAMES) if (!parsed[name] && defaultOf(name) && !keptOff(name)) parsed[name] = true
+  const heldOn = (name: string) => held !== undefined && bool(held[name], false, name, [])
+  if (!version) for (const name of FEATURE_NAMES) if (!parsed[name] && (defaultOf(name) || heldOn(name)) && !keptOff(name)) parsed[name] = true
   // Layered: every switch is that of the startup version.
   if (version) warnings.push(...version.warnings)
   const base = version?.base
@@ -1172,11 +1393,13 @@ export function parseConfig(
         redactWire: version!.switches.redactWire,
       }
     : parsed
-  // A check turned off counts like a switch; a check turned back on by a `projects` section starts from the defaults.
-  const finalCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", requested: T | undefined, defaults: T): T | undefined => {
+  // A check turned off counts like a switch; a check turned back on by a `projects` section, or kept on over a project's
+  // refused `false`, starts from the global side's settings, else from the defaults.
+  const finalCheck = <T extends { explicit: boolean; custom: boolean }>(name: "outputCheck" | "promptCheck", requested: T | undefined, kept: T): T | undefined => {
     const on = version ? version.switches[name] : requested !== undefined || !keptOff(name)
-    return on ? (requested ?? defaults) : undefined
+    return on ? (requested ?? kept) : undefined
   }
+  const [outputHeld, promptHeld] = [heldCheck("outputCheck", outputCheckOption, DEFAULT_OUTPUT_CHECK), heldCheck("promptCheck", promptCheckOption, DEFAULT_PROMPT_CHECK)]
   // Without layers: switched on by the system configuration when it declares the plugin, otherwise by the global file
   // (absent: on).
   const modelGrants = base ? base.modelGrants : modelUndeclared === undefined && (systemSwitch(loaded()) ?? modelSwitchedOn(entryOf(loaded(), "global") ?? {}))
@@ -1203,8 +1426,8 @@ export function parseConfig(
       allowlist,
       rules,
       ...(unprotectedAgent === undefined ? {} : { unprotectedAgent }),
-      outputCheck: finalCheck("outputCheck", guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), DEFAULT_OUTPUT_CHECK), DEFAULT_OUTPUT_CHECK),
-      promptCheck: finalCheck("promptCheck", guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), DEFAULT_PROMPT_CHECK), DEFAULT_PROMPT_CHECK),
+      outputCheck: finalCheck("outputCheck", guardedCheck("outputCheck", outputCheckOption(options.outputCheck, warnings), outputHeld), outputHeld),
+      promptCheck: finalCheck("promptCheck", guardedCheck("promptCheck", promptCheckOption(options.promptCheck, warnings), promptHeld), promptHeld),
       ...(layers ? { layers } : {}),
       ...(version ? { version } : {}),
       modelGrants,
@@ -1272,11 +1495,13 @@ type Refusal = (matches: (options: Readonly<Record<string, unknown>>) => boolean
 /** A path as one word of a command to copy: quoted unless all its characters are harmless to a shell. */
 const shellWord = (path: string) => (/^[\w./+@%:=,-]+$/.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`)
 
+/** The directory is part of the command: without it, `--project` means the terminal's own directory. */
+const forProject = (project: string | undefined, command: string) => `; for this project: ${command} --project${project === undefined ? "" : ` ${shellWord(project)}`}`
+
 /** Why a switch's value is not declared by the global or system configuration, with what to do about it. */
 function switchRefusal(refusal: Refusal, name: string, value: boolean, project: string | undefined): string | undefined {
   const why = refusal((declaration) => switchIn(declaration, name) === value)
-  // The directory is part of the command: without it, `--project` means the terminal's own directory.
-  return why && `${why}; for this project: guard set ${name} ${value} --project${project === undefined ? "" : ` ${shellWord(project)}`}`
+  return why && `${why}${forProject(project, `guard set ${name} ${value}`)}`
 }
 const RELAX_KEYS = ["guard", ...RELAX_SWITCHES, "models"]
 /** Agents OpenCode runs by itself or that every session may reach: never relaxed. */
@@ -1798,7 +2023,10 @@ function scopeLayers(
       key: "rememberConfirmations",
       value: String(parsed.remember),
       text: `rememberConfirmations ${parsed.remember}`,
-      certify: () => refusal((declaration) => rememberOption(declaration.rememberConfirmations, []) === parsed.remember),
+      certify: () => {
+        const why = parsed.remember ? refusal(remembersAtLeast(parsed.remember)) : refusal((declaration) => rememberOption(declaration.rememberConfirmations, []) === parsed.remember)
+        return why && `${why}${forProject(inputs.project, `guard set rememberConfirmations ${parsed.remember}`)}`
+      },
       ...label,
     })
   const explicit = (source: Readonly<Record<string, unknown>>) =>

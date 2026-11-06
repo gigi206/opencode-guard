@@ -280,15 +280,22 @@ describe("the system configuration keeps the last word", () => {
 describe("the checks a project stops by way of the model are named", () => {
   const decision = { baseURL: "http://127.0.0.1:9/v1", model: "nox-4b", timeoutMs: 100 }
   const CUT = /WARN output check and prompt check not running: the decision model in use is not the one the global configuration declares/
-  it("PS-38: decision replaced by another address", async () => {
-    const log = (await session({ decision }, { decision: { ...decision, baseURL: "http://127.0.0.1:8/v1" } })).log()
-    assert.match(log, CUT)
+  const TRUSTED = { trustedProjects: ["<APP>"] }
+  const other = { decision: { ...decision, baseURL: "http://127.0.0.1:8/v1" } }
+  it("PS-38: decision replaced by another address: only a trusted project does; another one's is ignored, the checks run", async () => {
+    assert.match((await session({ decision }, other, TRUSTED)).log(), CUT)
+    const log = (await session({ decision }, other)).log()
+    assert.doesNotMatch(log, CUT)
+    assert.match(log, /WARN decision ignored: /)
   })
-  it("PS-39: decision removed", async () => {
-    for (const project of [{}, { decision: false }]) assert.match((await session({ decision }, project)).log(), CUT)
+  it("PS-39: decision removed: only a trusted project does; left out or removed by another one, the global model stays", async () => {
+    assert.match((await session({ decision }, { decision: false }, TRUSTED)).log(), CUT)
+    for (const project of [{}, { decision: false }]) assert.doesNotMatch((await session({ decision }, project)).log(), CUT)
+    assert.match((await session({ decision }, { decision: false })).log(), /WARN decision ignored: /)
   })
   it("PS-40: only the check the global file leaves on", async () => {
-    assert.match((await session({ decision, outputCheck: false }, {})).log(), /WARN prompt check not running: /)
+    assert.match((await session({ decision, outputCheck: false }, other, TRUSTED)).log(), /WARN prompt check not running: /)
+    assert.doesNotMatch((await session({ decision, outputCheck: false }, {})).log(), /not running: /)
   })
   it("witness: PS-41: nothing for a user without a declared model, nor when the checks run or the model is switched off by the user", async () => {
     for (const [global, project] of [[{}, {}], [undefined, {}], [{ decision }, { decision }], [{ decision, decisionModel: false }, {}], [{ decision, outputCheck: false, promptCheck: false }, {}]] as const)

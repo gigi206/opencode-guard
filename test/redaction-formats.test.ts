@@ -169,8 +169,12 @@ describe("redaction formats", () => {
     const decision = { baseURL: "https://decision.local/v1", model: "nox-4b" }
     const grants = (effective: Json, global: Json) => parseConfig(effective, {}, declared(global)).config.modelGrants
     assert.equal(grants({ decision, redactionOff: JWT_OFF }, { decision, redactionOff: JWT_OFF }), true)
+    // Left out by a project: the global file's stays, so the model sees what the global one sees.
+    const kept = parseConfig({ decision }, {}, declared({ decision, redactionOff: JWT_OFF })).config
+    assert.deepEqual([kept.disabledPatterns, kept.modelGrants], [["jwt"], true])
     // The global file turns jwt off, the effective options do not: the model would not see what the global one sees.
-    assert.equal(grants({ decision }, { decision, redactionOff: JWT_OFF }), false)
+    assert.equal(grants({ decision, redactionOff: [] }, { decision, redactionOff: JWT_OFF }), false)
+    assert.equal(grants({ decision, redactionOff: ["github_token"] }, { decision, redactionOff: JWT_OFF }), false)
   })
   it("RF-10: the plugin applies a format turned off by the global configuration and says so on its start line; a project's is refused", async () => {
     const start = async (options: Json, global: Json) => {

@@ -177,7 +177,7 @@ export function settingRows(terminal: CliIo, agent: string | undefined) {
     regularFile: isRegularFile,
     ...(sources.origin ? { origin: sources.origin } : {}),
   })
-  const defaults = parseConfig({}, io.env, () => sources.declarations).config
+  const defaults = parseConfig({}, io.env, () => []).config
   const version = resolveVersion(parsed.config.layers!, files)
   const policy = new Map((version.settings?.(agent) ?? []).map((row) => [row.key, row]))
   const defaultPolicy = new Map((resolveVersion(parseConfig({}, io.env, () => [], { files: [], realPath: realOrUndefined, regularFile: isRegularFile }).config.layers!, []).settings?.(agent) ?? []).map((row) => [row.key, row]))
