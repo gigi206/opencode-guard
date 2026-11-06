@@ -47,7 +47,7 @@ The exact patterns, exceptions and false positives are listed in [Rules and reda
 
 ## Installation
 
-**Platforms:** Linux and macOS, tested in the CI on Node and Bun. Windows is not tested, and the rules are written for POSIX shells: most PowerShell commands are left to the decision model, and pass without it. See [the limits](docs/operations.md).
+**Platforms:** Linux and macOS, tested in the CI on Node and Bun. On Windows, only a dedicated subset of tests runs in the CI, and the rules are written for POSIX shells: most PowerShell commands are left to the decision model, and pass without it. See [the limits](docs/operations.md).
 
 OpenCode V2 loads a local plugin from a **directory** containing `index.ts` at its root. Add the plugin to `opencode.json` — the global file is `~/.config/opencode/opencode.json`, the project file is `<project>/opencode.json`:
 
