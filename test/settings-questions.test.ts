@@ -57,6 +57,15 @@ describe("guard settings: questions of a check", () => {
       assert.equal(row({ [check]: { questions: written } }, `${check}.questions`)?.[2], "default")
     })
 
+    it(`${check} turned off: its questions are not in force, whatever is written`, () => {
+      const cells = row({ [check]: { enabled: false, questions: QUESTIONS } }, `${check}.questions`)
+      assert.deepEqual(cells?.slice(2), ["default", "default", "global opencode.json", "same as default"])
+    })
+
+    it(`witness: ${check} turned off without questions shows the default ones`, () => {
+      assert.equal(row({ [check]: false }, `${check}.questions`)?.[2], "default")
+    })
+
     it(`witness: the custom flag of ${check} still covers its other settings`, () => {
       const options = { decision, [check]: { threshold: 0.3 } }
       const parsed = parseConfig(options, {}, () => [{ label: "global", options }]).config

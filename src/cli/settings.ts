@@ -43,8 +43,8 @@ const count = (noun: string) => (value: unknown) => {
 const isSet = (value: unknown) => (value === undefined || value === "" ? "not set" : "set")
 const customized = (value: unknown) => (value ? "custom" : "default")
 // `custom` of a check covers all its settings, the questions are only one of them: they are compared on their own, with the
-// constants `parseConfig` falls back on. Undefined when the check is off.
-const questionsChanged = (check: { readonly questions: object } | undefined, defaults: { readonly questions: object }) => check && JSON.stringify(check.questions) !== JSON.stringify(defaults.questions)
+// constants `parseConfig` falls back on. False when the check is off: the questions it writes are not in force.
+const questionsChanged = (check: { readonly questions: object } | undefined, defaults: { readonly questions: object }) => check !== undefined && JSON.stringify(check.questions) !== JSON.stringify(defaults.questions)
 const feature = (name: keyof GuardConfig["features"], what: string, policy: boolean): SettingEntry => ({
   name,
   type: "boolean",
