@@ -124,6 +124,8 @@ Each finding names its rule, in the log, in a refusal and in a confirmation. The
 | `codemode-fetch` | `dangerousCommands` | `ask` | CodeMode code that makes network requests |
 | `script-unverifiable` | `dangerousCommands` | `ask` | a script written by the agent that can no longer be checked |
 
+For `self-protection`, “does more than read” means what the net can tell from the text: a command that only reads can still ask, among them a reader behind a launcher (`timeout 5 cat opencode.json`, `nice cat opencode.json`, `time cat opencode.json`). [Known limitations](operations.md#known-limitations) lists what the net costs.
+
 Only `secret-file-read` accepts [exceptions](configuration.md#exceptions-for-one-file-exceptions) and the [memory of confirmations](configuration.md#remembering-confirmations-rememberconfirmations): its findings name the files they are about (its reason in a shell command names them, at most three, then how many more, a relative path or one with a `..` component as written; with the default settings, after the first file, a file recognized by its content alone is not named).
 
 ## Secret redaction

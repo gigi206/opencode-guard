@@ -4197,6 +4197,8 @@ function outsideQuotes(text: string): string {
 function namingOnly(words: readonly string[]): boolean {
   const rest = words.join(" ")
   if (/[<>]/.test(outsideQuotes(rest).replace(HARMLESS_REDIRECTION, " "))) return false
+  // `segments` reads only the innermost substitution: the outer one runs a command nothing else reads.
+  if (quoteStates(rest) && /\$\([^)]*\$\(/.test(outsideQuotes(rest))) return false
   const name = words[0]?.split("/").pop() ?? ""
   return NAMING_COMMANDS.has(name) || (name === "find" && !FIND_ACTIONS.test(rest.replace(/["'\\]/g, "")))
 }
@@ -4268,14 +4270,34 @@ function readsEveryWord(data: string): boolean {
 const LONE_ASSIGNMENT = /^\s*(?:(?:export|readonly)\s+)?([A-Za-z_]\w*)(?:\[[^\]\s]*\])?\+?=\S*\s*$/
 const VARIABLE_USE = /\$\{?[#!]?([A-Za-z_]\w*)/g
 
+const SEPARATOR_CHARS = ";&|\n"
+
+/** The text with each separator between quotes as a control character, so that it cuts nothing; unchanged where `quoteStates` does not hold. */
+function hideQuotedSeparators(text: string): string {
+  const states = quoteStates(text)
+  // A `#` right behind `)` starts a comment `quoteStates` does not see: a quote in it hides nothing from the shell. A `$(`
+  // that `segments` does not read keeps the whole text: cut at a separator, it does not hide behind a naming command.
+  if (!states || /[\x02-\x05]|\)#/.test(text) || text.replace(/\$\([^()]*\)/g, " ").includes("$(")) return text
+  let open = false
+  return text.replace(/['";&|\n]/g, (char, i: number) => {
+    if (states[i]! >= 2) open = states[i] === 2
+    const at = SEPARATOR_CHARS.indexOf(char)
+    return open && at >= 0 ? String.fromCharCode(2 + at) : char
+  })
+}
+
+const showQuotedSeparators = (text: string) => text.replace(/[\x02-\x05]/g, (char) => SEPARATOR_CHARS[char.charCodeAt(0) - 2]!)
+
 /**
  * Parts of the data the net reads when no word has to be: each segment, except one that only reads or only names, of which
  * only the words of its launchers stay (`time -o x`), and an assignment no `$D` of the command uses. `dd if=` only reads.
+ * A separator between quotes cuts no segment; an escaped one still does.
  */
 function segmentsToRead(data: string, command: string): string[] {
   const reads = onlyReads(command)
   const used = new Set(Array.from(command.matchAll(VARIABLE_USE), (match) => match[1]))
-  return segments(data, SHELL_SEPARATORS).flatMap((segment) => {
+  return segments(hideQuotedSeparators(data), SHELL_SEPARATORS).flatMap((hidden) => {
+    const segment = showQuotedSeparators(hidden)
     const [launchers, program] = behindLaunchers(segment)
     if (reads || onlyReads(segment) || namingOnly(program)) return [launchers.join(" ")]
     const assigned = LONE_ASSIGNMENT.exec(segment)?.[1]
