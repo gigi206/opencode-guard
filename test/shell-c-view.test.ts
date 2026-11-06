@@ -436,5 +436,5 @@ describe("redirections are not the destination of a copy", () => {
   cases("ask/home-move", ["mv ~/Documents /tmp/x 2> /tmp/e", "mv ~/Documents /tmp/x 2>&1", "mv ~/Documents /tmp/x < f"], "witness: a source of mv stays one: ")
 
   // Limits of the documentation.
-  cases("none", [">/tmp/o tee /dev/sda", ">/tmp/o cp a /dev/sda", 'cp a /dev/sda 2> "/tmp/e f"'], "witness: limit: ")
+  cases("none", ['cp a /dev/sda 2> "/tmp/e f"'], "witness: limit: ")
 })

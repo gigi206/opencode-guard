@@ -44,21 +44,21 @@ const PRINTER = "opencode auth export"
 // Verdicts of the deployed tree q26-c3 under the settings of RV27-1: a credential file read, a dynamic source for one form.
 const READ_ASKED = (rule: string) => [`ask:${rule}`, `ask:${rule} (model)`, `ask:${rule} (model)`, `ask:${rule}`, `ask:${rule}`]
 // Findings of the deployed tree q26-c3 in RV27-4, per setting: the number of each short verdict, and a SHA-256 of the
-// findings as JSON joined by NUL characters.
+// findings as JSON joined by NUL characters. Since then, one drawn command asks more under two settings: its `<<'EOF'guard rules off` line now reaches the rule.
 const PROBE_COUNTS = [
   { "ask:dynamic-shell-source": 59, "ask:guard-cli": 149, "ask:interpreter-dangerous-code": 9, "ask:interpreter-network": 42, "ask:remote": 265, "ask:rm": 139, "ask:rm-critical": 20,
     "ask:secret-file-network": 94, "ask:secret-file-read": 170, "ask:upload": 268, "deny:rm-critical": 10, "deny:secret-file-network": 690, none: 585 },
-  { "ask:dynamic-shell-source (model)": 56, "ask:guard-cli": 174, "ask:interpreter-dangerous-code (model)": 9, "ask:interpreter-network (model)": 188, "ask:nested-opencode": 1,
-    "ask:remote (model)": 241, "ask:rm (model)": 100, "ask:rm-critical": 20, "ask:secret-file-network": 94, "ask:secret-file-read (model)": 170, "ask:upload (model)": 162,
+  { "ask:dynamic-shell-source (model)": 56, "ask:guard-cli": 176, "ask:interpreter-dangerous-code (model)": 9, "ask:interpreter-network (model)": 188, "ask:nested-opencode": 1,
+    "ask:remote (model)": 239, "ask:rm (model)": 100, "ask:rm-critical": 20, "ask:secret-file-network": 94, "ask:secret-file-read (model)": 170, "ask:upload (model)": 162,
     "deny:rm-critical": 10, "deny:secret-file-network": 690, none: 585 },
-  { "ask:guard-cli": 174, "ask:nested-opencode": 1, "ask:secret-file-network": 95, "ask:secret-file-read": 242, "deny:secret-file-network": 692, none: 1296 },
+  { "ask:guard-cli": 176, "ask:nested-opencode": 1, "ask:secret-file-network": 95, "ask:secret-file-read": 242, "deny:secret-file-network": 692, none: 1294 },
   { "ask:dynamic-shell-source": 72, "ask:guard-cli": 261, "ask:interpreter-dangerous-code": 17, "ask:interpreter-network": 42, "ask:remote": 506, "ask:rm": 239, "ask:rm-critical": 35,
     "ask:secret-file-read": 265, "ask:upload": 430, "deny:rm-critical": 48, none: 585 },
 ]
 const PROBE_DIGESTS = [
   "9d9268aaa67e25ed99734085a859a196db9ce72a32d3dc35ff2e7dddb58fe5a2",
-  "eefeed7bf44ba5e009736a9e2cb294905e01766a0c7de6a04cfb7e2c19802108",
-  "71ed1bbb132df579a29f3b76a50c48de5bfbcc54a74969ede720052e48461f1f",
+  "38beb3422424aff749666bb481ccabaa454539c40bcee59956054684f529e715",
+  "029fdcc8cae020c9482c74fd632348447a568258e9e18a7421890d0a899592e2",
   "962b5a7ffaa14cb59da40b2b2f190e0aae67db89b5f6942f026665c396936423",
 ]
 

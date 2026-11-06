@@ -412,6 +412,43 @@ function withoutRedirections(args: readonly string[]): string[] {
   return words
 }
 
+const CLOSING_GROUP = /\)*/y
+
+/** Segments for the readers of a launcher: cut as the shell cuts, where `2>&1` stays in its command, and at every `&`, which also cuts a quoted word. */
+const launcherSegments = (command: string) => new Set([...segments(command, SHELL_SEPARATORS), ...segments(command)])
+
+/**
+ * The segment without the redirections written in it and their targets, read by the words of the shell (`shellEnd`):
+ * unlike `withoutRedirections`, on text that still has its quotes, so a quoted `'>'` stays a word. A target known at run
+ * time goes as well (`>$X`, `2>"$LOG"`). An operator without a target (a segment cut at `2>&1`) stays a word, and a word
+ * that the read does not close keeps the rest of the segment. Linear cost.
+ */
+function withoutWrittenRedirections(segment: string): string {
+  const budget = { left: 8 * segment.length + 1024 }
+  const wordEnd = (at: number) => {
+    const substitution = /[<>]/.test(segment[at] ?? "") && segment[at + 1] === "("
+    const end = substitution ? shellEnd(segment, at + 1, segment.length, budget, true) : shellEnd(segment, at, segment.length, budget, false)
+    return end < 0 ? segment.length : Math.max(end, at + 1)
+  }
+  let [out, i] = ["", 0]
+  while (i < segment.length) {
+    const start = stickyEnd(BLANKS, segment, i)
+    out += segment.slice(i, start)
+    if (start === segment.length) break
+    const substitution = /[<>]/.test(segment[start]!) && segment[start + 1] === "("
+    const operator = substitution ? start : stickyEnd(REDIRECTION_OPERATOR, segment, start)
+    const target = stickyEnd(WORD_GAP, segment, operator)
+    const end = operator > start && target < segment.length ? wordEnd(target) : 0
+    // A `)` glued to the target closes a group, it is no word (`(cmd >x)`).
+    if (end > 0) i = stickyEnd(CLOSING_GROUP, segment, end)
+    else {
+      i = wordEnd(start)
+      out += segment.slice(start, i)
+    }
+  }
+  return out
+}
+
 /** One short option of a word, with its value when it takes one (attached to the letter, otherwise the next word). */
 interface ShortOption {
   readonly letter: string
@@ -1935,25 +1972,74 @@ function launcherStreamExecutes(child: readonly string[], kind: ChildKind): bool
   return false
 }
 
+/** One reading of `xargsDynamic`. `alone`: `xargs` without a child counts. */
+function xargsWordsDynamic(args: readonly string[], alone: boolean): boolean {
+  const { start, replacement, help } = xargsInfo(args)
+  if (help) return false
+  const child = args.slice(start)
+  if (child.length === 0) return alone
+  if (replacement !== null) return launcherTemplateExecutes(child, (token) => token.includes(replacement))
+  const kind = childKind(child[0]!)
+  return kind !== "rm" && kind !== "other" && launcherStreamExecutes(child, kind)
+}
+
 /**
- * Dynamic execution through the batch wrapper: child absent (reads commands), executable name
- * with a template, or executable source that the input can change. One pass per segment.
+ * Dynamic execution through the batch wrapper: `xargs` alone (no child, no redirection either), executable name
+ * with a template, or executable source that the input can change. Two readings whose asks add up: the words as written,
+ * and without the redirections (`xargs >x sh`, as `xargs sh`), where no child does not count: without one, `xargs` runs
+ * `echo`, so `ls | xargs 2>/dev/null` does not ask. One pass per segment.
  */
 function xargsDynamic(command: string): boolean {
-  for (const segment of segments(command)) {
-    const { name, args } = commandOf(segment)
-    if (bareHead(name) !== "xargs") continue
-    const { start, replacement, help } = xargsInfo(args)
-    if (help) continue
-    const child = args.slice(start)
-    if (child.length === 0) return true
-    if (replacement !== null) {
-      if (launcherTemplateExecutes(child, (token) => token.includes(replacement))) return true
-    } else {
-      const kind = childKind(child[0]!)
-      if (kind === "rm" || kind === "other") continue
-      if (launcherStreamExecutes(child, kind)) return true
+  const launches = (segment: string) => bareHead(commandOf(segment).name) === "xargs"
+  for (const segment of segments(command)) if (launches(segment) && xargsWordsDynamic(commandOf(segment).args, true)) return true
+  for (const segment of launcherSegments(command)) if (launches(segment) && xargsWordsDynamic(commandOf(withoutWrittenRedirections(segment)).args, false)) return true
+  return false
+}
+
+/** One reading of `parallelDynamic`. */
+function parallelWordsDynamic(segment: string, args: readonly string[]): boolean {
+  // Executable Perl expression (`{= … =}`): not checkable.
+  if (/\{=/.test(segment) && /=\}/.test(segment)) return true
+  // Redefined marker, column/argument separator, exported environment: not checkable.
+  if (
+    args.some(
+      (arg) =>
+        arg === "--rpl" ||
+        arg.startsWith("--rpl=") ||
+        arg === "--arg-sep" ||
+        arg === "--arg-file-sep" ||
+        arg === "--colsep" ||
+        arg.startsWith("--colsep=") ||
+        arg === "--env" ||
+        arg.startsWith("--env="),
+    )
+  )
+    return true
+  // Options that redefine the replacement string: detection no longer sees it.
+  if (args.some(parallelRedefinesMarker)) return true
+  // Several value groups (`::: a ::: b`): not checkable.
+  if ((segment.match(/:::/g) ?? []).length > 1) return true
+  const info = parallelInfo(args)
+  if (info.safe) return false
+  if (info.template.length === 0) {
+    // Empty template: the values (or the input) are the executed commands.
+    if (info.readsCommands) return true
+    if (info.hasMarker) {
+      // Argument file (`::::`): invisible commands.
+      if (info.markerToken === "::::" || info.markerToken === "::::+") return true
+      const values = args.slice(info.markerIndex + 1).filter((value) => !PARALLEL_MARKER.test(value))
+      if (values.some((value) => startsWithVariable(value) || isNonLiteralSource(value))) return true
     }
+    return false
+  }
+  if (info.hasPlaceholder) {
+    // `launcherTemplateExecutes` first spots the template in executable position, then rules out rm/other.
+    if (launcherTemplateExecutes(info.template, hasParallelPlaceholder)) return true
+  } else {
+    // Without a `{}` template, the input (marker or pipe) is added as an argument.
+    const kind = childKind(info.template[0]!)
+    if (kind === "rm" || kind === "other") return false
+    if (launcherStreamExecutes(info.template, kind)) return true
   }
   return false
 }
@@ -1961,56 +2047,13 @@ function xargsDynamic(command: string): boolean {
 /**
  * Dynamic execution through the parallel wrapper: executable expression or redefined marker (ask
  * by default), commands read from the input, marker values becoming commands, template in the executable
- * source, or added input that can become the source. One pass per segment.
+ * source, or added input that can become the source. Two readings whose asks add up: the words as written, and without
+ * the redirections (`parallel -a f sh >x`, as `parallel -a f sh`). One pass per segment.
  */
 function parallelDynamic(command: string): boolean {
-  for (const segment of segments(command)) {
-    const { name, args } = commandOf(segment)
-    if (bareHead(name) !== "parallel") continue
-    // Executable Perl expression (`{= … =}`): not checkable.
-    if (/\{=/.test(segment) && /=\}/.test(segment)) return true
-    // Redefined marker, column/argument separator, exported environment: not checkable.
-    if (
-      args.some(
-        (arg) =>
-          arg === "--rpl" ||
-          arg.startsWith("--rpl=") ||
-          arg === "--arg-sep" ||
-          arg === "--arg-file-sep" ||
-          arg === "--colsep" ||
-          arg.startsWith("--colsep=") ||
-          arg === "--env" ||
-          arg.startsWith("--env="),
-      )
-    )
-      return true
-    // Options that redefine the replacement string: detection no longer sees it.
-    if (args.some(parallelRedefinesMarker)) return true
-    // Several value groups (`::: a ::: b`): not checkable.
-    if ((segment.match(/:::/g) ?? []).length > 1) return true
-    const info = parallelInfo(args)
-    if (info.safe) continue
-    if (info.template.length === 0) {
-      // Empty template: the values (or the input) are the executed commands.
-      if (info.readsCommands) return true
-      if (info.hasMarker) {
-        // Argument file (`::::`): invisible commands.
-        if (info.markerToken === "::::" || info.markerToken === "::::+") return true
-        const values = args.slice(info.markerIndex + 1).filter((value) => !PARALLEL_MARKER.test(value))
-        if (values.some((value) => startsWithVariable(value) || isNonLiteralSource(value))) return true
-      }
-      continue
-    }
-    if (info.hasPlaceholder) {
-      // `launcherTemplateExecutes` first spots the template in executable position, then rules out rm/other.
-      if (launcherTemplateExecutes(info.template, hasParallelPlaceholder)) return true
-    } else {
-      // Without a `{}` template, the input (marker or pipe) is added as an argument.
-      const kind = childKind(info.template[0]!)
-      if (kind === "rm" || kind === "other") continue
-      if (launcherStreamExecutes(info.template, kind)) return true
-    }
-  }
+  const launches = (segment: string) => bareHead(commandOf(segment).name) === "parallel"
+  for (const segment of segments(command)) if (launches(segment) && parallelWordsDynamic(segment, commandOf(segment).args)) return true
+  for (const segment of launcherSegments(command)) if (launches(segment) && parallelWordsDynamic(segment, commandOf(withoutWrittenRedirections(segment)).args)) return true
   return false
 }
 
@@ -5372,6 +5415,181 @@ function commandWordView(command: string, levels = 0): { view: string; flag?: st
   return { view: changed ? out + text.slice(cursor) : command, flag }
 }
 
+const UNCLOSED_WORD = /[^;&|\n]*/y
+const COMPUTED_TARGET = /[\s(`]/
+/** A program whose own program comes behind its words, written anywhere among them (`find . -exec cmd`, `xargs -n1 cmd`). */
+const LATER_PROGRAM = new RegExp(`^(?:find|${WRAPPERS})$`)
+/** Substitutions inside each other read by `movedRedirections`; deeper, only `redirectionAtHead` looks at them. */
+const MAX_MOVED_LEVELS = 16
+/** What ends a simple command for `redirectionAtHead`, `&` of a redirection and `(` of a process substitution apart. */
+const COMMAND_END = /(?<![<>])&(?!>)|[;|()`\n]/
+const PROCESS_SUBSTITUTION = /[<>]\(/g
+const CONTINUED_LINE = /\\\n/g
+const LOOSE_QUOTES = /["'\\]/g
+/** An escape or a quoted string, for `redirectionAtHead`. */
+const QUOTED_TEXT = /\\[^]|"[^"\\]*(?:\\[^][^"\\]*)*"|'[^']*'/g
+/** A redirection glued to the word before it (`sudo>x`), for `redirectionAtHead`. */
+const GLUED_REDIRECTION = /(?<=[^\s<>&\d])(?=&?[<>])/g
+const SHELL_SYNTAX = /[;&|()<>`\n]/
+const EXPANDED_TEXT = /^".*[$`]/s
+
+/**
+ * Does a redirection stand before the program of a simple command of this text? For text past the reading of
+ * `movedRedirections`: a single linear pass over the bare words, with a word in pieces read joined. Quoted syntax is text,
+ * except in double quotes with an expansion, which may hold commands (`"$(>x cmd)"`). `flag` of that reading only if this
+ * holds: text without such a redirection stays as it is.
+ */
+function redirectionAtHead(text: string): boolean {
+  return text
+    .replace(CONTINUED_LINE, " ")
+    .replace(QUOTED_TEXT, (quoted) => (SHELL_SYNTAX.test(quoted) && !EXPANDED_TEXT.test(quoted) ? "''" : quoted))
+    .replace(PROCESS_SUBSTITUTION, "(")
+    .split(COMMAND_END)
+    .some((piece) => {
+      const state = {}
+      let skip = 0
+      for (const [word] of piece.replace(GLUED_REDIRECTION, " ").matchAll(/\S+/g)) {
+        if (stickyEnd(REDIRECTION_OPERATOR, word, 0) > 0) return true
+        if (skip > 0) skip--
+        else {
+          const step = headStep(word.replace(LOOSE_QUOTES, ""), state)
+          if (step <= 0) return false
+          skip = step - 1
+        }
+      }
+      return false
+    })
+}
+
+/**
+ * View where the redirections written before the program of a simple command (`>f tee /dev/sda`, `sudo 2>&1 -u bob ls`,
+ * `A=1 <<<x sh`), with their targets, stand at the end of that command instead, where the shell reads them the same way:
+ * a rule never has to look for the program behind them. On the view without data except shell re-entry, which the move
+ * itself may show (`<<E sh`): then read again with the heredoc bodies. Two views if an input has a target with blanks or a
+ * substitution: behind the program, for the rules on what a shell reads, and on a line of its own, for the rules on the
+ * words of the program. No view if nothing moves. `flag`: a redirection before a program stayed unread, past the budget
+ * or the levels of that reading.
+ */
+function redirectionsBehind(command: string): { views: string[]; flag?: string } {
+  if (!/[<>]/.test(command)) return { views: [] }
+  const data = withoutData(command)
+  const text = data !== command && !reentersShell(data) ? data : command
+  const reading = (inputsApart: boolean) => {
+    const read = movedRedirections(text, inputsApart)
+    return text !== command && read.moved && reentersShell(read.view) ? movedRedirections(command, inputsApart) : read
+  }
+  const read = reading(false)
+  const views = !read.moved ? [] : read.computedInput ? [read.view, reading(true).view] : [read.view]
+  return { views, ...(read.unread ? { flag: UNDETERMINED_WORD_REASON } : {}) }
+}
+
+/**
+ * The reading of `redirectionsBehind`: every simple command by words (`shellEnd`, comments skipped), inside substitutions
+ * too, so quoted text stays as it is; a redirection with no word after it does not count as `moved`. `unread`: what the
+ * budget or `MAX_MOVED_LEVELS` left unread holds a redirection before a program (`redirectionAtHead`). Linear cost: each
+ * level of substitution rereads its text, a `(` left open is tried once, and the budget pays for all the levels. Behind
+ * `find`, `xargs` and the other launchers of `WRAPPER_WORD`, every redirection moves, since their program comes later.
+ * `computedInput`: an input with blanks or a substitution in its target stands behind the program, or on a line of its
+ * own with `inputsApart`.
+ */
+function movedRedirections(text: string, inputsApart: boolean): { view: string; moved: boolean; unread: boolean; computedInput: boolean } {
+  const budget = { left: (MAX_MOVED_LEVELS + 8) * text.length + 1024 }
+  const lines: string[] = []
+  let [moved, deep, unclosed, computedInput] = [false, false, -1, false]
+  let spentAt: number | undefined
+  /** The word at `i`, as `shellEnd` reads it, or a process substitution; `written`: with the view of its substitutions. */
+  const wordAt = (i: number, to: number, level: number) => {
+    const subs: Array<readonly [number, number]> = []
+    const substitution = /[<>]/.test(text[i] ?? "") && text[i + 1] === "("
+    const end = substitution ? shellEnd(text, i + 1, to, budget, true) : shellEnd(text, i, to, budget, false, subs)
+    // Glued to a word, a `(` stays in it (`A=(a b)`, `f()`, `awk {print($1)}`).
+    let glued = -1
+    if (end > i && text[end] === "(" && to !== unclosed) {
+      glued = shellEnd(text, end, to, budget, true)
+      if (glued < 0) unclosed = to
+    }
+    if (budget.left <= 0) spentAt ??= i
+    const stop = Math.min(glued >= 0 ? glued : end < 0 ? stickyEnd(UNCLOSED_WORD, text, i) : end, to)
+    if (substitution && stop > i + 2) subs.push([i + 2, Math.max(text.lastIndexOf(")", stop - 1), i + 2)])
+    let [written, at] = ["", i]
+    for (const [start, close] of subs) {
+      const body = text.slice(start, close)
+      const read = /[<>]/.test(body) && level < MAX_MOVED_LEVELS
+      deep ||= !read && redirectionAtHead(body)
+      ;[written, at] = [written + text.slice(at, start) + (read ? scan(start, close, level + 1) : body), close]
+    }
+    return { stop, literal: subs.length ? undefined : dequoteWord(text, i, stop), written: written + text.slice(at, stop) }
+  }
+  const scan = (from: number, to: number, level: number): string => {
+    let [out, cursor, inputs, held, pending, words, head, launcher, skip, i] = ["", from, "", "", false, false, true, false, 0, from]
+    let [xargsWords, firstLine, state] = [undefined as string[] | undefined, lines.length, {}]
+    const copy = (start: number, stop: number, written: string) => {
+      ;[out, cursor] = [out + text.slice(cursor, start) + written, stop]
+    }
+    const endCommand = (at: number) => {
+      moved ||= words
+      // Behind `xargs` alone a target goes back on its line: on a line of its own it would make the form that asks (`xargsDynamic`).
+      if (xargsWords && xargsInfo(xargsWords).start >= xargsWords.length) held += lines.splice(firstLine).join("")
+      copy(at, at, `${inputs}${held}${text[at] === "#" ? " " : ""}`)
+      ;[inputs, held, pending, words, head, launcher, skip, state] = ["", "", false, false, true, false, 0, {}]
+      ;[xargsWords, firstLine] = [undefined, lines.length]
+    }
+    while (i < to && budget.left > 0) {
+      const c = text[i]!
+      const substitution = (c === "<" || c === ">") && text[i + 1] === "("
+      const operator = /[\d{&<>]/.test(c) && !substitution ? stickyEnd(REDIRECTION_OPERATOR, text, i) : i
+      if (operator > i) {
+        const start = stickyEnd(WORD_GAP, text, operator)
+        const { stop, written } = wordAt(start, to, level)
+        if (head || launcher) {
+          // Glued to the word before it (`sudo>x ls`), which must not join the next one.
+          copy(i, stickyEnd(WORD_GAP, text, stop), i > 0 && /\S/.test(text[i - 1]!) ? " " : "")
+          pending = true
+          const redirection = ` ${text.slice(i, start)}${written}`
+          const computed = COMPUTED_TARGET.test(written)
+          const input = text.slice(i, operator).includes("<")
+          computedInput ||= computed && input
+          // Input first: a reader may end at a descriptor (`bash 2>&1 < $F`). A target with blanks or a substitution would
+          // stop the readers of the last word: an output goes to a line of its own, an input behind the program or there.
+          if (computed && (!input || inputsApart)) lines.push(redirection)
+          else if (!input) held += redirection
+          else if (computed) inputs += redirection
+          else held = `${redirection}${held}`
+        } else copy(start, stop, written)
+        i = Math.max(stop, operator)
+      } else if (/[;&|\n()]/.test(c)) {
+        // Before a group the shell refuses a redirection, but it may stand for what the group runs.
+        if (c !== "(" || !head || !pending) endCommand(i)
+        i++
+      } else if (/\s/.test(c)) i++
+      else if (c === "\\" && text[i + 1] === "\n") i += 2
+      else if (c === "#" && (i === 0 || COMMENT_BEFORE.test(text[i - 1]!))) {
+        endCommand(i)
+        i = Math.min(text.indexOf("\n", i) >>> 0, to)
+      } else {
+        const { stop, literal, written } = wordAt(i, to, level)
+        words ||= pending
+        if (literal === "{") head = true
+        else if (head && skip > 0) skip--
+        else if (head) {
+          const step = substitution || literal === undefined ? 0 : headStep(literal, state)
+          ;[head, skip] = [step > 0, Math.max(step - 1, 0)]
+          const program = step === 0 && literal !== undefined ? commandName(literal) : ""
+          launcher = LATER_PROGRAM.test(program)
+          if (program === "xargs") xargsWords = []
+        } else xargsWords?.push(literal ?? written)
+        copy(i, stop, head ? written : `${written}${inputs}`)
+        if (!head) inputs = ""
+        i = Math.max(stop, i + 1)
+      }
+    }
+    endCommand(to)
+    return out
+  }
+  const view = scan(0, text.length, 0)
+  return { view: [view, ...lines].join("\n"), moved, computedInput, unread: deep || (spentAt !== undefined && redirectionAtHead(text.slice(spentAt))) }
+}
+
 /** In the value of a piece of a word: the word is not a word once read bare, so it stays as it is. */
 const NOT_BARE_WORD = /[\s;&|()<>]/
 /** In the value of a piece of a word: bare, it would mean something else (expansion, joker, `~`, comment), so that piece stays written. */
@@ -5443,7 +5661,7 @@ const SPLIT_OPTION = /^(?:-[iv0]*S|--s[a-z-]*(?:=|$))/
 const SPLIT_HINT = /-[iv0"'\\$]*S|-["'\\$]*-["'\\$]*s|\$'[^']*\\/
 const BLANKS = /\s*/y
 /** Redirection between `env` and its options: the shell takes it away (`env 2>/dev/null -S…`). */
-const REDIRECTION_OPERATOR = /\d*(?:&>>?|[<>]{1,3}[&|]?)/y
+const REDIRECTION_OPERATOR = /(?:\d*|\{[A-Za-z_]\w*\})(?:&>>?|<<-|[<>]{1,3}[&|]?)/y
 const OPTION_START = /["'\\]*-/y
 /** Strings of `env -S` inside each other read at most this many times; deeper, `UNSTABLE_SPLIT`. */
 const MAX_SPLIT_PASSES = 3
@@ -5558,18 +5776,35 @@ const assignmentWord = (token: string) => assignedName(token, 0, {}) > 0
 /** Option of `env` whose value is the next word, grouped behind flags (`-iu V`) or abbreviated (`--un V`). */
 const envTakesValue = (token: string) => /^-[iv0]*[uCa]$/.test(token) || (!token.includes("=") && ["unset", "chdir", "argv0"].some((name) => isLongOption(token, name)))
 
+/**
+ * One word before the program of a simple command, read as `commandOf` reads it: how many words it takes (the value of a
+ * wrapper's option counts), 0 if it is the program, -1 for `command -v`. `state`: the wrapper being read.
+ */
+function headStep(token: string, state: { wrapper?: string | undefined }): number {
+  if (GROUPING_WORDS.has(token) || assignmentWord(token)) return 1
+  if (Object.hasOwn(PREFIX_OPTIONS, commandName(token))) {
+    state.wrapper = commandName(token)
+    return 1
+  }
+  const { wrapper } = state
+  if (wrapper === "command" && /^-[a-zA-Z]*[vV]$/.test(token)) return -1
+  if (wrapper && token.startsWith("-") && (token !== "-" || wrapper === "env")) return PREFIX_OPTIONS[wrapper]!.has(token) || (wrapper === "env" && envTakesValue(token)) ? 2 : 1
+  if (wrapper === "timeout" && TIMEOUT_DURATION.test(token)) {
+    state.wrapper = undefined
+    return 1
+  }
+  return 0
+}
+
 /** Indexes of the program a simple command launches behind its structural words, assignments and wrappers (`commandOf`), -1 for `command -v`. */
 function launchedWord(literal: (index: number) => string | undefined, from: number): number {
-  let wrapper: string | undefined
+  const state = {}
   for (let i = from; ; ) {
     const token = literal(i)
     if (token === undefined) return i
-    if (GROUPING_WORDS.has(token) || assignmentWord(token)) i++
-    else if (Object.hasOwn(PREFIX_OPTIONS, commandName(token))) [wrapper, i] = [commandName(token), i + 1]
-    else if (wrapper === "command" && /^-[a-zA-Z]*[vV]$/.test(token)) return -1
-    else if (wrapper && token.startsWith("-") && (token !== "-" || wrapper === "env")) i += PREFIX_OPTIONS[wrapper]!.has(token) || (wrapper === "env" && envTakesValue(token)) ? 2 : 1
-    else if (wrapper === "timeout" && TIMEOUT_DURATION.test(token)) [wrapper, i] = [undefined, i + 1]
-    else return i
+    const step = headStep(token, state)
+    if (step <= 0) return step < 0 ? -1 : i
+    i += step
   }
 }
 
@@ -5640,14 +5875,14 @@ function codeIsClosed(code: string): boolean {
 }
 
 /**
- * The codes of the shells a command launches (`sh -c`, `bash -lc`, `-e -c --`…), one level, as the views to read: the
- * shell runs each code apart, so only codes that stop cleanly (`codeIsClosed`) are joined by lines, one view; any other
+ * The codes of the shells a command launches (`sh -c`, `bash -lc`, `-e -c --`…), one level. The shell runs each code
+ * apart, so only codes that stop cleanly (`codeIsClosed`, `closed`) can be joined by lines, one view; any other (`open`)
  * would swallow what follows it and is a view of its own. A scan by words (`shellEnd`) over the command without
  * heredoc bodies: the quoted text of an argument, read as a single word, stays an argument (`echo 'bash -c "x"'`), and the
  * substitutions of a word are read as commands, bounded by `MAX_SHELL_LEVELS`. `unread`: a substitution deeper than that
  * holds a `-c`, or the reading budget ran out.
  */
-function shellCodeViews(command: string): { views: string[]; unread: boolean } {
+function shellCodeViews(command: string): { closed: string[]; open: string[]; unread: boolean } {
   const text = command.includes("<<") && heredocsAreReal(command) ? withoutHeredocBodies(command, false, true) : command
   const budget = { left: 8 * text.length + 1024 }
   const codes: string[] = []
@@ -5670,7 +5905,7 @@ function shellCodeViews(command: string): { views: string[]; unread: boolean } {
     }
     for (let i = from; i < to && budget.left > 0; ) {
       const c = text[i]!
-      const operator = c === "&" || c === "<" || c === ">" ? stickyEnd(REDIRECTION_OPERATOR, text, i) : i
+      const operator = c === "&" || c === "<" || c === ">" || c === "{" ? stickyEnd(REDIRECTION_OPERATOR, text, i) : i
       if (operator > i) [target, i] = [true, operator]
       else if (/[;&|\n(){]/.test(c)) {
         flush()
@@ -5692,7 +5927,7 @@ function shellCodeViews(command: string): { views: string[]; unread: boolean } {
   }
   const [closed, open]: string[][] = [[], []]
   for (const code of codes) (codeIsClosed(code) ? closed : open).push(code)
-  return { views: [...(closed.length ? [closed.join("\n")] : []), ...open], unread }
+  return { closed, open, unread }
 }
 
 /** Programs that print a file as it is, the bytes of a document or an image included. */
@@ -5815,30 +6050,49 @@ function printsRawFile(command: string, names: (file: string) => boolean): boole
 interface CodeReading {
   reads: number
   readonly held: Waiver[]
+  /** The reading of a code that only a view of the command shows: its own `MAX_SHELL_READS`, also for what that code holds. */
+  readonly behind?: CodeReading
+}
+
+function newReading(): CodeReading {
+  const held: Waiver[] = []
+  return { reads: MAX_SHELL_READS, held, behind: { reads: MAX_SHELL_READS, held } }
 }
 
 /**
- * Finding of the code of the `-c` of the shells a command launches (`shellCodeViews`): each view read as a command by the
+ * Finding of the code of the `-c` of the shells a command launches (`shellCodeViews`), from each of its `commands`, the
+ * texts of `viewsFinding`, the first being the command as written: each view read as a command by the
  * whole composition of the views, under the same context, to `MAX_SHELL_LEVELS`, the strongest kept (`strength`). Deeper,
  * past `MAX_SHELL_READS` for the whole command, or not read to its end: an ask never left to the decision model
  * (`UNSTABLE_SHELL_CODE`). A finding lifted inside a code is only held: another view may still ask for it (`shellFinding`).
  */
-function shellCodeFinding(command: string, ctx: ShellRuleContext, level: number, reading: CodeReading): Finding | undefined {
-  if (!SHELL_CODE_HINT.test(command)) return undefined
-  const { views, unread } = shellCodeViews(command)
-  let unfinished = unread
+function shellCodeFinding(commands: ReadonlySet<string>, ctx: ShellRuleContext, level: number, reading: CodeReading): Finding | undefined {
+  const [first, ...others] = [...commands].map((command) => (SHELL_CODE_HINT.test(command) ? shellCodeViews(command) : { closed: [], open: [], unread: false }))
+  if (!first) return undefined
+  // The first text is read as if alone, on the bound of `reading`, so what the others show never takes a reading from it.
+  const seen = new Set([...first.closed, ...first.open])
+  const added = (codes: readonly string[]) => codes.filter((code) => !seen.has(code))
+  const [closed, open]: string[][] = [[], []]
+  for (const text of others) {
+    closed.push(...added(text.closed))
+    open.push(...added(text.open))
+    for (const code of [...text.closed, ...text.open]) seen.add(code)
+  }
+  const viewsOf = (codes: { closed: readonly string[]; open: readonly string[] }) => [...(codes.closed.length ? [codes.closed.join("\n")] : []), ...codes.open]
+  let unfinished = first.unread || others.some((text) => text.unread)
   let found: Finding | undefined
   const inner: ShellRuleContext = { ...ctx, waived: (waiver) => reading.held.push(waiver) }
-  for (const view of views) {
-    if (level >= MAX_SHELL_LEVELS || reading.reads <= 0) {
-      unfinished = true
-      break
+  for (const [views, bound] of [[viewsOf(first), reading], [viewsOf({ closed, open }), reading.behind ?? reading]] as const)
+    for (const view of views) {
+      if (level >= MAX_SHELL_LEVELS || bound.reads <= 0) {
+        unfinished = true
+        break
+      }
+      bound.reads--
+      const read = viewsFinding(view, inner, level + 1, bound)
+      if (strength(read) > strength(found)) found = read
+      if (found?.verdict === "deny") return found
     }
-    reading.reads--
-    const added = viewsFinding(view, inner, level + 1, reading)
-    if (strength(added) > strength(found)) found = added
-    if (found?.verdict === "deny") return found
-  }
   const unstable = unfinished ? hardened(UNSTABLE_SHELL_CODE, ctx.active) : undefined
   return strength(unstable) > strength(found) ? unstable : found
 }
@@ -5847,41 +6101,44 @@ function shellCodeFinding(command: string, ctx: ShellRuleContext, level: number,
  * Shell finding: finding of the rules (`priorShellFinding`, kept word for word), then, without a deny and if the cost guard
  * allows it (`layerGuard`), layer of indirectly designated devices (`deviceLayer`). The strongest wins
  * (`strength`); at equal strength, the existing finding is returned as is. Then the same examination of the view without leading
- * assignments (`assignedFinding`), and of the view of the word in command position reduced to its literal value (`commandWordView`,
- * judged additionally; at equal verdict, the original finding is kept with its mark), then the same examination, once
+ * assignments (`assignedFinding`), of the view of the word in command position reduced to its literal value (`commandWordView`,
+ * judged additionally; at equal verdict, the original finding is kept with its mark), and of the view with the redirections
+ * written before a program behind it (`redirectionsBehind`), then the same examination, once
  * and without a new joining, of the command with the lines the shell continues joined (`joinedLines`) and the strings of
  * `env -S` read as words (`splitStrings`), judged additionally (linear cost). A view that a new reading would still change
  * (reading not stable), or a string of `env -S` not read to its end: ask (`UNSTABLE_JOIN`, `UNSTABLE_SPLIT`). Internal error of these layers: findings already obtained kept, prudent ask added
  * (`ANALYSIS_FAILED`), in its own place for the joined view. The findings of the joined view, of its unstable reading
  * and of its error come after those of the original view, by `strength` (deny, ask without a mark, ask that the model
  * can decide): at equal strength, the finding of the original view is kept. The code of a shell's `-c`, read on the
- * joined view (`shellCodeFinding`), comes last in the same way; `level`: how many such codes this text is inside.
+ * joined view and on the joined text of each of these redirection views (`shellCodeFinding`), comes last in the same way; `level`: how many such codes this text is inside.
  */
 function viewsFinding(command: string, ctx: ShellRuleContext, level: number, reading: CodeReading): Finding | undefined {
-  const [base, normalized, flag, coded] = viewFindings(command, ctx)
-  if (base?.verdict === "deny") return base
+  const { found: findings, moved = [] } = viewFindings(command, ctx)
+  const severe = mostSevere(findings)
+  if (severe?.verdict === "deny") return severe
   let [continued, unstable, failed]: Array<Finding | undefined> = []
-  let lines = command
+  const texts = new Set<string>()
   try {
-    const { view: joined, unread } = splitStrings(joinedLines(command))
-    lines = joined
-    if (joined !== command) {
-      continued = mostSevere(viewFindings(joined, ctx))
-      const again = joinedLines(joined)
-      if (again !== joined) unstable = hardened(UNSTABLE_JOIN, ctx.active)
-      else {
-        const reread = splitStrings(again)
-        if (unread || reread.unread || reread.view !== joined) unstable = hardened(UNSTABLE_SPLIT, ctx.active)
-      }
-    } else if (unread) unstable = hardened(UNSTABLE_SPLIT, ctx.active)
+    const first = joinedFinding(command, ctx)
+    ;({ continued, unstable } = first)
+    texts.add(first.lines)
+    // A redirection before the program hides the word of `env -S` and the `-c` of a shell from these readings: once more
+    // with it behind, as read by `viewFindings`. An input behind the program may hide them in turn, so every text is read.
+    for (const view of moved) {
+      const behind = joinedFinding(view, ctx)
+      texts.add(behind.lines)
+      continued = strength(behind.continued) > strength(continued) ? behind.continued : continued
+      unstable ??= behind.unstable
+    }
   } catch {
     failed = hardened(ANALYSIS_FAILED, ctx.active)
+    texts.add(command)
   }
   // Findings of the original view first, in their order; an added finding takes the place only if it is stronger.
-  const found = [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), mostSevere([base, normalized, flag, coded]))
+  const found = [continued, unstable, failed].reduce((kept, added) => (strength(added) > strength(kept) ? added : kept), severe)
   if (found?.verdict === "deny") return found
   try {
-    const inner = shellCodeFinding(lines, ctx, level, reading)
+    const inner = shellCodeFinding(texts, ctx, level, reading)
     return strength(inner) > strength(found) ? inner : found
   } catch {
     return strength(found) >= 2 ? found : hardened(ANALYSIS_FAILED, ctx.active)
@@ -5906,11 +6163,11 @@ export function shellFinding(command: string, ctx: ShellRuleContext): Finding | 
 /** `shellFinding`, what the rules lift reported to `ctx.waived` as it happens. */
 function heldShellFinding(command: string, ctx: ShellRuleContext): Finding | undefined {
   ctx = { ...ctx, written: command }
-  const reading: CodeReading = { reads: MAX_SHELL_READS, held: [] }
+  const reading = newReading()
   const found = viewsFinding(command, ctx, 0, reading)
   if (!found) for (const waiver of reading.held) ctx.waived?.(waiver)
   if (found?.verdict !== "deny" || overrideOf(found.rule, ctx.active) !== "ask") return found
-  const other = viewsFinding(command, { ...ctx, active: ctx.active && withoutLowered(ctx.active) }, 0, { reads: MAX_SHELL_READS, held: [] })
+  const other = viewsFinding(command, { ...ctx, active: ctx.active && withoutLowered(ctx.active) }, 0, newReading())
   return other?.verdict === "deny" ? other : { verdict: "ask", rule: found.rule, reason: found.reason }
 }
 
@@ -5969,7 +6226,7 @@ export function scriptCodeFinding(code: string, ctx: ShellRuleContext): Finding 
  * the equivalent shell form of inline interpreter code (`interpreterCodeView`), for `CODE_VIEW_RULES` only. Internal error of one of the latter two:
  * prudent ask in its place (`ANALYSIS_FAILED`), the other's finding kept.
  */
-function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | undefined> {
+function writtenViewFindings(command: string, ctx: ShellRuleContext): Array<Finding | undefined> {
   const base = assignedFinding(command, ctx, layeredShellFinding(command, ctx).finding)
   if (base?.verdict === "deny") return [base]
   let coded: Finding | undefined
@@ -5997,6 +6254,40 @@ function viewFindings(command: string, ctx: ShellRuleContext): Array<Finding | u
       if (head?.verdict === "deny") return [base, head, undefined, coded]
     } catch {}
     return [base, hardened(ANALYSIS_FAILED, ctx.active), undefined, coded]
+  }
+}
+
+/**
+ * The command with the lines the shell continues joined and the strings of `env -S` read as words (`lines`), the findings
+ * of that view if it differs (`continued`), and an ask if a new reading would still change it (`unstable`).
+ */
+function joinedFinding(command: string, ctx: ShellRuleContext): { lines: string; continued?: Finding | undefined; unstable?: Finding | undefined } {
+  const { view: lines, unread } = splitStrings(joinedLines(command))
+  if (lines === command) return { lines, ...(unread ? { unstable: hardened(UNSTABLE_SPLIT, ctx.active) } : {}) }
+  const continued = mostSevere(viewFindings(lines, ctx).found)
+  const again = joinedLines(lines)
+  if (again !== lines) return { lines, continued, unstable: hardened(UNSTABLE_JOIN, ctx.active) }
+  const reread = splitStrings(again)
+  return { lines, continued, ...(unread || reread.unread || reread.view !== lines ? { unstable: hardened(UNSTABLE_SPLIT, ctx.active) } : {}) }
+}
+
+/**
+ * Findings of the command as written (`writtenViewFindings`), then, without a deny, those of the view with the redirections
+ * written before a program behind it (`redirectionsBehind`), and the ask of its flag. Internal error of that view: prudent
+ * ask in its place (`ANALYSIS_FAILED`), the findings of the command kept. `moved`: these views, for the next readings.
+ */
+function viewFindings(command: string, ctx: ShellRuleContext): { found: Array<Finding | undefined>; moved?: string[] | undefined } {
+  const found = writtenViewFindings(command, ctx)
+  if (mostSevere(found)?.verdict === "deny") return { found }
+  try {
+    const { views, flag } = redirectionsBehind(command)
+    const moved = views.filter((view) => view !== command)
+    for (const view of moved) found.push(mostSevere(writtenViewFindings(view, ctx)))
+    if (flag) found.push(hardened({ verdict: "ask", rule: "nested-opencode", reason: flag }, ctx.active))
+    return { found, moved }
+  } catch {
+    found.push(hardened(ANALYSIS_FAILED, ctx.active))
+    return { found }
   }
 }
 

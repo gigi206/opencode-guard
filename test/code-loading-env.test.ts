@@ -104,7 +104,10 @@ describe("environment variables that load code", () => {
   it("witness: the same forms without the append, and without the POSIX mode", () => {
     assert.equal(found("SHELLOPTS=posix ENV=/x bash -i"), ASK)
     assert.equal(found("SHELLOPTS=a SHELLOPTS+=:b ENV=/x bash -i"), "none")
-    assert.equal(found("SHELLOPTS=posix BASH_ENV=/x >log bash -c true"), "none")
+  })
+
+  it("a redirection before the program hides nothing: the form asks as it does without one", () => {
+    assert.equal(found("SHELLOPTS=posix BASH_ENV=/x >log bash -c true"), ASK)
   })
 
   it("export with an append names a startup file too", () => {
