@@ -23,3 +23,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run typecheck
       - run: node --test --test-concurrency=2 test/*.test.ts
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4 # the one in OpenCode 2.2.5, the runtime of the plugin
+      - run: bun test --timeout 120000

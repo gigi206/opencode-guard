@@ -11,6 +11,11 @@
       "matchPackageNames": ["@opencode/plugin"],
       "groupName": "OpenCode plugin API",
       "labels": ["review-guarantees"]
+    },
+    {
+      "description": "Bun follows the version embedded in OpenCode, set by hand in the CI",
+      "matchDepNames": ["bun"],
+      "enabled": false
     }
   ]
 }
