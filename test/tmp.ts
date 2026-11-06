@@ -2,12 +2,13 @@
 // the variable on every call, under Node as under Bun; child processes inherit it), and it is removed on
 // exit. Only this directory, created here, is removed. Node launches one process per test file, Bun a single one for all:
 // the exit handler works for both. Import it first.
-import { chmodSync, lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { chmodSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
-// Absolute path: a test that changes directory does not move the deletion target.
-const root = resolve(mkdtempSync(join(tmpdir(), "guard-tests-")))
+// Absolute path: a test that changes directory does not move the deletion target. Real path: the system's temporary
+// directory can sit behind a link (`/var` on macOS), and the plugin refuses some paths through a link.
+const root = realpathSync(resolve(mkdtempSync(join(tmpdir(), "guard-tests-"))))
 process.env.TMPDIR = root
 
 /** Restores write permission on directories (tests remove it), without following symbolic links. */
