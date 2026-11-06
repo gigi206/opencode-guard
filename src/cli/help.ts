@@ -11,7 +11,11 @@ interface Entry {
   /** Command and arguments; an option of the entry above starts with `--`. */
   readonly usage: string
   readonly text: string
+  /** Verbs of an option shared by several; otherwise it belongs to the command above it. */
+  readonly verbs?: readonly string[]
 }
+
+const SECTION_VERBS = ["rules", "set", "unset"]
 
 const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; readonly entries: readonly Entry[] }> = [
   {
@@ -43,8 +47,8 @@ const GROUPS: ReadonlyArray<{ readonly name: string; readonly detail: string; re
       { usage: "  --path <file>", text: "rules off|reset secret-file-read only: add or remove the file's real path in the rule's exceptions there, the rest of the rule unchanged (top level or --project, never --agent)" },
       { usage: "set <setting> <value>", text: "a policy setting: profile, localAsks, selfProtectionByModel, dangerousCommands, sensitiveFiles, scripts, decisionModel, rememberConfirmations (minutes, 1 to 60); with --project only: redactOutputs, redactPrompt, redactWire, outputCheck, promptCheck" },
       { usage: "unset <setting>", text: "remove that setting there" },
-      { usage: "  --agent <name>", text: "rules <setting>|reset, set, unset: in the section of this agent (main agent, or subagent); never with --path, nor set rememberConfirmations (unset removes a value written there)" },
-      { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)" },
+      { usage: "  --agent <name>", text: "rules <setting>|reset, set, unset: in the section of this agent (main agent, or subagent); never with --path, nor set rememberConfirmations (unset removes a value written there)", verbs: SECTION_VERBS },
+      { usage: "  --project [<dir>]", text: "in the section of this project (default: the git repository of the current directory)", verbs: SECTION_VERBS },
       { usage: "rules add <id>", text: "add one of your rules to rules of the global guard.json (top level only)" },
       { usage: "  --pattern <regex>", text: "required: the regular expression it looks for (in the command, or in the tool's input)" },
       { usage: "  --verdict ask|deny", text: "required: ask for a confirmation, or refuse" },
@@ -81,16 +85,47 @@ const NOTES = [
 
 const COMPLETION = 'completion script for the shell: eval "$(guard completion zsh)" in its startup file'
 
+const OTHERS: readonly Entry[] = [
+  { usage: "completion bash|zsh", text: COMPLETION },
+  { usage: "help [<verb>]", text: "this help, or the lines of one verb (also guard <verb> -h)" },
+]
+
+const verbOf = (entry: Entry) => entry.usage.split(" ")[0]!
+const VERBS = new Set([...GROUPS.flatMap((group) => group.entries), ...OTHERS].filter((entry) => !entry.usage.startsWith(" ")).map(verbOf))
+
+/** The entries of a verb: an option goes with the command above it, unless it names its verbs. */
+function ofVerb(entries: readonly Entry[], verb: string): Entry[] {
+  let owner = ""
+  return entries.filter((entry) => {
+    if (!entry.usage.startsWith(" ")) owner = verbOf(entry)
+    return entry.verbs ? entry.verbs.includes(verb) : owner === verb
+  })
+}
+
+/** What the help shows: everything, or the lines of a known verb. */
+function shown(word: string | undefined) {
+  const verb = word !== undefined && VERBS.has(word) ? word : undefined
+  if (verb === undefined) return { verb, groups: GROUPS, others: OTHERS, notes: NOTES }
+  const groups = GROUPS.map((group) => ({ ...group, entries: ofVerb(group.entries, verb) })).filter((group) => group.entries.length)
+  return { verb, groups, others: ofVerb(OTHERS, verb), notes: groups.some((group) => group.name === "Change") ? NOTES : [] }
+}
+
 const COLUMN = Math.max(...GROUPS.flatMap((group) => group.entries.map((entry) => entry.usage.length))) + 4
 
-export const USAGE = [
-  "Usage: guard <command> [arguments]",
-  ...GROUPS.flatMap((group) => ["", `${group.name} (${group.detail}):`, ...group.entries.map((entry) => `  ${entry.usage.padEnd(COLUMN - 2)}${entry.text}`)]),
-  "  completion bash|zsh".padEnd(COLUMN) + COMPLETION,
-  "  help".padEnd(COLUMN) + "this help",
-  "",
-  ...NOTES,
-].join("\n")
+/** The plain text of the help, of one verb when `word` is a known one. */
+export function helpText(word?: string): string {
+  const { verb, groups, others, notes } = shown(word)
+  const line = (entry: Entry) => `  ${entry.usage.padEnd(COLUMN - 2)}${entry.text}`
+  return [
+    `Usage: guard ${verb ?? "<command>"} [arguments]`,
+    ...groups.flatMap((group) => ["", `${group.name} (${group.detail}):`, ...group.entries.map(line)]),
+    ...(others.length && groups.length === 0 ? [""] : []),
+    ...others.map(line),
+    ...(notes.length ? ["", ...notes] : []),
+  ].join("\n")
+}
+
+export const USAGE = helpText()
 
 /** Words of a usage, colored: the command, its options, the placeholders. */
 function usageSegments(usage: string): Segment[] {
@@ -112,17 +147,17 @@ function row(pretty: Pretty, usage: string, text: string): void {
   for (const line of rowLines(pretty, cells, column, text)) pretty.line(line)
 }
 
-/** `guard help` in a terminal. */
-export function prettyHelp(pretty: Pretty): void {
-  title(pretty, "guard", "the guard plugin's command line: guard <command> [arguments]", "builtins")
-  for (const group of GROUPS) {
+/** `guard help` in a terminal, of one verb when `word` is a known one. */
+export function prettyHelp(pretty: Pretty, word?: string): void {
+  const { verb, groups, others, notes } = shown(word)
+  title(pretty, "guard", `the guard plugin's command line: guard ${verb ?? "<command>"} [arguments]`, "builtins")
+  for (const group of groups) {
     pretty.line([])
     pretty.line([["  "], [group.name, "group"], [`  ${group.detail}`, "dim"]])
     for (const entry of group.entries) row(pretty, entry.usage, entry.text)
   }
-  pretty.line([])
-  row(pretty, "completion bash|zsh", COMPLETION)
-  row(pretty, "help", "this help")
-  pretty.line([])
-  for (const note of NOTES) for (const line of rowLines(pretty, [["  "]], 2, note, "dim")) pretty.line(line)
+  if (others.length) pretty.line([])
+  for (const entry of others) row(pretty, entry.usage, entry.text)
+  if (notes.length) pretty.line([])
+  for (const note of notes) for (const line of rowLines(pretty, [["  "]], 2, note, "dim")) pretty.line(line)
 }

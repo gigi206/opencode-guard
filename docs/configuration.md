@@ -328,7 +328,8 @@ A plugin that OpenCode installed from a Git specifier ([README](../README.md#fro
 | `guard agent off\|on\|set\|unset\|models <agent> …` | what the section of an agent relaxes: see [Relaxing one agent](#settings-by-agent-and-by-project-guardjson) |
 | `guard update` | a plugin installed from a Git specifier: runs `opencode plugin update <specifier>`, relays its output and exit code, and says whether the installed commit changed: see [Updating the plugin](operations.md#updating-the-plugin) |
 | `guard update --check` | only runs `opencode plugin check <specifier>`, and relays its output and exit code |
-| `guard help`, `guard -h`, `guard <verb> -h` | the commands (`--help` too) |
+| `guard help`, `guard -h` | the commands (`--help` too) |
+| `guard <verb> -h`, `guard help <verb>` | the commands of this verb (`--help` too) |
 
 **Exit codes.** `0`: done, or nothing to change (the value was already there, or already absent); `1`: refused or failed, nothing written (the reason is printed on stderr); `2`: usage error (unknown command, option or setting, a name that `rules --explain` or `redaction` does not know, an invalid count for `last`, missing or extra argument, an option that does not go with the command, such as `--path` with another rule or `--agent` with `set rememberConfirmations`), followed by the help on stderr; an unknown rule given to `rules off|ask|deny|model` is refused by the plugin's own warning (`1`). `guard` alone prints the help and exits with `2`, `guard help` with `0`; `guard test` exits with `0` whatever the verdict (allow, ask or deny) and with `1` for a `--tool` input that is not a JSON object; `guard status` exits with `0` whatever the state. `guard update` gives the exit code of `opencode` when it is not `0`.
 

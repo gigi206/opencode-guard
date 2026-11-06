@@ -7,7 +7,7 @@ import { FORMAT_SUMMARIES } from "../secrets/patterns.ts"
 import type { Redactor } from "../secrets/redact.ts"
 import { CONTROL_CHARACTERS } from "../types.ts"
 import { CliError, outputRedactor, PLUGIN_DIR, type CliIo, type Pretty } from "./context.ts"
-import { prettyHelp, USAGE } from "./help.ts"
+import { helpText, prettyHelp, USAGE } from "./help.ts"
 import { DEFAULT_LAST, last, MAX_LAST } from "./last.ts"
 import { explainFormat, isFormat, prettyRedaction, redactionLines } from "./redaction.ts"
 import { customRuleLines, explainRule, prettyBuiltins, prettyCustom, ruleLines, stateHere } from "./rules.ts"
@@ -372,8 +372,9 @@ export function main(argv: readonly string[], terminal: CliIo): number | Promise
   if (command === undefined || command === "help" || isHelp(command) || helpAfter(command, args)) {
     // In a terminal, the colored layout; otherwise the plain text. After a usage error, the plain text on the error output
     // unless both outputs are terminals (a redirected error output never gets colors).
-    if (io.pretty) prettyHelp(io.pretty)
-    else for (const line of USAGE.split("\n")) io.out(line)
+    const word = command === "help" ? args[0] : command
+    if (io.pretty) prettyHelp(io.pretty, word)
+    else for (const line of helpText(word).split("\n")) io.out(line)
     return command === undefined ? 2 : 0
   }
   const failed = (error: unknown) => {

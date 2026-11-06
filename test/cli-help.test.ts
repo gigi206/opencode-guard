@@ -34,19 +34,55 @@ function world(global: Json = {}) {
 const strip = (text: string) => ESCAPES.reduce((acc, escape) => acc.split(escape).join(""), text)
 
 describe("guard help and guard rules <setting> <rule>", () => {
-  it("HL-1b: -h and --help after a verb are the help, colored in a terminal, and leave the rest of a command alone", () => {
+  it("HL-1b: -h and --help after a verb are its help, colored in a terminal, and leave the rest of a command alone", () => {
     const w = world()
-    const colored = w.run(["help"], { width: 100, color: true }).out.join("\n")
+    const full = w.run(["help"], { width: 100, color: true }).out.join("\n")
     for (const verb of ["rules", "redaction", "set", "unset", "show", "last", "status", "test", "completion", "trust"])
       for (const flag of ["-h", "--help"]) {
         const result = w.run([verb, flag], { width: 100, color: true })
         assert.equal(result.code, 0, `${verb} ${flag}`)
-        assert.equal(result.out.join("\n"), colored, `${verb} ${flag}`)
+        assert.equal(result.out.join("\n"), w.run(["help", verb], { width: 100, color: true }).out.join("\n"), `${verb} ${flag}`)
+        assert.ok(result.out.length < w.run(["help"], { width: 100, color: true }).out.length, `${verb} ${flag}`)
         assert.deepEqual(result.err, [], `${verb} ${flag}`)
       }
-    for (const args of [["rules", "off", "-h"], ["redaction", "off", "--help"]]) assert.equal(w.run(args, { width: 100, color: true }).out.join("\n"), colored)
-    assert.equal(w.run(["set", "-h"]).out.join("\n"), USAGE)
+    assert.notEqual(w.run(["rules", "-h"], { width: 100, color: true }).out.join("\n"), full)
+    for (const [args, verb] of [[["rules", "off", "-h"], "rules"], [["redaction", "off", "--help"], "redaction"]] as const)
+      assert.equal(w.run([...args], { width: 100, color: true }).out.join("\n"), w.run(["help", verb], { width: 100, color: true }).out.join("\n"))
     assert.equal(w.run(["rules", "off", "upload", "-h"], { width: 100, color: true }).code, 2)
+  })
+
+  it("HL-1c: the help of a verb gives its commands and options, and nothing of the others", () => {
+    const w = world()
+    const help = (verb: string) => w.run([verb, "-h"]).out.join("\n")
+    assert.match(help("update"), /^Usage: guard update \[arguments\]\n/)
+    assert.match(help("update"), /\n {2}update --check {2,}/)
+    assert.doesNotMatch(help("update"), /\n {2}(rules|set|show|help)\b|guard\.json/)
+    assert.match(help("test"), /\n {4}--model {2,}/)
+    assert.doesNotMatch(help("test"), /--project/)
+    assert.match(help("agent"), /\n {2}agent off <agent> {2,}[^\n]*\n {4}--model <provider\/model> /)
+    assert.match(help("completion"), /\n {2}completion bash\|zsh {2,}/)
+    assert.doesNotMatch(help("completion"), /\n {2}help\b/)
+    assert.match(help("help"), /\n {2}help \[<verb>\] {2,}/)
+  })
+
+  it("HL-1d: an option shared by several verbs comes with each of them, and the Change note with what changes", () => {
+    const w = world()
+    for (const verb of ["rules", "set", "unset"]) {
+      const help = w.run([verb, "-h"]).out.join("\n")
+      assert.match(help, /\n {4}--agent <name> /, verb)
+      assert.match(help, /\n {4}--project \[<dir>\] /, verb)
+      assert.match(help, /write only the global guard\.json/, verb)
+    }
+    assert.doesNotMatch(w.run(["set", "-h"]).out.join("\n"), /\n {4}--(path|pattern) /)
+    assert.doesNotMatch(w.run(["status", "-h"]).out.join("\n"), /write only the global guard\.json/)
+  })
+
+  it("witness: HL-1e: the whole help without a known verb, and every line of it in some verb's help", () => {
+    const w = world()
+    for (const args of [["-h"], ["--help"], ["help"], ["help", "nothing"], ["nothing", "-h"]]) assert.equal(w.run(args).out.join("\n"), USAGE, args.join(" "))
+    const verbs = ["rules", "redaction", "show", "settings", "last", "status", "test", "set", "unset", "agent", "trust", "untrust", "update", "completion", "help"]
+    const seen = new Set(verbs.flatMap((verb) => w.run(["help", verb]).out))
+    for (const line of USAGE.split("\n")) if (line.startsWith("  ")) assert.ok(seen.has(line), line)
   })
 
   it("HL-1: help is the plain text outside a terminal, the same words in color in one, and plain after a usage error", () => {
