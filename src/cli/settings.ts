@@ -5,7 +5,7 @@
 // such an entry has a `shown` that gives only its state. Options merged from a project's opencode.json are not seen.
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
-import { DEFAULT_DECISION, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_TUNING, parseConfig, resolveVersion, type GuardConfig } from "../config.ts"
+import { DEFAULT_DECISION, DEFAULT_OUTPUT_CHECK, DEFAULT_PROMPT_CHECK, DEFAULT_PROMPT_TUNING, parseConfig, resolveVersion, type GuardConfig } from "../config.ts"
 import { guardPaths, readGuardFiles } from "../guard-file.ts"
 import { isRegularFile } from "../real-path.ts"
 import { CliError, readSources, realOrUndefined, serverEnv, type CliIo, type Pretty } from "./context.ts"
@@ -42,6 +42,9 @@ const count = (noun: string) => (value: unknown) => {
 }
 const isSet = (value: unknown) => (value === undefined || value === "" ? "not set" : "set")
 const customized = (value: unknown) => (value ? "custom" : "default")
+// `custom` of a check covers all its settings, the questions are only one of them: they are compared on their own, with the
+// constants `parseConfig` falls back on. Undefined when the check is off.
+const questionsChanged = (check: { readonly questions: object } | undefined, defaults: { readonly questions: object }) => check && JSON.stringify(check.questions) !== JSON.stringify(defaults.questions)
 const feature = (name: keyof GuardConfig["features"], what: string, policy: boolean): SettingEntry => ({
   name,
   type: "boolean",
@@ -127,12 +130,12 @@ export const SETTING_ENTRIES: readonly SettingEntry[] = [
   { name: "outputCheck.threshold", type: "number", range: [0, 1], what: "Stage 1: probability from which a part holds a secret.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.threshold },
   { name: "outputCheck.timeoutMs", type: "integer", range: [100, 60_000], what: "Timeout of one call; a call that fails holds the output for a confirmation.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.timeoutMs },
   { name: "outputCheck.skip", type: "array of strings", what: "Tools whose output is not checked; replaces the default list.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.skip },
-  { name: "outputCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.outputCheck?.custom, shown: customized },
+  { name: "outputCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => questionsChanged(config.outputCheck, DEFAULT_OUTPUT_CHECK), shown: customized },
   ...tuning("outputCheck", Object.keys(DEFAULT_OUTPUT_CHECK.tuning)),
   { name: "promptCheck", type: "boolean or object", values: [["true", "on, set explicitly"], ["false", "off"]], what: "Typed prompts checked by the decision model.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.promptCheck !== undefined },
   { name: "promptCheck.enabled", type: "boolean", what: "false turns the check off, inside the object form.", where: SWITCH_WHERE, relaxing: CHECK_RELAX, read: (config) => config.promptCheck !== undefined },
   { name: "promptCheck.threshold", type: "number", range: [0, 1], what: "Stage 1: probability from which a part holds a secret.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.promptCheck?.threshold },
-  { name: "promptCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => config.promptCheck?.custom, shown: customized },
+  { name: "promptCheck.questions", type: "object", what: "Questions asked to the model.", where: PLUGIN, relaxing: SAME_VALUE, read: (config) => questionsChanged(config.promptCheck, DEFAULT_PROMPT_CHECK), shown: customized },
   ...tuning("promptCheck", Object.keys(DEFAULT_PROMPT_TUNING)),
 ]
 
